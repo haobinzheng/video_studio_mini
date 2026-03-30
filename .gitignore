@@ -1,0 +1,15 @@
+.DS_Store
+
+# Xcode user/build data
+DerivedData/
+.DerivedData/
+.DerivedDataDevice/
+build/
+*.xcuserstate
+xcuserdata/
+
+# Swift caches
+.swift-module-cache/
+
+# App/runtime artifacts
+RenderedVideos/
