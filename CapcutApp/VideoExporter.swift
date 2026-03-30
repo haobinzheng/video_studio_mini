@@ -4,8 +4,8 @@ import UIKit
 struct VideoExporter {
     private let renderSize = CGSize(width: 1080, height: 1920)
     private let frameRate: Int32 = 30
-    private let captionLagCompensation = CMTime(seconds: 0.45, preferredTimescale: 600)
-    private let narrationDurationBias: Double = 1.12
+    private let captionLagCompensation = CMTime(seconds: 0.30, preferredTimescale: 600)
+    private let narrationDurationBias: Double = 2.36
     private let maximumVideoDuration = CMTime(seconds: 300, preferredTimescale: 600)
 
     private struct CaptionSegment {
@@ -16,6 +16,13 @@ struct VideoExporter {
     private struct NarrationTimeline {
         let duration: CMTime
         let captionSegments: [CaptionSegment]
+    }
+
+    private struct CaptionSlice {
+        let text: String
+        let sourceSegmentIndex: Int
+        let weight: Double
+        let terminalPauseWeight: Double
     }
 
     func exportVideo(
@@ -92,12 +99,18 @@ struct VideoExporter {
             func writeNextUtterance() {
                 guard utteranceIndex < utterances.count else {
                     let audioDuration = mediaDuration(for: audioFile)
+                    let estimatedNarrationDuration = CMTime(
+                        seconds: estimatedNarrationSeconds(for: narrationSegments),
+                        preferredTimescale: 600
+                    )
                     let biasedAudioDuration = CMTimeMultiplyByFloat64(audioDuration, multiplier: narrationDurationBias)
-                    let totalDuration = min(max(biasedAudioDuration, CMTime(seconds: 1, preferredTimescale: 600)), maximumVideoDuration)
+                    let totalDuration = min(
+                        max(biasedAudioDuration, estimatedNarrationDuration, CMTime(seconds: 1, preferredTimescale: 600)),
+                        maximumVideoDuration
+                    )
                     let captionSegments = timedCaptionSegments(
                         from: narrationSegments,
-                        totalDuration: totalDuration,
-                        measuredDurations: []
+                        totalDuration: totalDuration
                     )
                     if !finished {
                         finished = true
@@ -345,20 +358,33 @@ struct VideoExporter {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         paragraph.lineBreakMode = .byWordWrapping
-
-        let attributes: [NSAttributedString.Key: Any] = [
-            .font: UIFont.systemFont(ofSize: 52, weight: .semibold),
-            .foregroundColor: UIColor.white,
-            .paragraphStyle: paragraph
-        ]
-
         let maxTextWidth = renderSize.width - 180
-        let measuredText = (caption as NSString).boundingRect(
-            with: CGSize(width: maxTextWidth, height: 220),
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: attributes,
-            context: nil
-        ).integral
+        let maxTextHeight: CGFloat = 360
+        let minimumFontSize: CGFloat = 28
+        var fontSize: CGFloat = 52
+        var measuredText = CGRect.zero
+        var attributes: [NSAttributedString.Key: Any] = [:]
+
+        while fontSize >= minimumFontSize {
+            attributes = [
+                .font: UIFont.systemFont(ofSize: fontSize, weight: .semibold),
+                .foregroundColor: UIColor.white,
+                .paragraphStyle: paragraph
+            ]
+
+            measuredText = (caption as NSString).boundingRect(
+                with: CGSize(width: maxTextWidth, height: maxTextHeight),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: attributes,
+                context: nil
+            ).integral
+
+            if measuredText.height <= maxTextHeight {
+                break
+            }
+
+            fontSize -= 4
+        }
 
         let boxPadding: CGFloat = 28
         let boxRect = CGRect(
@@ -431,33 +457,48 @@ struct VideoExporter {
 
     private func timedCaptionSegments(
         from texts: [String],
-        totalDuration: CMTime,
-        measuredDurations: [CMTime]
+        totalDuration: CMTime
     ) -> [CaptionSegment] {
         guard !texts.isEmpty else { return [] }
 
-        let validDurations = measuredDurations.count == texts.count ? measuredDurations : estimatedDurations(for: texts, totalDuration: totalDuration)
-        let summedDuration = validDurations.reduce(CMTime.zero, +)
-        let scale = summedDuration > .zero ? CMTimeGetSeconds(totalDuration) / CMTimeGetSeconds(summedDuration) : 1.0
+        let slices = makeCaptionSlices(from: texts)
+        guard !slices.isEmpty else { return [] }
 
+        let sourceWeights = sourceSegmentWeights(from: texts)
+        let totalSourceWeight = max(sourceWeights.reduce(0.0, +), 0.1)
+        let totalSeconds = CMTimeGetSeconds(totalDuration)
         var cursor = CMTime.zero
         var segments: [CaptionSegment] = []
 
-        for (index, text) in texts.enumerated() {
-            var duration = validDurations[index]
-            if scale.isFinite, scale > 0 {
-                duration = CMTimeMultiplyByFloat64(duration, multiplier: scale)
-            }
-            if duration <= .zero {
-                duration = CMTime(seconds: max(CMTimeGetSeconds(totalDuration) / Double(texts.count), 0.6), preferredTimescale: 600)
-            }
+        for sourceIndex in texts.indices {
+            let group = slices.filter { $0.sourceSegmentIndex == sourceIndex }
+            guard !group.isEmpty else { continue }
 
-            let timeRange = CMTimeRange(start: cursor, duration: duration)
-            segments.append(CaptionSegment(text: text, timeRange: timeRange))
-            cursor = cursor + duration
+            let sourceBudget = totalSeconds * (sourceWeights[sourceIndex] / totalSourceWeight)
+            let groupWeight = max(group.reduce(0.0) { $0 + $1.weight + $1.terminalPauseWeight }, 0.1)
+
+            for slice in group {
+                let share = (slice.weight + slice.terminalPauseWeight) / groupWeight
+                var duration = CMTime(
+                    seconds: max(sourceBudget * share, minimumCaptionSeconds(for: slice.text)),
+                    preferredTimescale: 600
+                )
+                let remaining = totalDuration - cursor
+                if duration > remaining, remaining > .zero {
+                    duration = remaining
+                }
+
+                let timeRange = CMTimeRange(start: cursor, duration: duration)
+                segments.append(CaptionSegment(text: slice.text, timeRange: timeRange))
+                cursor = cursor + duration
+            }
         }
 
-        if let lastIndex = segments.indices.last, cursor < totalDuration {
+        if segments.isEmpty {
+            return [CaptionSegment(text: texts.joined(separator: " "), timeRange: CMTimeRange(start: .zero, duration: totalDuration))]
+        }
+
+        if let lastIndex = segments.indices.last {
             let last = segments[lastIndex]
             segments[lastIndex] = CaptionSegment(
                 text: last.text,
@@ -468,18 +509,158 @@ struct VideoExporter {
         return segments
     }
 
-    private func estimatedDurations(for texts: [String], totalDuration: CMTime) -> [CMTime] {
-        let totalWeight = max(texts.reduce(0.0) { $0 + estimatedWeight(for: $1) }, 1.0)
-        return texts.map { text in
-            let share = estimatedWeight(for: text) / totalWeight
-            return CMTime(seconds: CMTimeGetSeconds(totalDuration) * share, preferredTimescale: 600)
+    private func splitCaptionText(_ text: String) -> [String] {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return [] }
+
+        let phraseSeparators = CharacterSet(charactersIn: ",，、:：")
+        let phrases = normalized.components(separatedBy: phraseSeparators)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        let sourcePhrases = phrases.isEmpty ? [normalized] : phrases
+        return sourcePhrases.flatMap { phrase in
+            if phrase.contains(" ") {
+                return splitWordPhrase(phrase, maxWords: 4)
+            } else {
+                return splitCharacterPhrase(phrase, maxCharacters: 10)
+            }
         }
     }
 
-    private func estimatedWeight(for text: String) -> Double {
-        let characterWeight = Double(text.count)
-        let punctuationBonus = Double(text.filter { ".,!?;:，。！？；：、".contains($0) }.count) * 2.5
-        return max(characterWeight + punctuationBonus, 1.0)
+    private func splitWordPhrase(_ phrase: String, maxWords: Int) -> [String] {
+        let words = phrase.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard words.count > maxWords else { return [phrase] }
+
+        var chunks: [String] = []
+        var index = 0
+        while index < words.count {
+            let end = min(index + maxWords, words.count)
+            chunks.append(words[index..<end].joined(separator: " "))
+            index = end
+        }
+        return chunks
+    }
+
+    private func splitCharacterPhrase(_ phrase: String, maxCharacters: Int) -> [String] {
+        guard phrase.count > maxCharacters else { return [phrase] }
+
+        var chunks: [String] = []
+        var current = ""
+        for character in phrase {
+            current.append(character)
+            if current.count >= maxCharacters {
+                chunks.append(current)
+                current = ""
+            }
+        }
+
+        if !current.isEmpty {
+            chunks.append(current)
+        }
+
+        return chunks
+    }
+
+    private func makeCaptionSlices(from texts: [String]) -> [CaptionSlice] {
+        texts.enumerated().flatMap { index, text in
+            let chunks = splitCaptionText(text)
+            return chunks.enumerated().map { chunkIndex, chunk in
+                CaptionSlice(
+                    text: chunk,
+                    sourceSegmentIndex: index,
+                    weight: speechWeight(for: chunk),
+                    terminalPauseWeight: chunkIndex == chunks.count - 1 ? terminalPauseWeight(for: text) : 0
+                )
+            }
+        }
+    }
+
+    private func sourceSegmentWeights(from texts: [String]) -> [Double] {
+        texts.map { speechWeight(for: $0) + terminalPauseWeight(for: $0) }
+    }
+
+    private func speechWeight(for text: String) -> Double {
+        if containsCJK(text) {
+            let cjkCharacters = Double(text.filter { isCJK($0) }.count)
+            let latinCharacters = Double(text.filter { $0.isASCII && $0.isLetter }.count)
+            let punctuation = Double(text.filter { "，。、！？；：".contains($0) }.count)
+            return max((cjkCharacters * 1.15) + (latinCharacters * 0.35) + (punctuation * 1.4), 1.0)
+        }
+
+        let words = text.split(whereSeparator: \.isWhitespace)
+        let syllables = Double(words.reduce(0) { $0 + approximateSyllableCount(in: String($1)) })
+        let punctuation = Double(text.filter { ",.!?;:".contains($0) }.count)
+        return max((Double(words.count) * 1.1) + (syllables * 0.55) + (punctuation * 1.6), 1.0)
+    }
+
+    private func estimatedNarrationSeconds(for texts: [String]) -> Double {
+        texts.reduce(0.0) { $0 + estimatedSecondsForSegment($1) }
+    }
+
+    private func estimatedSecondsForSegment(_ text: String) -> Double {
+        if containsCJK(text) {
+            let cjkCharacters = Double(text.filter { isCJK($0) }.count)
+            let punctuation = Double(text.filter { "，。、！？；：".contains($0) }.count)
+            return max((cjkCharacters / 3.6) + (punctuation * 0.34), 0.9)
+        }
+
+        let words = text.split(whereSeparator: \.isWhitespace)
+        let syllables = Double(words.reduce(0) { $0 + approximateSyllableCount(in: String($1)) })
+        let punctuation = Double(text.filter { ",.!?;:".contains($0) }.count)
+        return max((Double(words.count) / 2.25) + (syllables * 0.06) + (punctuation * 0.18), 0.9)
+    }
+
+    private func minimumCaptionSeconds(for text: String) -> Double {
+        containsCJK(text) ? 0.95 : 0.85
+    }
+
+    private func terminalPauseWeight(for text: String) -> Double {
+        guard let last = text.trimmingCharacters(in: .whitespacesAndNewlines).last else { return 0.4 }
+        switch last {
+        case ".", "!", "?", "。", "！", "？":
+            return 2.4
+        case ",", ";", ":", "，", "；", "：", "、":
+            return 1.2
+        default:
+            return 0.4
+        }
+    }
+
+    private func containsCJK(_ text: String) -> Bool {
+        text.contains(where: isCJK)
+    }
+
+    private func isCJK(_ character: Character) -> Bool {
+        character.unicodeScalars.contains { scalar in
+            (0x4E00...0x9FFF).contains(Int(scalar.value)) ||
+            (0x3400...0x4DBF).contains(Int(scalar.value)) ||
+            (0x3040...0x30FF).contains(Int(scalar.value)) ||
+            (0xAC00...0xD7AF).contains(Int(scalar.value))
+        }
+    }
+
+    private func approximateSyllableCount(in word: String) -> Int {
+        let lowered = word.lowercased().trimmingCharacters(in: .punctuationCharacters)
+        guard !lowered.isEmpty else { return 1 }
+
+        let vowels = Set("aeiouy")
+        var count = 0
+        var previousWasVowel = false
+
+        for character in lowered {
+            let isVowel = vowels.contains(character)
+            if isVowel && !previousWasVowel {
+                count += 1
+            }
+            previousWasVowel = isVowel
+        }
+
+        if lowered.hasSuffix("e"), count > 1 {
+            count -= 1
+        }
+
+        return max(count, 1)
     }
 
     enum ExportError: LocalizedError {
