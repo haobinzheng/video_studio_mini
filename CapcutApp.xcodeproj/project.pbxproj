@@ -16,6 +16,8 @@
 		A1B2C3D41E00000700000001 /* SampleMusic/calm_breeze.wav in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00000900000001 /* SampleMusic/calm_breeze.wav */; };
 		A1B2C3D41E00000800000001 /* SampleMusic/city_pop.wav in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001000000001 /* SampleMusic/city_pop.wav */; };
 		A1B2C3D41E00000900000001 /* SampleMusic/piano_moment.wav in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001100000001 /* SampleMusic/piano_moment.wav */; };
+		A1B2C3D41E00001000000001 /* NarrationPreviewBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001200000001 /* NarrationPreviewBuilder.swift */; };
+		A1B2C3D41E00001100000001 /* SubtitleTimelineEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001300000001 /* SubtitleTimelineEngine.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -30,6 +32,8 @@
 		A1B2C3D41D00000900000001 /* SampleMusic/calm_breeze.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = SampleMusic/calm_breeze.wav; sourceTree = "<group>"; };
 		A1B2C3D41D00001000000001 /* SampleMusic/city_pop.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = SampleMusic/city_pop.wav; sourceTree = "<group>"; };
 		A1B2C3D41D00001100000001 /* SampleMusic/piano_moment.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = SampleMusic/piano_moment.wav; sourceTree = "<group>"; };
+		A1B2C3D41D00001200000001 /* NarrationPreviewBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NarrationPreviewBuilder.swift; sourceTree = "<group>"; };
+		A1B2C3D41D00001300000001 /* SubtitleTimelineEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleTimelineEngine.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -58,6 +62,8 @@
 				A1B2C3D41D00000200000001 /* ContentView.swift */,
 				A1B2C3D41D00000300000001 /* AppViewModel.swift */,
 				A1B2C3D41D00000800000001 /* VideoExporter.swift */,
+				A1B2C3D41D00001200000001 /* NarrationPreviewBuilder.swift */,
+				A1B2C3D41D00001300000001 /* SubtitleTimelineEngine.swift */,
 				A1B2C3D41D00000900000001 /* SampleMusic/calm_breeze.wav */,
 				A1B2C3D41D00001000000001 /* SampleMusic/city_pop.wav */,
 				A1B2C3D41D00001100000001 /* SampleMusic/piano_moment.wav */,
@@ -150,6 +156,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1B2C3D41E00000300000001 /* AppViewModel.swift in Sources */,
+				A1B2C3D41E00001000000001 /* NarrationPreviewBuilder.swift in Sources */,
+				A1B2C3D41E00001100000001 /* SubtitleTimelineEngine.swift in Sources */,
 				A1B2C3D41E00000600000001 /* VideoExporter.swift in Sources */,
 				A1B2C3D41E00000200000001 /* ContentView.swift in Sources */,
 				A1B2C3D41E00000100000001 /* CapcutApp.swift in Sources */,

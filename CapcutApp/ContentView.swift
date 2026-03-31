@@ -1,6 +1,7 @@
 import AVKit
 import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct ContentView: View {
     enum StudioStep: String, CaseIterable, Identifiable {
@@ -16,6 +17,7 @@ struct ContentView: View {
     @State private var isMusicImporterPresented = false
     @State private var selectedStep: StudioStep = .narration
     @State private var isVoiceListExpanded = false
+    @State private var isScriptToolsExpanded = false
     @FocusState private var isNarrationFocused: Bool
 
     var body: some View {
@@ -35,7 +37,7 @@ struct ContentView: View {
             .navigationBarTitleDisplayMode(.inline)
             .fileImporter(
                 isPresented: $isMusicImporterPresented,
-                allowedContentTypes: [.audio]
+                allowedContentTypes: [.audio, .mpeg4Audio, .mp3, .wav]
             ) { result in
                 if case let .success(url) = result {
                     viewModel.importMusic(from: url)
@@ -195,7 +197,7 @@ struct ContentView: View {
             Text("2. Text to Speech")
                 .font(.title2.weight(.semibold))
 
-            Text("Type your voiceover script here. The picker prefers Apple Enhanced and Premium voices, then falls back to default voices if Apple does not expose higher-quality ones.")
+            Text("Write your script, pick a voice, then build a seekable preview before exporting the final video.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
@@ -262,64 +264,6 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
 
-            HStack(spacing: 12) {
-                Button {
-                    viewModel.pasteNarrationFromClipboard()
-                } label: {
-                    Label("Paste Replace", systemImage: "doc.on.clipboard")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    viewModel.appendNarrationFromClipboard()
-                } label: {
-                    Label("Paste Append", systemImage: "text.append")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-            }
-
-            HStack(spacing: 12) {
-                Button {
-                    viewModel.clearNarration()
-                } label: {
-                    Label("Clear", systemImage: "xmark.circle")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    viewModel.inspectClipboard()
-                } label: {
-                    Label("Check Clipboard", systemImage: "magnifyingglass")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-            }
-
-            HStack(spacing: 12) {
-                Button {
-                    viewModel.loadSampleNarration()
-                } label: {
-                    Label("Load Sample Script", systemImage: "text.badge.plus")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-
-                Button {
-                    viewModel.copySampleTextToClipboard()
-                } label: {
-                    Label("Copy Paste Test", systemImage: "doc.on.doc")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
-            }
-
-            Text("Clipboard preview: \(viewModel.clipboardPreview)")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-
             Text("Narration length: \(viewModel.narrationText.count) characters")
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -331,18 +275,179 @@ struct ContentView: View {
                 .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .focused($isNarrationFocused)
 
-            Button {
-                viewModel.playNarration()
-            } label: {
-                Label(viewModel.isSpeaking ? "Stop Narration" : "Play Narration", systemImage: viewModel.isSpeaking ? "stop.circle.fill" : "speaker.wave.2.fill")
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.pink)
+            narrationPreviewSection
+            scriptToolsSection
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+    }
+
+    private var narrationPreviewSection: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Preview")
+                        .font(.headline)
+                    Text("Build narration once, then scrub the subtitle timing against the recorded preview audio.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if viewModel.isPreparingNarrationPreview {
+                    ProgressView()
+                        .tint(.purple)
+                }
+            }
+
+            Text(viewModel.narrationPreviewSummary)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            HStack(spacing: 12) {
+                Button {
+                    viewModel.buildNarrationPreview()
+                } label: {
+                    Label(viewModel.isPreparingNarrationPreview ? "Building..." : "Build Preview", systemImage: "waveform.badge.magnifyingglass")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.purple)
+                .disabled(viewModel.isPreparingNarrationPreview)
+
+                Button {
+                    viewModel.toggleNarrationPreviewPlayback()
+                } label: {
+                    Label(viewModel.isNarrationPreviewPlaying ? "Pause" : "Play", systemImage: viewModel.isNarrationPreviewPlaying ? "pause.fill" : "play.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+
+                Button {
+                    viewModel.stopNarrationPreview()
+                } label: {
+                    Label("Stop", systemImage: "stop.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.bordered)
+            }
+
+            if viewModel.narrationPreviewDuration > 0 {
+                HStack {
+                    Label("Preview ready", systemImage: "checkmark.seal.fill")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.green)
+                    Spacer()
+                    Text(viewModel.narrationPreviewMetaLine)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Slider(
+                    value: Binding(
+                        get: { viewModel.narrationPreviewCurrentTime },
+                        set: { viewModel.seekNarrationPreview(to: $0) }
+                    ),
+                    in: 0...max(viewModel.narrationPreviewDuration, 0.1)
+                )
+                .tint(.purple)
+
+                HStack {
+                    Text(formatTime(viewModel.narrationPreviewCurrentTime))
+                    Spacer()
+                    Text(formatTime(viewModel.narrationPreviewDuration))
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Current Caption")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Text(viewModel.narrationPreviewCaption)
+                    .font(.body.weight(.semibold))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(14)
+                    .background(Color.white.opacity(0.85), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+        }
+        .padding(16)
+        .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+
+    private var scriptToolsSection: some View {
+        DisclosureGroup(isExpanded: $isScriptToolsExpanded) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 12) {
+                    Button {
+                        viewModel.pasteNarrationFromClipboard()
+                    } label: {
+                        Label("Paste Replace", systemImage: "doc.on.clipboard")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        viewModel.appendNarrationFromClipboard()
+                    } label: {
+                        Label("Paste Append", systemImage: "text.append")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                HStack(spacing: 12) {
+                    Button {
+                        viewModel.loadSampleNarration()
+                    } label: {
+                        Label("Load Sample Script", systemImage: "text.badge.plus")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+
+                    Button {
+                        viewModel.clearNarration()
+                    } label: {
+                        Label("Clear Script", systemImage: "xmark.circle")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                HStack(spacing: 12) {
+                    Button {
+                        viewModel.playNarration()
+                    } label: {
+                        Label(viewModel.isSpeaking ? "Stop Live Narration" : "Play Live Narration", systemImage: viewModel.isSpeaking ? "stop.circle.fill" : "speaker.wave.2.fill")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.pink)
+
+                    Button {
+                        viewModel.inspectClipboard()
+                    } label: {
+                        Label("Check Clipboard", systemImage: "magnifyingglass")
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                }
+
+                Text("Clipboard preview: \(viewModel.clipboardPreview)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.top, 8)
+        } label: {
+            Text("Script Tools")
+                .font(.subheadline.weight(.semibold))
+        }
+        .padding(16)
+        .background(Color.white.opacity(0.68), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
     private var musicSection: some View {
@@ -497,5 +602,10 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .foregroundStyle(.white)
+    }
+
+    private func formatTime(_ seconds: Double) -> String {
+        let total = max(Int(seconds.rounded(.down)), 0)
+        return String(format: "%d:%02d", total / 60, total % 60)
     }
 }

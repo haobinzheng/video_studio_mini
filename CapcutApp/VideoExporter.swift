@@ -5,7 +5,7 @@ struct VideoExporter {
     private let renderSize = CGSize(width: 1080, height: 1920)
     private let frameRate: Int32 = 30
     private let captionLagCompensation = CMTime(seconds: 0.30, preferredTimescale: 600)
-    private let narrationDurationBias: Double = 2.36
+    private let narrationDurationBias: Double = 1.90
     private let maximumVideoDuration = CMTime(seconds: 300, preferredTimescale: 600)
 
     private struct CaptionSegment {
@@ -13,9 +13,12 @@ struct VideoExporter {
         let timeRange: CMTimeRange
     }
 
+    typealias ExternalCue = NarrationPreviewBuilder.SubtitleCue
+
     private struct NarrationTimeline {
         let duration: CMTime
         let captionSegments: [CaptionSegment]
+        let utteranceAudioURLs: [URL]
     }
 
     private struct CaptionSlice {
@@ -29,21 +32,24 @@ struct VideoExporter {
         images: [UIImage],
         narrationText: String,
         backgroundMusicURL: URL?,
-        voiceIdentifier: String
+        voiceIdentifier: String,
+        externalCues: [ExternalCue] = [],
+        externalNarrationAudioURL: URL? = nil
     ) async throws -> URL {
         guard !images.isEmpty else {
             throw ExportError.noPhotos
         }
 
         let workspace = try makeWorkspace()
-        let narrationURL = workspace.appendingPathComponent("narration.caf")
         let slideshowURL = workspace.appendingPathComponent("slideshow.mov")
         let finalURL = workspace.appendingPathComponent("capcut-mini-video.mov")
 
         let narrationTimeline = try await synthesizeNarrationIfNeeded(
             text: narrationText,
             voiceIdentifier: voiceIdentifier,
-            outputURL: narrationURL
+            workspace: workspace,
+            externalCues: externalCues,
+            externalNarrationAudioURL: externalNarrationAudioURL
         )
         let minimumVisualDuration = CMTime(seconds: max(Double(images.count) * 1.6, 3), preferredTimescale: 600)
         let totalDuration = narrationTimeline.duration > .zero
@@ -58,7 +64,7 @@ struct VideoExporter {
         )
         try await mergeAudioAndVideo(
             videoURL: slideshowURL,
-            narrationURL: narrationTimeline.duration.seconds > 0 ? narrationURL : nil,
+            narrationURLs: narrationTimeline.utteranceAudioURLs,
             backgroundMusicURL: backgroundMusicURL,
             totalDuration: totalDuration,
             outputURL: finalURL
@@ -75,77 +81,109 @@ struct VideoExporter {
     }
 
     @MainActor
-    private func synthesizeNarrationIfNeeded(text: String, voiceIdentifier: String, outputURL: URL) async throws -> NarrationTimeline {
+    private func synthesizeNarrationIfNeeded(
+        text: String,
+        voiceIdentifier: String,
+        workspace: URL,
+        externalCues: [ExternalCue],
+        externalNarrationAudioURL: URL?
+    ) async throws -> NarrationTimeline {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedText.isEmpty else {
-            return NarrationTimeline(duration: .zero, captionSegments: [])
+        guard !trimmedText.isEmpty || !externalCues.isEmpty else {
+            return NarrationTimeline(duration: .zero, captionSegments: [], utteranceAudioURLs: [])
         }
 
+        if let externalNarrationAudioURL, !externalCues.isEmpty {
+            let audioAsset = AVURLAsset(url: externalNarrationAudioURL)
+            let audioDuration = try await audioAsset.load(.duration)
+            let cueDuration = CMTime(seconds: externalCues.map(\.end).max() ?? 0, preferredTimescale: 600)
+            let resolvedDuration = min(max(audioDuration, cueDuration, CMTime(seconds: 1, preferredTimescale: 600)), maximumVideoDuration)
+            return NarrationTimeline(
+                duration: resolvedDuration,
+                captionSegments: captionSegments(from: externalCues),
+                utteranceAudioURLs: [externalNarrationAudioURL]
+            )
+        }
+
+        let narrationSegments = SpeechVoiceLibrary.narrationSegments(from: trimmedText)
+        let utterances = narrationSegments.map {
+            SpeechVoiceLibrary.makeUtterance(from: $0, voiceIdentifier: voiceIdentifier)
+        }
+        var utteranceAudioURLs: [URL] = []
+        var utteranceDurations: [CMTime] = []
+
+        for (index, utterance) in utterances.enumerated() {
+            let utteranceURL = workspace.appendingPathComponent("utterance-\(index).caf")
+            let duration = try await renderUtteranceAudio(utterance, outputURL: utteranceURL)
+            utteranceAudioURLs.append(utteranceURL)
+            utteranceDurations.append(duration)
+        }
+
+        let measuredNarrationDuration = utteranceDurations.reduce(CMTime.zero, +)
+        let estimatedNarrationDuration = CMTime(
+            seconds: estimatedNarrationSeconds(for: narrationSegments),
+            preferredTimescale: 600
+        )
+        let biasedAudioDuration = CMTimeMultiplyByFloat64(measuredNarrationDuration, multiplier: narrationDurationBias)
+        let totalDuration = min(
+            max(biasedAudioDuration, estimatedNarrationDuration, CMTime(seconds: 1, preferredTimescale: 600)),
+            maximumVideoDuration
+        )
+        let captionSegments = externalCues.isEmpty
+            ? timedCaptionSegments(
+                from: narrationSegments,
+                utteranceDurations: utteranceDurations,
+                totalDuration: totalDuration
+            )
+            : captionSegments(from: externalCues)
+        let resolvedDuration = externalCues.isEmpty
+            ? totalDuration
+            : max(totalDuration, CMTime(seconds: externalCues.map(\.end).max() ?? 0, preferredTimescale: 600))
+
+        return NarrationTimeline(
+            duration: resolvedDuration,
+            captionSegments: captionSegments,
+            utteranceAudioURLs: utteranceAudioURLs
+        )
+    }
+
+    @MainActor
+    private func renderUtteranceAudio(_ utterance: AVSpeechUtterance, outputURL: URL) async throws -> CMTime {
         if FileManager.default.fileExists(atPath: outputURL.path) {
             try FileManager.default.removeItem(at: outputURL)
         }
 
         let synthesizer = AVSpeechSynthesizer()
-        let narrationSegments = SpeechVoiceLibrary.narrationSegments(from: trimmedText)
-        let utterances = narrationSegments.map {
-            SpeechVoiceLibrary.makeUtterance(from: $0, voiceIdentifier: voiceIdentifier)
-        }
 
         return try await withCheckedThrowingContinuation { continuation in
             var audioFile: AVAudioFile?
-            var utteranceIndex = 0
             var finished = false
 
-            func writeNextUtterance() {
-                guard utteranceIndex < utterances.count else {
-                    let audioDuration = mediaDuration(for: audioFile)
-                    let estimatedNarrationDuration = CMTime(
-                        seconds: estimatedNarrationSeconds(for: narrationSegments),
-                        preferredTimescale: 600
-                    )
-                    let biasedAudioDuration = CMTimeMultiplyByFloat64(audioDuration, multiplier: narrationDurationBias)
-                    let totalDuration = min(
-                        max(biasedAudioDuration, estimatedNarrationDuration, CMTime(seconds: 1, preferredTimescale: 600)),
-                        maximumVideoDuration
-                    )
-                    let captionSegments = timedCaptionSegments(
-                        from: narrationSegments,
-                        totalDuration: totalDuration
-                    )
-                    if !finished {
-                        finished = true
-                        continuation.resume(returning: NarrationTimeline(duration: totalDuration, captionSegments: captionSegments))
-                    }
-                    return
-                }
+            synthesizer.write(utterance) { buffer in
+                guard let pcmBuffer = buffer as? AVAudioPCMBuffer else { return }
 
-                let utterance = utterances[utteranceIndex]
-                utteranceIndex += 1
-
-                synthesizer.write(utterance) { buffer in
-                    guard let pcmBuffer = buffer as? AVAudioPCMBuffer else { return }
-
-                    do {
-                        if pcmBuffer.frameLength == 0 {
-                            writeNextUtterance()
-                            return
-                        }
-
-                        if audioFile == nil {
-                            audioFile = try AVAudioFile(forWriting: outputURL, settings: pcmBuffer.format.settings)
-                        }
-
-                        try audioFile?.write(from: pcmBuffer)
-                    } catch {
+                do {
+                    if pcmBuffer.frameLength == 0 {
+                        let duration = Self.mediaDuration(for: audioFile)
                         if !finished {
                             finished = true
-                            continuation.resume(throwing: error)
+                            continuation.resume(returning: duration)
                         }
+                        return
+                    }
+
+                    if audioFile == nil {
+                        audioFile = try AVAudioFile(forWriting: outputURL, settings: pcmBuffer.format.settings)
+                    }
+
+                    try audioFile?.write(from: pcmBuffer)
+                } catch {
+                    if !finished {
+                        finished = true
+                        continuation.resume(throwing: error)
                     }
                 }
             }
-
-            writeNextUtterance()
         }
     }
 
@@ -217,7 +255,7 @@ struct VideoExporter {
 
     private func mergeAudioAndVideo(
         videoURL: URL,
-        narrationURL: URL?,
+        narrationURLs: [URL],
         backgroundMusicURL: URL?,
         totalDuration: CMTime,
         outputURL: URL
@@ -240,16 +278,26 @@ struct VideoExporter {
 
         var audioMixParameters: [AVMutableAudioMixInputParameters] = []
 
-        if let narrationURL {
-            let narrationAsset = AVURLAsset(url: narrationURL)
-            if let narrationTrack = try await narrationAsset.loadTracks(withMediaType: .audio).first,
-               let compositionNarrationTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
-                let narrationDuration = try await narrationAsset.load(.duration)
-                try compositionNarrationTrack.insertTimeRange(CMTimeRange(start: .zero, duration: narrationDuration), of: narrationTrack, at: .zero)
-                let narrationParameters = AVMutableAudioMixInputParameters(track: compositionNarrationTrack)
-                narrationParameters.setVolume(1.0, at: .zero)
-                audioMixParameters.append(narrationParameters)
+        if !narrationURLs.isEmpty,
+           let compositionNarrationTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            var narrationCursor = CMTime.zero
+
+            for narrationURL in narrationURLs {
+                let narrationAsset = AVURLAsset(url: narrationURL)
+                if let narrationTrack = try await narrationAsset.loadTracks(withMediaType: .audio).first {
+                    let narrationDuration = try await narrationAsset.load(.duration)
+                    try compositionNarrationTrack.insertTimeRange(
+                        CMTimeRange(start: .zero, duration: narrationDuration),
+                        of: narrationTrack,
+                        at: narrationCursor
+                    )
+                    narrationCursor = narrationCursor + narrationDuration
+                }
             }
+
+            let narrationParameters = AVMutableAudioMixInputParameters(track: compositionNarrationTrack)
+            narrationParameters.setVolume(1.0, at: .zero)
+            audioMixParameters.append(narrationParameters)
         }
 
         if let backgroundMusicURL {
@@ -448,15 +496,30 @@ struct VideoExporter {
         return images[index]
     }
 
-    private func mediaDuration(for audioFile: AVAudioFile?) -> CMTime {
+    private static func mediaDuration(for audioFile: AVAudioFile?) -> CMTime {
         let sampleRate = audioFile?.processingFormat.sampleRate ?? 44_100
         let length = audioFile?.length ?? 0
         let seconds = sampleRate > 0 ? Double(length) / sampleRate : 0
         return CMTime(seconds: seconds, preferredTimescale: 600)
     }
 
+    private func captionSegments(from externalCues: [ExternalCue]) -> [CaptionSegment] {
+        externalCues
+            .sorted { $0.start < $1.start }
+            .map {
+                CaptionSegment(
+                    text: formattedCaptionText($0.text),
+                    timeRange: CMTimeRange(
+                        start: CMTime(seconds: $0.start, preferredTimescale: 600),
+                        end: CMTime(seconds: $0.end, preferredTimescale: 600)
+                    )
+                )
+            }
+    }
+
     private func timedCaptionSegments(
         from texts: [String],
+        utteranceDurations: [CMTime],
         totalDuration: CMTime
     ) -> [CaptionSegment] {
         guard !texts.isEmpty else { return [] }
@@ -474,7 +537,9 @@ struct VideoExporter {
             let group = slices.filter { $0.sourceSegmentIndex == sourceIndex }
             guard !group.isEmpty else { continue }
 
-            let sourceBudget = totalSeconds * (sourceWeights[sourceIndex] / totalSourceWeight)
+            let sourceBudget = sourceIndex < utteranceDurations.count
+                ? CMTimeGetSeconds(utteranceDurations[sourceIndex]) * narrationDurationBias
+                : totalSeconds * (sourceWeights[sourceIndex] / totalSourceWeight)
             let groupWeight = max(group.reduce(0.0) { $0 + $1.weight + $1.terminalPauseWeight }, 0.1)
 
             for slice in group {
@@ -489,13 +554,13 @@ struct VideoExporter {
                 }
 
                 let timeRange = CMTimeRange(start: cursor, duration: duration)
-                segments.append(CaptionSegment(text: slice.text, timeRange: timeRange))
+                segments.append(CaptionSegment(text: formattedCaptionText(slice.text), timeRange: timeRange))
                 cursor = cursor + duration
             }
         }
 
         if segments.isEmpty {
-            return [CaptionSegment(text: texts.joined(separator: " "), timeRange: CMTimeRange(start: .zero, duration: totalDuration))]
+            return [CaptionSegment(text: formattedCaptionText(texts.joined(separator: " ")), timeRange: CMTimeRange(start: .zero, duration: totalDuration))]
         }
 
         if let lastIndex = segments.indices.last {
@@ -510,7 +575,7 @@ struct VideoExporter {
     }
 
     private func splitCaptionText(_ text: String) -> [String] {
-        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = SpeechVoiceLibrary.normalizedCaptionText(text)
         guard !normalized.isEmpty else { return [] }
 
         let phraseSeparators = CharacterSet(charactersIn: ",，、:：")
@@ -521,7 +586,7 @@ struct VideoExporter {
         let sourcePhrases = phrases.isEmpty ? [normalized] : phrases
         return sourcePhrases.flatMap { phrase in
             if phrase.contains(" ") {
-                return splitWordPhrase(phrase, maxWords: 4)
+                return splitWordPhrase(phrase, maxWords: 12)
             } else {
                 return splitCharacterPhrase(phrase, maxCharacters: 10)
             }
@@ -560,6 +625,31 @@ struct VideoExporter {
         }
 
         return chunks
+    }
+
+    private func formattedCaptionText(_ text: String) -> String {
+        let normalizedText = SpeechVoiceLibrary.normalizedCaptionText(text)
+        guard normalizedText.contains(" ") else { return normalizedText }
+
+        let words = normalizedText.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard words.count >= 6 else { return normalizedText }
+
+        var bestIndex = words.count / 2
+        var bestScore = Int.max
+
+        for index in 2..<(words.count - 1) {
+            let left = words[..<index].joined(separator: " ")
+            let right = words[index...].joined(separator: " ")
+            let score = abs(left.count - right.count)
+            if score < bestScore {
+                bestScore = score
+                bestIndex = index
+            }
+        }
+
+        let firstLine = words[..<bestIndex].joined(separator: " ")
+        let secondLine = words[bestIndex...].joined(separator: " ")
+        return "\(firstLine)\n\(secondLine)"
     }
 
     private func makeCaptionSlices(from texts: [String]) -> [CaptionSlice] {

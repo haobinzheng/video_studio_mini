@@ -1,0 +1,281 @@
+# Apple TTS Subtitle Engine with Timeline Scrubbing
+
+## 1. Objective
+
+Build a subtitle engine that:
+
+* Uses Apple TTS to generate speech
+* Captures approximate word timing
+* Supports playback + timeline scrubbing
+* Syncs subtitles with audio
+* Uses only Apple APIs (offline, no external dependencies)
+
+---
+
+## 2. Key Constraint
+
+AVSpeechSynthesizer cannot seek.
+
+Therefore:
+
+* TTS is used ONLY to generate:
+
+  * audio file
+  * timing data
+
+* Playback must use AVAudioPlayer (seekable)
+
+---
+
+## 3. Core Architecture
+
+```
+Text Input
+   ↓
+TTS Engine (AVSpeechSynthesizer)
+   ↓
+Timing Capture (delegate callbacks)
+   ↓
+Timing Processor (normalize + smooth)
+   ↓
+Persist (JSON subtitle model)
+   ↓
+Playback Engine (AVAudioPlayer)
+   ↓
+Timeline Controller (time = source of truth)
+   ↓
+Subtitle Engine (time → word index)
+   ↓
+SwiftUI Renderer
+```
+
+---
+
+## 4. Data Model
+
+```
+struct SubtitleWord {
+    word: String
+    start: TimeInterval
+    end: TimeInterval
+}
+```
+
+---
+
+## 5. Modules
+
+### 5.1 TTS Engine
+
+Responsibilities:
+
+* Convert text to speech
+* Generate audio buffers
+* Emit timing callbacks
+
+Output:
+
+* audio file
+* raw timing data
+
+---
+
+### 5.2 Timing Capture
+
+Logic:
+
+* Track speechStartTime
+* Build words from character callbacks
+* Record start/end time per word
+
+---
+
+### 5.3 Timing Processor
+
+Fix timing issues:
+
+* Remove overlaps
+* Enforce minimum duration (~0.12s)
+* Apply latency offset (~0.1s)
+
+---
+
+### 5.4 Persistence
+
+Store subtitle model as JSON:
+
+```
+[
+  { "word": "Hello", "start": 0.0, "end": 0.4 }
+]
+```
+
+---
+
+### 5.5 Audio Engine
+
+Use AVAudioPlayer
+
+Functions:
+
+* play()
+* pause()
+* seek(time)
+
+---
+
+### 5.6 Timeline Controller
+
+Single source of truth:
+
+```
+currentTime = player.currentTime
+```
+
+All sync logic depends on currentTime.
+
+---
+
+### 5.7 Subtitle Engine
+
+Function:
+
+```
+index(at time) → word index
+```
+
+Logic:
+
+```
+time >= start && time <= end
+```
+
+---
+
+### 5.8 Renderer (SwiftUI)
+
+State-driven:
+
+```
+@State currentWordIndex
+```
+
+UI updates automatically when index changes.
+
+---
+
+## 6. Playback Flow
+
+```
+Play pressed
+   ↓
+AudioEngine.play()
+   ↓
+DisplayLink loop
+   ↓
+currentTime = player.currentTime
+   ↓
+index = subtitleEngine.index(time)
+   ↓
+Update UI
+```
+
+---
+
+## 7. Scrubbing Flow (Critical)
+
+```
+User drags timeline
+   ↓
+Pause audio
+   ↓
+Compute new time
+   ↓
+player.currentTime = newTime
+   ↓
+Update subtitle immediately
+   ↓
+On release → resume playback
+```
+
+---
+
+## 8. Timeline UI (SwiftUI)
+
+Components:
+
+* Progress bar
+* Thumb (draggable)
+* Time label
+
+Gesture:
+
+```
+DragGesture
+    → convert position → time
+    → seek(time)
+```
+
+Important:
+
+* Pause during drag
+* Resume after drag
+
+---
+
+## 9. Sync Rule (CRITICAL)
+
+```
+DO NOT use TTS callbacks during playback
+```
+
+Only use:
+
+```
+player.currentTime
++ saved subtitle timing
+```
+
+---
+
+## 10. Performance Rules
+
+* Use CADisplayLink (not Timer)
+* Throttle seek (≥50ms delta)
+* Avoid full UI rebuild every frame
+
+---
+
+## 11. Known Limitations
+
+* Timing is approximate (Apple TTS limitation)
+* No phoneme-level sync
+* Small latency (~100–200ms)
+
+---
+
+## 12. Final Result
+
+System supports:
+
+* TTS-based audio generation
+* Word-level subtitle sync
+* Smooth playback
+* Timeline scrubbing
+* Fully offline operation
+* Apple APIs only
+
+---
+
+## 13. Key Insight
+
+```
+Time is the single source of truth.
+```
+
+Everything (audio, subtitles, UI) must sync to:
+
+```
+currentTime
+```
+

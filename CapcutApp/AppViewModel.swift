@@ -1,6 +1,7 @@
 import AVFoundation
 import PhotosUI
 import SwiftUI
+import UniformTypeIdentifiers
 import UIKit
 
 @MainActor
@@ -44,6 +45,11 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var currentSlideIndex = 0
     @Published var importedMusicName = "No music selected"
     @Published var isSpeaking = false
+    @Published var isPreparingNarrationPreview = false
+    @Published var isNarrationPreviewPlaying = false
+    @Published var narrationPreviewDuration: Double = 0
+    @Published var narrationPreviewCurrentTime: Double = 0
+    @Published var narrationPreviewCaption = "Build a seekable preview to test subtitle sync."
     @Published var isMusicPlaying = false
     @Published var isExportingVideo = false
     @Published var exportedVideoURL: URL?
@@ -69,8 +75,14 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var statusMessage = "Pick photos, add a script, and import music to build your clip."
 
     private let videoExporter = VideoExporter()
+    private let narrationPreviewBuilder = NarrationPreviewBuilder()
     private var audioPlayer: AVAudioPlayer?
+    private var narrationPreviewPlayer: AVAudioPlayer?
+    private var narrationPreviewTimer: Timer?
     private var importedMusicURL: URL?
+    private var narrationPreviewAudioURL: URL?
+    private var narrationPreviewCues: [NarrationPreviewBuilder.SubtitleCue] = []
+    private var narrationTimelineEngine = SubtitleTimelineEngine(cues: [])
     private var pendingUtteranceCount = 0
     private var didLoadFullVoiceList = false
     private lazy var speechSynthesizer: AVSpeechSynthesizer = {
@@ -120,6 +132,78 @@ final class AppViewModel: NSObject, ObservableObject {
         }
         isSpeaking = true
         statusMessage = "Narration is playing with \(selectedVoiceDisplayName)."
+    }
+
+    func buildNarrationPreview() {
+        guard !narrationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            statusMessage = "Add some narration text before building the preview."
+            return
+        }
+
+        configureAudioSessionIfNeeded()
+        isPreparingNarrationPreview = true
+        stopNarrationPreview()
+        narrationPreviewCaption = "Building narration preview..."
+        statusMessage = "Generating seekable narration preview."
+
+        let text = narrationText
+        let voiceIdentifier = selectedVoiceIdentifier
+
+        Task {
+            do {
+                let preview = try await narrationPreviewBuilder.buildPreview(text: text, voiceIdentifier: voiceIdentifier)
+                narrationPreviewPlayer = try AVAudioPlayer(contentsOf: preview.audioURL)
+                narrationPreviewPlayer?.prepareToPlay()
+                narrationPreviewAudioURL = preview.audioURL
+                narrationPreviewDuration = preview.duration
+                narrationPreviewCurrentTime = 0
+                narrationPreviewCues = preview.cues
+                narrationTimelineEngine = SubtitleTimelineEngine(cues: narrationPreviewCues)
+                narrationPreviewCaption = preview.cues.first?.text ?? "Preview ready."
+                statusMessage = "Seekable narration preview is ready."
+            } catch {
+                narrationPreviewCaption = "Preview generation failed."
+                statusMessage = error.localizedDescription.isEmpty ? "Could not build narration preview." : error.localizedDescription
+            }
+
+            isPreparingNarrationPreview = false
+        }
+    }
+
+    func toggleNarrationPreviewPlayback() {
+        guard let narrationPreviewPlayer else {
+            statusMessage = "Build the narration preview first."
+            return
+        }
+
+        if narrationPreviewPlayer.isPlaying {
+            narrationPreviewPlayer.pause()
+            stopNarrationPreviewTimer()
+            isNarrationPreviewPlaying = false
+            statusMessage = "Narration preview paused."
+        } else {
+            narrationPreviewPlayer.play()
+            startNarrationPreviewTimer()
+            isNarrationPreviewPlaying = true
+            statusMessage = "Narration preview playing."
+        }
+    }
+
+    func seekNarrationPreview(to time: Double) {
+        guard let narrationPreviewPlayer else { return }
+        let clamped = min(max(time, 0), narrationPreviewDuration)
+        narrationPreviewPlayer.currentTime = clamped
+        narrationPreviewCurrentTime = clamped
+        updateNarrationPreviewCaption(for: clamped)
+    }
+
+    func stopNarrationPreview() {
+        narrationPreviewPlayer?.stop()
+        narrationPreviewPlayer?.currentTime = 0
+        narrationPreviewCurrentTime = 0
+        isNarrationPreviewPlaying = false
+        stopNarrationPreviewTimer()
+        updateNarrationPreviewCaption(for: 0)
     }
 
     func pasteNarrationFromClipboard() {
@@ -193,13 +277,14 @@ final class AppViewModel: NSObject, ObservableObject {
         }
 
         do {
+            stopMusic()
             let destination = try copyImportedFileToDocuments(selectedURL)
             importedMusicURL = destination
             importedMusicName = destination.lastPathComponent
             try prepareAudioPlayer(with: destination)
             statusMessage = "Music imported and ready to play."
         } catch {
-            statusMessage = "Could not import that music file."
+            statusMessage = error.localizedDescription.isEmpty ? "Could not import that music file." : error.localizedDescription
         }
     }
 
@@ -276,6 +361,8 @@ final class AppViewModel: NSObject, ObservableObject {
         let images = photos.map(\.image)
         let narrationText = narrationText
         let backgroundMusicURL = importedMusicURL
+        let previewAudioURL = narrationPreviewAudioURL
+        let previewCues = narrationPreviewCues
 
         Task {
             do {
@@ -283,7 +370,9 @@ final class AppViewModel: NSObject, ObservableObject {
                     images: images,
                     narrationText: narrationText,
                     backgroundMusicURL: backgroundMusicURL,
-                    voiceIdentifier: selectedVoiceIdentifier
+                    voiceIdentifier: selectedVoiceIdentifier,
+                    externalCues: previewCues,
+                    externalNarrationAudioURL: previewAudioURL
                 )
                 exportedVideoURL = exportedURL
                 statusMessage = "Video created successfully. Preview or share it below."
@@ -351,13 +440,17 @@ final class AppViewModel: NSObject, ObservableObject {
 
     private func copyImportedFileToDocuments(_ sourceURL: URL) throws -> URL {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let destination = documents.appendingPathComponent(sourceURL.lastPathComponent)
+        let fileExtension = sourceURL.pathExtension.isEmpty ? "m4a" : sourceURL.pathExtension
+        let baseName = sourceURL.deletingPathExtension().lastPathComponent
+        let safeName = baseName.isEmpty ? "imported-audio" : baseName
+        let destination = documents.appendingPathComponent("\(safeName)-\(UUID().uuidString).\(fileExtension)")
 
-        if FileManager.default.fileExists(atPath: destination.path) {
-            try FileManager.default.removeItem(at: destination)
+        do {
+            try FileManager.default.copyItem(at: sourceURL, to: destination)
+        } catch {
+            let data = try Data(contentsOf: sourceURL)
+            try data.write(to: destination, options: .atomic)
         }
-
-        try FileManager.default.copyItem(at: sourceURL, to: destination)
         return destination
     }
 
@@ -370,8 +463,58 @@ final class AppViewModel: NSObject, ObservableObject {
         isMusicPlaying = false
     }
 
+    private func startNarrationPreviewTimer() {
+        stopNarrationPreviewTimer()
+        narrationPreviewTimer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let player = self.narrationPreviewPlayer else { return }
+                self.narrationPreviewCurrentTime = player.currentTime
+                self.updateNarrationPreviewCaption(for: player.currentTime)
+                if !player.isPlaying {
+                    self.isNarrationPreviewPlaying = false
+                    self.stopNarrationPreviewTimer()
+                }
+            }
+        }
+    }
+
+    private func stopNarrationPreviewTimer() {
+        narrationPreviewTimer?.invalidate()
+        narrationPreviewTimer = nil
+    }
+
+    private func updateNarrationPreviewCaption(for time: Double) {
+        if let cue = narrationTimelineEngine.cue(at: time) {
+            narrationPreviewCaption = cue.text
+        } else {
+            narrationPreviewCaption = narrationPreviewCues.first?.text ?? "Build a seekable preview to test subtitle sync."
+        }
+    }
+
     var selectedVoiceDisplayName: String {
         availableVoices.first(where: { $0.id == selectedVoiceIdentifier })?.displayName ?? "No Apple voice selected yet."
+    }
+
+    var narrationPreviewSummary: String {
+        if isPreparingNarrationPreview {
+            return "Generating preview audio and subtitle cues from your current script."
+        }
+        if narrationPreviewDuration > 0 {
+            return "Scrub the timeline to inspect how the built-in subtitle engine follows the narration."
+        }
+        return "Build the preview to create a seekable narration pass with automatic caption cues."
+    }
+
+    var narrationPreviewMetaLine: String {
+        guard narrationPreviewDuration > 0 else { return "No preview built yet" }
+        return "\(formatPreviewTime(narrationPreviewDuration)) total"
+    }
+
+    private func formatPreviewTime(_ value: TimeInterval) -> String {
+        let totalSeconds = max(Int(value.rounded()), 0)
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%d:%02d", minutes, seconds)
     }
 }
 
@@ -482,6 +625,10 @@ enum SpeechVoiceLibrary {
         chunkedText(from: text)
     }
 
+    static func normalizedCaptionText(_ text: String) -> String {
+        collapseCaptionWhitespace(in: normalizeSpeechText(text))
+    }
+
     static func makeUtterance(from text: String, voiceIdentifier: String) -> AVSpeechUtterance {
         let selectedVoice = voice(for: voiceIdentifier)
         let utterance = AVSpeechUtterance(string: text)
@@ -539,9 +686,7 @@ enum SpeechVoiceLibrary {
     }
 
     private static func chunkedText(from text: String) -> [String] {
-        let normalized = text
-            .replacingOccurrences(of: "\n", with: " ")
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalized = normalizedCaptionText(text)
 
         guard !normalized.isEmpty else { return [] }
 
@@ -556,6 +701,46 @@ enum SpeechVoiceLibrary {
         }
 
         return [normalized]
+    }
+
+    private static func normalizeSpeechText(_ text: String) -> String {
+        var normalized = text
+
+        let replacements: [(String, String)] = [
+            ("U.S.", "United States"),
+            ("U. S.", "United States"),
+            ("U.K.", "United Kingdom"),
+            ("U. K.", "United Kingdom"),
+            ("U.N.", "United Nations"),
+            ("U. N.", "United Nations"),
+            ("E.U.", "European Union"),
+            ("E. U.", "European Union"),
+            ("UCLA", "U C L A"),
+            ("UCSD", "U C S D"),
+            ("GDP", "G D P"),
+            ("AI", "A I")
+        ]
+
+        for (source, target) in replacements {
+            normalized = normalized.replacingOccurrences(of: source, with: target)
+        }
+
+        return normalized
+    }
+
+    private static func collapseCaptionWhitespace(in text: String) -> String {
+        let newlineFlattened = text.replacingOccurrences(of: "\n", with: " ")
+        let collapsed = newlineFlattened.replacingOccurrences(
+            of: "\\s+",
+            with: " ",
+            options: .regularExpression
+        )
+        let trimmedPunctuation = collapsed.replacingOccurrences(
+            of: "\\s+([,.;:!?，。；：！？、])",
+            with: "$1",
+            options: .regularExpression
+        )
+        return trimmedPunctuation.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     private static func qualityLabel(for voice: AVSpeechSynthesisVoice) -> String {
