@@ -11,9 +11,9 @@ struct VideoExporter {
         var renderSize: CGSize {
             switch self {
             case .vertical:
-                return CGSize(width: 1080, height: 1920)
+                return CGSize(width: 720, height: 1280)
             case .classic:
-                return CGSize(width: 1440, height: 1080)
+                return CGSize(width: 960, height: 720)
             }
         }
     }
@@ -28,7 +28,7 @@ struct VideoExporter {
         let kind: Kind
     }
 
-    private let frameRate: Int32 = 30
+    private let frameRate: Int32 = 10
     private let captionLagCompensation = CMTime(seconds: 0.30, preferredTimescale: 600)
     private let narrationDurationBias: Double = 1.90
 
@@ -57,6 +57,48 @@ struct VideoExporter {
         let timeRange: CMTimeRange
     }
 
+    private final class VideoFrameCache {
+        private let frameRate: Int32
+        private let renderSize: CGSize
+        private var generators: [URL: AVAssetImageGenerator] = [:]
+        private var durations: [URL: CMTime] = [:]
+
+        init(frameRate: Int32, renderSize: CGSize) {
+            self.frameRate = frameRate
+            self.renderSize = renderSize
+        }
+
+        func image(for url: URL, localTime: CMTime) throws -> UIImage {
+            let generator = try generatorForVideo(at: url)
+            let assetDuration = durations[url] ?? .zero
+            let frameStep = CMTime(value: 1, timescale: frameRate)
+            let latestFrameTime = assetDuration > frameStep ? assetDuration - frameStep : .zero
+            let safeTime = CMTimeMinimum(CMTimeMaximum(.zero, localTime), latestFrameTime)
+
+            var actualTime = CMTime.zero
+            let cgImage = try generator.copyCGImage(at: safeTime, actualTime: &actualTime)
+            return UIImage(cgImage: cgImage)
+        }
+
+        private func generatorForVideo(at url: URL) throws -> AVAssetImageGenerator {
+            if let generator = generators[url] {
+                return generator
+            }
+
+            let asset = AVURLAsset(url: url)
+            let generator = AVAssetImageGenerator(asset: asset)
+            generator.appliesPreferredTrackTransform = true
+            generator.maximumSize = renderSize
+            let frameStep = CMTime(value: 1, timescale: frameRate)
+            generator.requestedTimeToleranceBefore = frameStep
+            generator.requestedTimeToleranceAfter = frameStep
+
+            generators[url] = generator
+            durations[url] = asset.duration
+            return generator
+        }
+    }
+
     func exportVideo(
         mediaItems: [MediaItem],
         narrationText: String,
@@ -64,16 +106,19 @@ struct VideoExporter {
         voiceIdentifier: String,
         aspectRatio: AspectRatio,
         externalCues: [ExternalCue] = [],
-        externalNarrationAudioURL: URL? = nil
+        externalNarrationAudioURL: URL? = nil,
+        progressHandler: ((Double, String) -> Void)? = nil
     ) async throws -> URL {
         guard !mediaItems.isEmpty else {
             throw ExportError.noPhotos
         }
 
+        progressHandler?(0.08, "Preparing export workspace.")
         let workspace = try makeWorkspace()
         let slideshowURL = workspace.appendingPathComponent("slideshow.mov")
         let finalURL = workspace.appendingPathComponent("capcut-mini-video.mov")
 
+        progressHandler?(0.16, "Preparing narration and captions.")
         let narrationTimeline = try await synthesizeNarrationIfNeeded(
             text: narrationText,
             voiceIdentifier: voiceIdentifier,
@@ -83,17 +128,20 @@ struct VideoExporter {
         )
         let minimumVisualDuration = minimumVisualDuration(for: mediaItems)
         let totalDuration = narrationTimeline.duration > .zero
-            ? max(narrationTimeline.duration, minimumVisualDuration)
+            ? narrationTimeline.duration
             : minimumVisualDuration
         let timelineSegments = try await makeTimelineSegments(for: mediaItems, totalDuration: totalDuration)
+        progressHandler?(0.24, "Rendering video frames.")
 
         try await renderSlideshow(
             timelineSegments: timelineSegments,
             captionSegments: narrationTimeline.captionSegments,
             totalDuration: totalDuration,
             renderSize: aspectRatio.renderSize,
+            progressHandler: progressHandler,
             outputURL: slideshowURL
         )
+        progressHandler?(0.9, "Mixing narration and background music.")
         try await mergeAudioAndVideo(
             videoURL: slideshowURL,
             narrationURLs: narrationTimeline.utteranceAudioURLs,
@@ -101,6 +149,7 @@ struct VideoExporter {
             totalDuration: totalDuration,
             outputURL: finalURL
         )
+        progressHandler?(1.0, "Finalizing exported video.")
 
         return finalURL
     }
@@ -221,6 +270,7 @@ struct VideoExporter {
         captionSegments: [CaptionSegment],
         totalDuration: CMTime,
         renderSize: CGSize,
+        progressHandler: ((Double, String) -> Void)?,
         outputURL: URL
     ) async throws {
         if FileManager.default.fileExists(atPath: outputURL.path) {
@@ -252,6 +302,8 @@ struct VideoExporter {
         writer.startWriting()
         writer.startSession(atSourceTime: .zero)
 
+        let videoFrameCache = VideoFrameCache(frameRate: frameRate, renderSize: renderSize)
+
         let totalFrames = max(Int(ceil(CMTimeGetSeconds(totalDuration) * Double(frameRate))), timelineSegments.count)
 
         for frameIndex in 0..<totalFrames {
@@ -260,11 +312,25 @@ struct VideoExporter {
             }
 
             let currentTime = CMTime(value: CMTimeValue(frameIndex), timescale: frameRate)
-            let image = try await mediaFrameForTime(currentTime, timelineSegments: timelineSegments)
             let caption = captionText(for: currentTime, segments: captionSegments)
-            let pixelBuffer = try makePixelBuffer(from: image, caption: caption, renderSize: renderSize)
             let presentationTime = CMTime(value: CMTimeValue(frameIndex), timescale: frameRate)
-            adaptor.append(pixelBuffer, withPresentationTime: presentationTime)
+            try autoreleasepool {
+                let image = try mediaFrameForTime(
+                    currentTime,
+                    timelineSegments: timelineSegments,
+                    videoFrameCache: videoFrameCache
+                )
+                let pixelBuffer = try makePixelBuffer(from: image, caption: caption, renderSize: renderSize)
+                if !adaptor.append(pixelBuffer, withPresentationTime: presentationTime) {
+                    throw writer.error ?? ExportError.videoWriterSetupFailed
+                }
+            }
+
+            if frameIndex.isMultiple(of: 12) || frameIndex == totalFrames - 1 {
+                let completion = Double(frameIndex + 1) / Double(max(totalFrames, 1))
+                let progress = 0.24 + (completion * 0.61)
+                progressHandler?(progress, "Rendering video frames (\(Int((completion * 100).rounded()))%).")
+            }
         }
 
         writerInput.markAsFinished()
@@ -436,10 +502,10 @@ struct VideoExporter {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         paragraph.lineBreakMode = .byWordWrapping
-        let maxTextWidth = renderSize.width - 180
-        let maxTextHeight: CGFloat = 360
-        let minimumFontSize: CGFloat = 28
-        var fontSize: CGFloat = 52
+        let maxTextWidth = renderSize.width - 120
+        let maxTextHeight: CGFloat = 240
+        let minimumFontSize: CGFloat = 20
+        var fontSize: CGFloat = renderSize.width < renderSize.height ? 34 : 30
         var measuredText = CGRect.zero
         var attributes: [NSAttributedString.Key: Any] = [:]
 
@@ -461,20 +527,21 @@ struct VideoExporter {
                 break
             }
 
-            fontSize -= 4
+            fontSize -= 2
         }
 
-        let boxPadding: CGFloat = 28
+        let boxPadding: CGFloat = 16
+        let bottomInset = max(renderSize.height * 0.025, 24)
         let boxRect = CGRect(
             x: (renderSize.width - measuredText.width) / 2 - boxPadding,
-            y: renderSize.height - measuredText.height - 220,
+            y: renderSize.height - measuredText.height - (boxPadding * 2) - bottomInset,
             width: measuredText.width + (boxPadding * 2),
             height: measuredText.height + (boxPadding * 2)
         )
 
         let boxPath = UIBezierPath(roundedRect: boxRect, cornerRadius: 32)
         context.saveGState()
-        context.setFillColor(UIColor.black.withAlphaComponent(0.58).cgColor)
+        context.setFillColor(UIColor.black.withAlphaComponent(0.42).cgColor)
         context.addPath(boxPath.cgPath)
         context.fillPath()
         context.restoreGState()
@@ -552,13 +619,19 @@ struct VideoExporter {
         var segments: [TimelineSegment] = []
 
         for item in mediaItems {
-            let duration: CMTime
+            let remainingDuration = totalDuration - cursor
+            guard remainingDuration > .zero else { break }
+
+            let intendedDuration: CMTime
             switch item.kind {
             case .photo:
-                duration = perPhotoDuration > .zero ? perPhotoDuration : CMTime(seconds: 1.6, preferredTimescale: 600)
+                intendedDuration = perPhotoDuration > .zero ? perPhotoDuration : CMTime(seconds: 1.6, preferredTimescale: 600)
             case let .video(_, videoDuration):
-                duration = videoDuration
+                intendedDuration = videoDuration
             }
+
+            let duration = min(intendedDuration, remainingDuration)
+            guard duration > .zero else { continue }
             let segmentRange = CMTimeRange(start: cursor, duration: duration)
             segments.append(TimelineSegment(mediaItem: item, timeRange: segmentRange))
             cursor = cursor + duration
@@ -575,7 +648,11 @@ struct VideoExporter {
         return segments
     }
 
-    private func mediaFrameForTime(_ currentTime: CMTime, timelineSegments: [TimelineSegment]) async throws -> UIImage {
+    private func mediaFrameForTime(
+        _ currentTime: CMTime,
+        timelineSegments: [TimelineSegment],
+        videoFrameCache: VideoFrameCache
+    ) throws -> UIImage {
         guard let segment = timelineSegments.first(where: { $0.timeRange.containsTime(currentTime) }) ?? timelineSegments.last else {
             return UIImage()
         }
@@ -586,33 +663,9 @@ struct VideoExporter {
         case let .video(url, duration):
             let localTime = min(currentTime - segment.timeRange.start, duration)
             do {
-                return try await thumbnailForVideo(url: url, localTime: localTime)
+                return try videoFrameCache.image(for: url, localTime: localTime)
             } catch {
                 return segment.mediaItem.previewImage
-            }
-        }
-    }
-
-    private func thumbnailForVideo(url: URL, localTime: CMTime) async throws -> UIImage {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                let asset = AVURLAsset(url: url)
-                let generator = AVAssetImageGenerator(asset: asset)
-                generator.appliesPreferredTrackTransform = true
-                let frameStep = CMTime(value: 1, timescale: self.frameRate)
-                generator.requestedTimeToleranceBefore = frameStep
-                generator.requestedTimeToleranceAfter = frameStep
-
-                let assetDuration = asset.duration
-                let latestFrameTime = assetDuration > frameStep ? assetDuration - frameStep : .zero
-                let safeTime = CMTimeMinimum(CMTimeMaximum(.zero, localTime), latestFrameTime)
-                do {
-                    var actualTime = CMTime.zero
-                    let cgImage = try generator.copyCGImage(at: safeTime, actualTime: &actualTime)
-                    continuation.resume(returning: UIImage(cgImage: cgImage))
-                } catch {
-                    continuation.resume(throwing: error)
-                }
             }
         }
     }

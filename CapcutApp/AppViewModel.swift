@@ -92,6 +92,7 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var narrationPreviewCaption = "Build a seekable preview to test subtitle sync."
     @Published var isMusicPlaying = false
     @Published var isExportingVideo = false
+    @Published var exportProgress: Double = 0
     @Published var exportedVideoURL: URL?
     var availableVoices: [VoiceOption] = []
     @Published var selectedVoiceIdentifier = "" {
@@ -379,6 +380,28 @@ final class AppViewModel: NSObject, ObservableObject {
         currentSlideIndex = (currentSlideIndex - 1 + mediaItems.count) % mediaItems.count
     }
 
+    func clearMediaSelection() {
+        selectedPhotoItems = []
+        mediaItems = []
+        currentSlideIndex = 0
+        statusMessage = "Media cleared. Import a new set whenever you're ready."
+    }
+
+    func moveMediaItem(withId sourceID: UUID, before targetID: UUID) {
+        guard sourceID != targetID,
+              let sourceIndex = mediaItems.firstIndex(where: { $0.id == sourceID }),
+              let targetIndex = mediaItems.firstIndex(where: { $0.id == targetID }) else {
+            return
+        }
+
+        let movedItem = mediaItems[sourceIndex]
+        mediaItems.remove(at: sourceIndex)
+        let destinationIndex = mediaItems.firstIndex(where: { $0.id == targetID }) ?? targetIndex
+        mediaItems.insert(movedItem, at: destinationIndex)
+        currentSlideIndex = mediaItems.firstIndex(where: { $0.id == sourceID }) ?? 0
+        statusMessage = "Media order updated."
+    }
+
     func buildVideo() {
         guard !isLoadingMediaSelection else {
             statusMessage = "Media is still loading. Please wait a moment, then create the video."
@@ -391,6 +414,7 @@ final class AppViewModel: NSObject, ObservableObject {
         }
 
         isExportingVideo = true
+        exportProgress = 0.02
         exportedVideoURL = nil
         statusMessage = "Preparing narration, captions, and media for export."
 
@@ -412,10 +436,13 @@ final class AppViewModel: NSObject, ObservableObject {
         let narrationText = normalizedNarrationSourceText
         let backgroundMusicURL = importedMusicURL
         let voiceIdentifier = selectedVoiceIdentifier
+        let exporter = videoExporter
+        let aspectRatio = selectedAspectRatio
 
         Task {
             do {
                 if !narrationText.isEmpty, needsPreviewRefresh(for: narrationText, voiceIdentifier: voiceIdentifier) {
+                    exportProgress = 0.08
                     try await prepareNarrationPreview(
                         text: narrationText,
                         voiceIdentifier: voiceIdentifier,
@@ -423,23 +450,34 @@ final class AppViewModel: NSObject, ObservableObject {
                         completedMessage: "Narration and captions are ready. Rendering your video now."
                     )
                 } else {
+                    exportProgress = 0.22
                     statusMessage = "Rendering your video. This can take a moment."
                 }
 
                 let previewAudioURL = narrationText.isEmpty ? nil : narrationPreviewAudioURL
                 let previewCues = narrationText.isEmpty ? [] : narrationPreviewCues
-                let exportedURL = try await videoExporter.exportVideo(
-                    mediaItems: exportMediaItems,
-                    narrationText: narrationText,
-                    backgroundMusicURL: backgroundMusicURL,
-                    voiceIdentifier: voiceIdentifier,
-                    aspectRatio: selectedAspectRatio,
-                    externalCues: previewCues,
-                    externalNarrationAudioURL: previewAudioURL
-                )
+                let exportedURL = try await Task.detached(priority: .userInitiated) {
+                    try await exporter.exportVideo(
+                        mediaItems: exportMediaItems,
+                        narrationText: narrationText,
+                        backgroundMusicURL: backgroundMusicURL,
+                        voiceIdentifier: voiceIdentifier,
+                        aspectRatio: aspectRatio,
+                        externalCues: previewCues,
+                        externalNarrationAudioURL: previewAudioURL,
+                        progressHandler: { progress, message in
+                            Task { @MainActor in
+                                self.exportProgress = progress
+                                self.statusMessage = message
+                            }
+                        }
+                    )
+                }.value
                 exportedVideoURL = exportedURL
+                exportProgress = 1.0
                 statusMessage = "Video created successfully. Preview or share it below."
             } catch {
+                exportProgress = 0
                 statusMessage = error.localizedDescription.isEmpty ? "Video export failed." : error.localizedDescription
             }
 
@@ -493,7 +531,7 @@ final class AppViewModel: NSObject, ObservableObject {
                     )
                 }
             } else if let data = try? await item.loadTransferable(type: Data.self),
-                      let image = UIImage(data: data) {
+                      let image = downsampledImage(from: data, maxDimension: 1280) {
                 loadedMedia.append(MediaItem(previewImage: image.normalizedOrientationImage(), kind: .photo))
             }
         }
@@ -585,6 +623,7 @@ final class AppViewModel: NSObject, ObservableObject {
                 let asset = AVURLAsset(url: url)
                 let generator = AVAssetImageGenerator(asset: asset)
                 generator.appliesPreferredTrackTransform = true
+                generator.maximumSize = CGSize(width: 1280, height: 1280)
                 let time = CMTime(seconds: 0.1, preferredTimescale: 600)
                 if let cgImage = try? generator.copyCGImage(at: time, actualTime: nil) {
                     continuation.resume(returning: UIImage(cgImage: cgImage))
@@ -660,6 +699,28 @@ final class AppViewModel: NSObject, ObservableObject {
         }
     }
 
+    private func downsampledImage(from data: Data, maxDimension: CGFloat) -> UIImage? {
+        let options: [CFString: Any] = [
+            kCGImageSourceShouldCache: false
+        ]
+        guard let source = CGImageSourceCreateWithData(data as CFData, options as CFDictionary) else {
+            return nil
+        }
+
+        let downsampleOptions: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: Int(maxDimension)
+        ]
+
+        guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, downsampleOptions as CFDictionary) else {
+            return nil
+        }
+
+        return UIImage(cgImage: cgImage)
+    }
+
     var selectedVoiceDisplayName: String {
         availableVoices.first(where: { $0.id == selectedVoiceIdentifier })?.displayName ?? "No Apple voice selected yet."
     }
@@ -677,6 +738,10 @@ final class AppViewModel: NSObject, ObservableObject {
     var narrationPreviewMetaLine: String {
         guard narrationPreviewDuration > 0 else { return "No preview built yet" }
         return "\(formatPreviewTime(narrationPreviewDuration)) total"
+    }
+
+    var hasNarrationPreview: Bool {
+        narrationPreviewDuration > 0 && !narrationPreviewCues.isEmpty
     }
 
     private func formatPreviewTime(_ value: TimeInterval) -> String {
