@@ -70,6 +70,7 @@ final class AppViewModel: NSObject, ObservableObject {
         let name: String
         let description: String
         let fileName: String
+        let fileExtension: String
     }
 
     @Published var mediaItems: [MediaItem] = []
@@ -103,11 +104,11 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var selectedVoiceName = "No Apple voice selected yet."
     @Published var clipboardPreview = "Clipboard not checked yet."
     @Published var demoTracks: [DemoTrackOption] = [
-        DemoTrackOption(id: "calm_breeze", name: "Calm Breeze", description: "Airy ambient pad with chimes", fileName: "calm_breeze"),
-        DemoTrackOption(id: "city_pop", name: "City Pop", description: "Clean upbeat synth groove", fileName: "city_pop"),
-        DemoTrackOption(id: "piano_moment", name: "Piano Moment", description: "Gentle piano with soft echo", fileName: "piano_moment")
+        DemoTrackOption(id: "dream_culture", name: "Dream Culture", description: "Calming, relaxed, uplifting ambience", fileName: "dream_culture", fileExtension: "mp3"),
+        DemoTrackOption(id: "local_forecast", name: "Local Forecast", description: "Bright, grooving, feel-good energy", fileName: "local_forecast", fileExtension: "mp3"),
+        DemoTrackOption(id: "airship_serenity", name: "Airship Serenity", description: "Serene cinematic lift with warmth", fileName: "airship_serenity", fileExtension: "mp3")
     ]
-    @Published var selectedDemoTrackID = "calm_breeze"
+    @Published var selectedDemoTrackID = "dream_culture"
     @Published var selectedAspectRatio: VideoExporter.AspectRatio = .vertical
     @Published var musicVolume: Double = 0.6 {
         didSet {
@@ -328,8 +329,8 @@ final class AppViewModel: NSObject, ObservableObject {
             return
         }
 
-        let bundledURL = Bundle.main.url(forResource: track.fileName, withExtension: "wav", subdirectory: "SampleMusic")
-            ?? Bundle.main.url(forResource: track.fileName, withExtension: "wav")
+        let bundledURL = Bundle.main.url(forResource: track.fileName, withExtension: track.fileExtension, subdirectory: "SampleMusic")
+            ?? Bundle.main.url(forResource: track.fileName, withExtension: track.fileExtension)
 
         guard let bundledURL else {
             statusMessage = "Bundled sample music is missing from the app."
@@ -338,7 +339,7 @@ final class AppViewModel: NSObject, ObservableObject {
 
         do {
             importedMusicURL = bundledURL
-            importedMusicName = "\(track.name).wav"
+            importedMusicName = "\(track.name).\(track.fileExtension)"
             try prepareAudioPlayer(with: bundledURL)
             statusMessage = "\(track.name) is ready to play."
         } catch {
@@ -435,6 +436,7 @@ final class AppViewModel: NSObject, ObservableObject {
         }
         let narrationText = normalizedNarrationSourceText
         let backgroundMusicURL = importedMusicURL
+        let backgroundMusicVolume = musicVolume
         let voiceIdentifier = selectedVoiceIdentifier
         let exporter = videoExporter
         let aspectRatio = selectedAspectRatio
@@ -461,6 +463,7 @@ final class AppViewModel: NSObject, ObservableObject {
                         mediaItems: exportMediaItems,
                         narrationText: narrationText,
                         backgroundMusicURL: backgroundMusicURL,
+                        backgroundMusicVolume: backgroundMusicVolume,
                         voiceIdentifier: voiceIdentifier,
                         aspectRatio: aspectRatio,
                         externalCues: previewCues,

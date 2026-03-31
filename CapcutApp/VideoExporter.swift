@@ -103,6 +103,7 @@ struct VideoExporter {
         mediaItems: [MediaItem],
         narrationText: String,
         backgroundMusicURL: URL?,
+        backgroundMusicVolume: Double,
         voiceIdentifier: String,
         aspectRatio: AspectRatio,
         externalCues: [ExternalCue] = [],
@@ -146,6 +147,7 @@ struct VideoExporter {
             videoURL: slideshowURL,
             narrationURLs: narrationTimeline.utteranceAudioURLs,
             backgroundMusicURL: backgroundMusicURL,
+            backgroundMusicVolume: backgroundMusicVolume,
             totalDuration: totalDuration,
             outputURL: finalURL
         )
@@ -353,6 +355,7 @@ struct VideoExporter {
         videoURL: URL,
         narrationURLs: [URL],
         backgroundMusicURL: URL?,
+        backgroundMusicVolume: Double,
         totalDuration: CMTime,
         outputURL: URL
     ) async throws {
@@ -412,9 +415,10 @@ struct VideoExporter {
                 }
 
                 let musicParameters = AVMutableAudioMixInputParameters(track: compositionMusicTrack)
-                musicParameters.setVolume(0.25, at: .zero)
+                let resolvedVolume = Float(min(max(backgroundMusicVolume, 0), 1))
+                musicParameters.setVolume(resolvedVolume, at: .zero)
                 let fadeStart = CMTimeMaximum(.zero, totalDuration - CMTime(seconds: 1.2, preferredTimescale: 600))
-                musicParameters.setVolumeRamp(fromStartVolume: 0.25, toEndVolume: 0.0, timeRange: CMTimeRange(start: fadeStart, duration: totalDuration - fadeStart))
+                musicParameters.setVolumeRamp(fromStartVolume: resolvedVolume, toEndVolume: 0.0, timeRange: CMTimeRange(start: fadeStart, duration: totalDuration - fadeStart))
                 audioMixParameters.append(musicParameters)
             }
         }

@@ -577,7 +577,7 @@ struct ContentView: View {
                 previewControlButton(
                     title: "Stop",
                     systemImage: "stop.fill",
-                    tint: .gray,
+                    tint: .red,
                     isEnabled: viewModel.hasNarrationPreview
                 ) {
                     viewModel.stopNarrationPreview()
@@ -704,33 +704,87 @@ struct ContentView: View {
 
     private var musicSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("3. Background Music")
+            Text("Music")
                 .font(.title2.weight(.semibold))
 
-            Text("Choose one of the built-in sample tracks, or import your own audio file later.")
-                .font(.subheadline)
-                .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Choose a soundtrack, shape the playback level, and give your edit a stronger mood before export.")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.77, green: 0.28, blue: 0.12),
+                                Color(red: 0.48, green: 0.16, blue: 0.08)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
 
-            HStack {
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("Selected Track")
-                        .font(.caption.weight(.medium))
-                        .foregroundStyle(.secondary)
-                    Text(viewModel.importedMusicName)
-                        .font(.headline)
-                        .lineLimit(2)
+                HStack(spacing: 10) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.blue.opacity(0.14))
+                            .frame(width: 30, height: 30)
+                        Image(systemName: "music.note")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(Color.blue.opacity(0.92))
+                    }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Current Track")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(viewModel.importedMusicName)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                    }
                 }
-                Spacer()
+
                 Button {
                     isMusicImporterPresented = true
                 } label: {
-                    Label("Import From Files", systemImage: "square.and.arrow.down")
+                    HStack(spacing: 10) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(.white.opacity(0.18))
+                                .frame(width: 30, height: 30)
+                            Image(systemName: "waveform.badge.plus")
+                                .font(.system(size: 14, weight: .bold))
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Import Music")
+                                .font(.subheadline.weight(.semibold))
+                            Text("From Files")
+                                .font(.caption2)
+                                .foregroundStyle(.white.opacity(0.82))
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .background(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.20, green: 0.45, blue: 0.86),
+                            Color(red: 0.12, green: 0.24, blue: 0.62)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                )
             }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white.opacity(0.58), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Built-in Sample Music")
+                Text("Built-In Soundtracks")
                     .font(.headline)
                 Picker("Demo Track", selection: $viewModel.selectedDemoTrackID) {
                     ForEach(viewModel.demoTracks) { track in
@@ -739,25 +793,33 @@ struct ContentView: View {
                 }
                 .pickerStyle(.menu)
 
-                Button {
-                    viewModel.loadSelectedBundledMusic()
-                } label: {
-                    Label("Use Selected Sample Track", systemImage: "music.note.list")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.bordered)
+                Text("Pick a soundtrack and it becomes active right away.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                Text("Sample tracks by Kevin MacLeod / Incompetech, licensed under CC BY 3.0.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white.opacity(0.7), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .onChange(of: viewModel.selectedDemoTrackID) { _, _ in
+                viewModel.loadSelectedBundledMusic()
+            }
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Volume")
-                    .font(.caption.weight(.medium))
+                Text("Music Level In Final Video")
+                    .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Slider(value: $viewModel.musicVolume, in: 0...1)
                     .tint(.blue)
+                Text("This level is used for both music preview and the final exported video mix.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
+            .padding(14)
+            .background(Color.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
             HStack(spacing: 12) {
                 Button {
@@ -775,7 +837,8 @@ struct ContentView: View {
                     Label("Stop", systemImage: "stop.fill")
                         .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
             }
 
             Spacer(minLength: 0)

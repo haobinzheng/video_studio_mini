@@ -13,9 +13,9 @@
 		A1B2C3D41E00000400000001 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00000400000001 /* Assets.xcassets */; };
 		A1B2C3D41E00000500000001 /* Preview Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00000600000001 /* Preview Assets.xcassets */; };
 		A1B2C3D41E00000600000001 /* VideoExporter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00000800000001 /* VideoExporter.swift */; };
-		A1B2C3D41E00000700000001 /* SampleMusic/calm_breeze.wav in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00000900000001 /* SampleMusic/calm_breeze.wav */; };
-		A1B2C3D41E00000800000001 /* SampleMusic/city_pop.wav in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001000000001 /* SampleMusic/city_pop.wav */; };
-		A1B2C3D41E00000900000001 /* SampleMusic/piano_moment.wav in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001100000001 /* SampleMusic/piano_moment.wav */; };
+		A1B2C3D41E00000700000001 /* SampleMusic/dream_culture.mp3 in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00000900000001 /* SampleMusic/dream_culture.mp3 */; };
+		A1B2C3D41E00000800000001 /* SampleMusic/local_forecast.mp3 in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001000000001 /* SampleMusic/local_forecast.mp3 */; };
+		A1B2C3D41E00000900000001 /* SampleMusic/airship_serenity.mp3 in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001100000001 /* SampleMusic/airship_serenity.mp3 */; };
 		A1B2C3D41E00001000000001 /* NarrationPreviewBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001200000001 /* NarrationPreviewBuilder.swift */; };
 		A1B2C3D41E00001100000001 /* SubtitleTimelineEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001300000001 /* SubtitleTimelineEngine.swift */; };
 /* End PBXBuildFile section */
@@ -29,9 +29,9 @@
 		A1B2C3D41D00000600000001 /* Preview Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = "Preview Assets.xcassets"; sourceTree = "<group>"; };
 		A1B2C3D41D00000700000001 /* CapcutApp.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CapcutApp.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A1B2C3D41D00000800000001 /* VideoExporter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = VideoExporter.swift; sourceTree = "<group>"; };
-		A1B2C3D41D00000900000001 /* SampleMusic/calm_breeze.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = SampleMusic/calm_breeze.wav; sourceTree = "<group>"; };
-		A1B2C3D41D00001000000001 /* SampleMusic/city_pop.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = SampleMusic/city_pop.wav; sourceTree = "<group>"; };
-		A1B2C3D41D00001100000001 /* SampleMusic/piano_moment.wav */ = {isa = PBXFileReference; lastKnownFileType = audio.wav; path = SampleMusic/piano_moment.wav; sourceTree = "<group>"; };
+		A1B2C3D41D00000900000001 /* SampleMusic/dream_culture.mp3 */ = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = SampleMusic/dream_culture.mp3; sourceTree = "<group>"; };
+		A1B2C3D41D00001000000001 /* SampleMusic/local_forecast.mp3 */ = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = SampleMusic/local_forecast.mp3; sourceTree = "<group>"; };
+		A1B2C3D41D00001100000001 /* SampleMusic/airship_serenity.mp3 */ = {isa = PBXFileReference; lastKnownFileType = audio.mp3; path = SampleMusic/airship_serenity.mp3; sourceTree = "<group>"; };
 		A1B2C3D41D00001200000001 /* NarrationPreviewBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NarrationPreviewBuilder.swift; sourceTree = "<group>"; };
 		A1B2C3D41D00001300000001 /* SubtitleTimelineEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleTimelineEngine.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
@@ -64,9 +64,9 @@
 				A1B2C3D41D00000800000001 /* VideoExporter.swift */,
 				A1B2C3D41D00001200000001 /* NarrationPreviewBuilder.swift */,
 				A1B2C3D41D00001300000001 /* SubtitleTimelineEngine.swift */,
-				A1B2C3D41D00000900000001 /* SampleMusic/calm_breeze.wav */,
-				A1B2C3D41D00001000000001 /* SampleMusic/city_pop.wav */,
-				A1B2C3D41D00001100000001 /* SampleMusic/piano_moment.wav */,
+				A1B2C3D41D00000900000001 /* SampleMusic/dream_culture.mp3 */,
+				A1B2C3D41D00001000000001 /* SampleMusic/local_forecast.mp3 */,
+				A1B2C3D41D00001100000001 /* SampleMusic/airship_serenity.mp3 */,
 				A1B2C3D41D00000400000001 /* Assets.xcassets */,
 				A1B2C3D41D00000600000001 /* Preview Assets.xcassets */,
 				A1B2C3D41D00000500000001 /* Info.plist */,
@@ -142,9 +142,9 @@
 			files = (
 				A1B2C3D41E00000400000001 /* Assets.xcassets in Resources */,
 				A1B2C3D41E00000500000001 /* Preview Assets.xcassets in Resources */,
-				A1B2C3D41E00000700000001 /* SampleMusic/calm_breeze.wav in Resources */,
-				A1B2C3D41E00000800000001 /* SampleMusic/city_pop.wav in Resources */,
-				A1B2C3D41E00000900000001 /* SampleMusic/piano_moment.wav in Resources */,
+				A1B2C3D41E00000700000001 /* SampleMusic/dream_culture.mp3 in Resources */,
+				A1B2C3D41E00000800000001 /* SampleMusic/local_forecast.mp3 in Resources */,
+				A1B2C3D41E00000900000001 /* SampleMusic/airship_serenity.mp3 in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
