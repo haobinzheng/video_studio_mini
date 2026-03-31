@@ -6,7 +6,7 @@ import UniformTypeIdentifiers
 struct ContentView: View {
     enum StudioStep: String, CaseIterable, Identifiable {
         case photos = "Photos"
-        case narration = "Narration"
+        case narration = "Script"
         case music = "Music"
         case video = "Video"
 
@@ -117,47 +117,58 @@ struct ContentView: View {
     private var photoSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
-                Text("1. Photos")
+                Text("1. Media")
                     .font(.title2.weight(.semibold))
                 Spacer()
                 PhotosPicker(
                     selection: $viewModel.selectedPhotoItems,
-                    matching: .images
+                    matching: .any(of: [.images, .videos])
                 ) {
-                    Label("Choose Photos", systemImage: "photo.on.rectangle.angled")
+                    Label("Choose Media", systemImage: "photo.on.rectangle.angled")
                         .font(.headline)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.orange)
             }
 
-            Text("After picking photos, move to Narration, Music, and Video.")
+            Text("Pick photos or muted video clips, then move to Narration, Music, and Video.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
 
-            if viewModel.photos.isEmpty {
+            if viewModel.mediaItems.isEmpty {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .fill(Color.white.opacity(0.65))
                     .frame(maxHeight: .infinity)
                     .overlay {
                         VStack(spacing: 10) {
-                            Image(systemName: "photo.stack")
+                            Image(systemName: "photo.on.rectangle.angled")
                                 .font(.system(size: 40))
-                            Text("Your selected photos will appear here.")
+                            Text("Your selected photos and videos will appear here.")
                                 .font(.headline)
                         }
                         .foregroundStyle(.secondary)
                     }
             } else {
                 VStack(spacing: 14) {
-                    Image(uiImage: viewModel.photos[viewModel.currentSlideIndex].image)
+                    Image(uiImage: viewModel.mediaItems[viewModel.currentSlideIndex].previewImage)
                         .resizable()
                         .scaledToFill()
                         .frame(height: 280)
                         .frame(maxWidth: .infinity)
                         .clipShape(RoundedRectangle(cornerRadius: 28, style: .continuous))
+                        .overlay(alignment: .topLeading) {
+                            if viewModel.mediaItems[viewModel.currentSlideIndex].isVideo {
+                                Label("Video", systemImage: "video.fill")
+                                    .font(.caption.weight(.bold))
+                                    .padding(.horizontal, 10)
+                                    .padding(.vertical, 6)
+                                    .background(.black.opacity(0.55), in: Capsule())
+                                    .foregroundStyle(.white)
+                                    .padding(14)
+                            }
+                        }
                         .overlay(alignment: .bottomTrailing) {
-                            Text("\(viewModel.currentSlideIndex + 1)/\(viewModel.photos.count)")
+                            Text("\(viewModel.currentSlideIndex + 1)/\(viewModel.mediaItems.count)")
                                 .font(.caption.weight(.bold))
                                 .padding(.horizontal, 10)
                                 .padding(.vertical, 6)
@@ -264,9 +275,20 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Text("Narration length: \(viewModel.narrationText.count) characters")
-                .font(.caption)
-                .foregroundStyle(.secondary)
+            HStack {
+                Text("Script length: \(viewModel.narrationText.count) characters")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    viewModel.clearNarration()
+                } label: {
+                    Label("Clear Text", systemImage: "xmark.circle")
+                        .font(.caption.weight(.semibold))
+                }
+                .buttonStyle(.bordered)
+                .disabled(viewModel.narrationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
 
             TextEditor(text: $viewModel.narrationText)
                 .frame(maxWidth: .infinity, minHeight: 260, maxHeight: .infinity)
@@ -289,7 +311,7 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Preview")
                         .font(.headline)
-                    Text("Build narration once, then scrub the subtitle timing against the recorded preview audio.")
+                    Text("Optional: build a seekable preview to inspect subtitle timing before export.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -304,32 +326,42 @@ struct ContentView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+            Button {
+                viewModel.buildNarrationPreview()
+            } label: {
+                HStack {
+                    Image(systemName: viewModel.isPreparingNarrationPreview ? "hourglass" : "waveform.badge.magnifyingglass")
+                    Text(viewModel.isPreparingNarrationPreview ? "Building Preview..." : "Build Preview")
+                        .fontWeight(.semibold)
+                    Spacer()
+                    Text("Testing tool")
+                        .font(.caption)
+                        .foregroundStyle(.white.opacity(0.8))
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 14)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .background(Color.purple, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .disabled(viewModel.isPreparingNarrationPreview)
+
             HStack(spacing: 12) {
-                Button {
-                    viewModel.buildNarrationPreview()
-                } label: {
-                    Label(viewModel.isPreparingNarrationPreview ? "Building..." : "Build Preview", systemImage: "waveform.badge.magnifyingglass")
-                        .frame(maxWidth: .infinity)
-                }
-                .buttonStyle(.borderedProminent)
-                .tint(.purple)
-                .disabled(viewModel.isPreparingNarrationPreview)
-
-                Button {
+                previewControlButton(
+                    title: viewModel.isNarrationPreviewPlaying ? "Pause" : "Play",
+                    systemImage: viewModel.isNarrationPreviewPlaying ? "pause.fill" : "play.fill",
+                    tint: .orange
+                ) {
                     viewModel.toggleNarrationPreviewPlayback()
-                } label: {
-                    Label(viewModel.isNarrationPreviewPlaying ? "Pause" : "Play", systemImage: viewModel.isNarrationPreviewPlaying ? "pause.fill" : "play.fill")
-                        .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
 
-                Button {
+                previewControlButton(
+                    title: "Stop",
+                    systemImage: "stop.fill",
+                    tint: .gray
+                ) {
                     viewModel.stopNarrationPreview()
-                } label: {
-                    Label("Stop", systemImage: "stop.fill")
-                        .frame(maxWidth: .infinity)
                 }
-                .buttonStyle(.bordered)
             }
 
             if viewModel.narrationPreviewDuration > 0 {
@@ -370,7 +402,10 @@ struct ContentView: View {
 
                 Text(viewModel.narrationPreviewCaption)
                     .font(.body.weight(.semibold))
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .lineLimit(nil)
+                    .multilineTextAlignment(.leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
                     .padding(14)
                     .background(Color.white.opacity(0.85), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
@@ -382,64 +417,28 @@ struct ContentView: View {
     private var scriptToolsSection: some View {
         DisclosureGroup(isExpanded: $isScriptToolsExpanded) {
             VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 12) {
-                    Button {
+                HStack(spacing: 10) {
+                    scriptToolButton(title: "Paste", systemImage: "doc.on.clipboard") {
                         viewModel.pasteNarrationFromClipboard()
-                    } label: {
-                        Label("Paste Replace", systemImage: "doc.on.clipboard")
-                            .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.bordered)
 
-                    Button {
-                        viewModel.appendNarrationFromClipboard()
-                    } label: {
-                        Label("Paste Append", systemImage: "text.append")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                }
-
-                HStack(spacing: 12) {
-                    Button {
+                    scriptToolButton(title: "Sample", systemImage: "text.badge.plus") {
                         viewModel.loadSampleNarration()
-                    } label: {
-                        Label("Load Sample Script", systemImage: "text.badge.plus")
-                            .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.bordered)
-
-                    Button {
-                        viewModel.clearNarration()
-                    } label: {
-                        Label("Clear Script", systemImage: "xmark.circle")
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
                 }
 
-                HStack(spacing: 12) {
-                    Button {
+                HStack(spacing: 10) {
+                    scriptToolButton(
+                        title: viewModel.isSpeaking ? "Stop Voice" : "Play Voice",
+                        systemImage: viewModel.isSpeaking ? "stop.circle.fill" : "speaker.wave.2.fill"
+                    ) {
                         viewModel.playNarration()
-                    } label: {
-                        Label(viewModel.isSpeaking ? "Stop Live Narration" : "Play Live Narration", systemImage: viewModel.isSpeaking ? "stop.circle.fill" : "speaker.wave.2.fill")
-                            .frame(maxWidth: .infinity)
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.pink)
 
-                    Button {
-                        viewModel.inspectClipboard()
-                    } label: {
-                        Label("Check Clipboard", systemImage: "magnifyingglass")
-                            .frame(maxWidth: .infinity)
+                    scriptToolButton(title: "Clear", systemImage: "xmark.circle") {
+                        viewModel.clearNarration()
                     }
-                    .buttonStyle(.bordered)
                 }
-
-                Text("Clipboard preview: \(viewModel.clipboardPreview)")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             .padding(.top, 8)
         } label: {
@@ -448,6 +447,53 @@ struct ContentView: View {
         }
         .padding(16)
         .background(Color.white.opacity(0.68), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+
+    private func previewControlButton(
+        title: String,
+        systemImage: String,
+        tint: Color,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                Text(title)
+                    .fontWeight(.semibold)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(tint)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white.opacity(0.85))
+        )
+    }
+
+    private func scriptToolButton(
+        title: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            VStack(spacing: 6) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 18, weight: .semibold))
+                Text(title)
+                    .font(.caption.weight(.semibold))
+                    .multilineTextAlignment(.center)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white.opacity(0.82))
+        )
     }
 
     private var musicSection: some View {
@@ -538,20 +584,38 @@ struct ContentView: View {
             Text("4. Create Video")
                 .font(.title2.weight(.semibold))
 
-            Text("This step renders your selected photos into a video and adds narration, captions, and background music if available.")
+            Text("This step builds narration and captions automatically, then renders your selected media with background music if available.")
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
+
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Aspect Ratio")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+
+                Picker("Aspect Ratio", selection: $viewModel.selectedAspectRatio) {
+                    ForEach(VideoExporter.AspectRatio.allCases) { ratio in
+                        Text(ratio.rawValue).tag(ratio)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
 
             HStack(spacing: 12) {
                 Button {
                     viewModel.buildVideo()
                 } label: {
-                    Label(viewModel.isExportingVideo ? "Rendering..." : "Create Video", systemImage: "film.stack")
+                    Label(
+                        viewModel.isLoadingMediaSelection
+                            ? "Loading Media..."
+                            : (viewModel.isExportingVideo ? "Rendering..." : "Create Video"),
+                        systemImage: viewModel.isLoadingMediaSelection ? "hourglass" : "film.stack"
+                    )
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.green)
-                .disabled(viewModel.isExportingVideo)
+                .disabled(viewModel.isExportingVideo || viewModel.isLoadingMediaSelection)
 
                 if let exportedVideoURL = viewModel.exportedVideoURL {
                     ShareLink(item: exportedVideoURL) {

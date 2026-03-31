@@ -29,8 +29,6 @@ struct NarrationPreviewBuilder {
         let weight: Double
     }
 
-    private let maximumPreviewDuration: TimeInterval = 300
-
     func buildPreview(text: String, voiceIdentifier: String) async throws -> PreviewResult {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let segments = SpeechVoiceLibrary.narrationSegments(from: normalized)
@@ -53,7 +51,7 @@ struct NarrationPreviewBuilder {
             utteranceDurations.append(duration)
         }
 
-        let measuredDuration = min(utteranceDurations.reduce(0, +), maximumPreviewDuration)
+        let measuredDuration = max(utteranceDurations.reduce(0, +), 1)
         try await mergeAudioFiles(utteranceURLs, outputURL: outputAudioURL)
         let cues = buildCues(segments: segments, utteranceDurations: utteranceDurations, totalDuration: measuredDuration)
         try writeCues(cues, to: outputJSONURL)
@@ -185,7 +183,7 @@ struct NarrationPreviewBuilder {
     private func captionChunks(for segment: String) -> [CueChunk] {
         let normalizedSegment = SpeechVoiceLibrary.normalizedCaptionText(segment)
         let phrases = normalizedSegment
-            .components(separatedBy: CharacterSet(charactersIn: ",，、:："))
+            .components(separatedBy: CharacterSet(charactersIn: ",，、"))
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
 
@@ -245,26 +243,27 @@ struct NarrationPreviewBuilder {
     }
 
     private func englishWeight(for text: String) -> Double {
-        let words = text.split(whereSeparator: \.isWhitespace)
-        let punctuation = Double(text.filter { ",.!?;:".contains($0) }.count)
-        return max(Double(words.count) + punctuation * 1.2, 1.0)
+        let timingText = SpeechVoiceLibrary.normalizedTimingText(text)
+        let words = timingText.split(whereSeparator: \.isWhitespace)
+        return max(Double(words.count), 1.0)
     }
 
     private func cjkWeight(for text: String) -> Double {
-        let punctuation = Double(text.filter { "，。、！？；：".contains($0) }.count)
-        return max(Double(text.count) * 0.6 + punctuation * 1.2, 1.0)
+        let timingText = SpeechVoiceLibrary.normalizedTimingText(text)
+        return max(Double(timingText.count) * 0.6, 1.0)
     }
 
     private func estimatedSeconds(for text: String) -> TimeInterval {
-        if text.contains(where: isCJK) {
-            return max(Double(text.count) / 3.6, 0.8)
+        let timingText = SpeechVoiceLibrary.normalizedTimingText(text)
+        if timingText.contains(where: isCJK) {
+            return max(Double(timingText.count) / 3.6, 0.8)
         }
-        let words = text.split(whereSeparator: \.isWhitespace)
+        let words = timingText.split(whereSeparator: \.isWhitespace)
         return max(Double(words.count) / 2.4, 0.8)
     }
 
     private func minimumCueDuration(for text: String) -> TimeInterval {
-        text.contains(where: isCJK) ? 0.9 : 0.7
+        SpeechVoiceLibrary.normalizedTimingText(text).contains(where: isCJK) ? 0.9 : 0.7
     }
 
     private func isCJK(_ character: Character) -> Bool {

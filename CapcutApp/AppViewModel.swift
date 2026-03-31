@@ -1,14 +1,53 @@
 import AVFoundation
+import CoreTransferable
 import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
 
+private struct PickedMovie: Transferable {
+    let url: URL
+
+    static var transferRepresentation: some TransferRepresentation {
+        FileRepresentation(contentType: .movie) { movie in
+            SentTransferredFile(movie.url)
+        } importing: { received in
+            let fileName = received.file.lastPathComponent.isEmpty
+                ? "picked-movie-\(UUID().uuidString).mov"
+                : received.file.lastPathComponent
+            let destination = FileManager.default.temporaryDirectory
+                .appendingPathComponent(UUID().uuidString)
+                .appendingPathComponent(fileName)
+
+            let parent = destination.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+
+            if FileManager.default.fileExists(atPath: destination.path) {
+                try FileManager.default.removeItem(at: destination)
+            }
+
+            try FileManager.default.copyItem(at: received.file, to: destination)
+            return Self(url: destination)
+        }
+    }
+}
+
 @MainActor
 final class AppViewModel: NSObject, ObservableObject {
-    struct PhotoItem: Identifiable, Equatable {
+    struct MediaItem: Identifiable, Equatable {
+        enum Kind: Equatable {
+            case photo
+            case video(url: URL, duration: Double)
+        }
+
         let id = UUID()
-        let image: UIImage
+        let previewImage: UIImage
+        let kind: Kind
+
+        var isVideo: Bool {
+            if case .video = kind { return true }
+            return false
+        }
     }
 
     struct VoiceOption: Identifiable {
@@ -33,17 +72,18 @@ final class AppViewModel: NSObject, ObservableObject {
         let fileName: String
     }
 
-    @Published var photos: [PhotoItem] = []
+    @Published var mediaItems: [MediaItem] = []
     @Published var narrationText = "Welcome to my CapCut-style video. Add your own script here."
     @Published var selectedPhotoItems: [PhotosPickerItem] = [] {
         didSet {
             Task {
-                await loadSelectedPhotos(from: selectedPhotoItems)
+                await loadSelectedMedia(from: selectedPhotoItems)
             }
         }
     }
     @Published var currentSlideIndex = 0
     @Published var importedMusicName = "No music selected"
+    @Published var isLoadingMediaSelection = false
     @Published var isSpeaking = false
     @Published var isPreparingNarrationPreview = false
     @Published var isNarrationPreviewPlaying = false
@@ -67,6 +107,7 @@ final class AppViewModel: NSObject, ObservableObject {
         DemoTrackOption(id: "piano_moment", name: "Piano Moment", description: "Gentle piano with soft echo", fileName: "piano_moment")
     ]
     @Published var selectedDemoTrackID = "calm_breeze"
+    @Published var selectedAspectRatio: VideoExporter.AspectRatio = .vertical
     @Published var musicVolume: Double = 0.6 {
         didSet {
             audioPlayer?.volume = Float(musicVolume)
@@ -83,6 +124,8 @@ final class AppViewModel: NSObject, ObservableObject {
     private var narrationPreviewAudioURL: URL?
     private var narrationPreviewCues: [NarrationPreviewBuilder.SubtitleCue] = []
     private var narrationTimelineEngine = SubtitleTimelineEngine(cues: [])
+    private var previewSourceText = ""
+    private var previewSourceVoiceIdentifier = ""
     private var pendingUtteranceCount = 0
     private var didLoadFullVoiceList = false
     private lazy var speechSynthesizer: AVSpeechSynthesizer = {
@@ -135,38 +178,26 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     func buildNarrationPreview() {
-        guard !narrationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+        let text = normalizedNarrationSourceText
+        guard !text.isEmpty else {
             statusMessage = "Add some narration text before building the preview."
             return
         }
 
-        configureAudioSessionIfNeeded()
-        isPreparingNarrationPreview = true
-        stopNarrationPreview()
-        narrationPreviewCaption = "Building narration preview..."
-        statusMessage = "Generating seekable narration preview."
-
-        let text = narrationText
         let voiceIdentifier = selectedVoiceIdentifier
 
         Task {
             do {
-                let preview = try await narrationPreviewBuilder.buildPreview(text: text, voiceIdentifier: voiceIdentifier)
-                narrationPreviewPlayer = try AVAudioPlayer(contentsOf: preview.audioURL)
-                narrationPreviewPlayer?.prepareToPlay()
-                narrationPreviewAudioURL = preview.audioURL
-                narrationPreviewDuration = preview.duration
-                narrationPreviewCurrentTime = 0
-                narrationPreviewCues = preview.cues
-                narrationTimelineEngine = SubtitleTimelineEngine(cues: narrationPreviewCues)
-                narrationPreviewCaption = preview.cues.first?.text ?? "Preview ready."
-                statusMessage = "Seekable narration preview is ready."
+                try await prepareNarrationPreview(
+                    text: text,
+                    voiceIdentifier: voiceIdentifier,
+                    startedMessage: "Generating seekable narration preview.",
+                    completedMessage: "Seekable narration preview is ready."
+                )
             } catch {
                 narrationPreviewCaption = "Preview generation failed."
                 statusMessage = error.localizedDescription.isEmpty ? "Could not build narration preview." : error.localizedDescription
             }
-
-            isPreparingNarrationPreview = false
         }
     }
 
@@ -339,38 +370,70 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     func nextSlide() {
-        guard !photos.isEmpty else { return }
-        currentSlideIndex = (currentSlideIndex + 1) % photos.count
+        guard !mediaItems.isEmpty else { return }
+        currentSlideIndex = (currentSlideIndex + 1) % mediaItems.count
     }
 
     func previousSlide() {
-        guard !photos.isEmpty else { return }
-        currentSlideIndex = (currentSlideIndex - 1 + photos.count) % photos.count
+        guard !mediaItems.isEmpty else { return }
+        currentSlideIndex = (currentSlideIndex - 1 + mediaItems.count) % mediaItems.count
     }
 
     func buildVideo() {
-        guard !photos.isEmpty else {
-            statusMessage = "Pick photos before creating a video."
+        guard !isLoadingMediaSelection else {
+            statusMessage = "Media is still loading. Please wait a moment, then create the video."
+            return
+        }
+
+        guard !mediaItems.isEmpty else {
+            statusMessage = "Pick photos or videos before creating a video."
             return
         }
 
         isExportingVideo = true
         exportedVideoURL = nil
-        statusMessage = "Rendering your video. This can take a moment."
+        statusMessage = "Preparing narration, captions, and media for export."
 
-        let images = photos.map(\.image)
-        let narrationText = narrationText
+        let exportMediaItems = mediaItems.map { item in
+            let exportKind: VideoExporter.MediaItem.Kind
+
+            switch item.kind {
+            case .photo:
+                exportKind = .photo
+            case let .video(url, duration):
+                exportKind = .video(url: url, duration: CMTime(seconds: duration, preferredTimescale: 600))
+            }
+
+            return VideoExporter.MediaItem(
+                previewImage: item.previewImage,
+                kind: exportKind
+            )
+        }
+        let narrationText = normalizedNarrationSourceText
         let backgroundMusicURL = importedMusicURL
-        let previewAudioURL = narrationPreviewAudioURL
-        let previewCues = narrationPreviewCues
+        let voiceIdentifier = selectedVoiceIdentifier
 
         Task {
             do {
+                if !narrationText.isEmpty, needsPreviewRefresh(for: narrationText, voiceIdentifier: voiceIdentifier) {
+                    try await prepareNarrationPreview(
+                        text: narrationText,
+                        voiceIdentifier: voiceIdentifier,
+                        startedMessage: "Preparing narration and captions for video export.",
+                        completedMessage: "Narration and captions are ready. Rendering your video now."
+                    )
+                } else {
+                    statusMessage = "Rendering your video. This can take a moment."
+                }
+
+                let previewAudioURL = narrationText.isEmpty ? nil : narrationPreviewAudioURL
+                let previewCues = narrationText.isEmpty ? [] : narrationPreviewCues
                 let exportedURL = try await videoExporter.exportVideo(
-                    images: images,
+                    mediaItems: exportMediaItems,
                     narrationText: narrationText,
                     backgroundMusicURL: backgroundMusicURL,
-                    voiceIdentifier: selectedVoiceIdentifier,
+                    voiceIdentifier: voiceIdentifier,
+                    aspectRatio: selectedAspectRatio,
                     externalCues: previewCues,
                     externalNarrationAudioURL: previewAudioURL
                 )
@@ -402,28 +465,134 @@ final class AppViewModel: NSObject, ObservableObject {
         }
     }
 
-    private func loadSelectedPhotos(from pickerItems: [PhotosPickerItem]) async {
+    private func loadSelectedMedia(from pickerItems: [PhotosPickerItem]) async {
+        isLoadingMediaSelection = true
+        defer {
+            isLoadingMediaSelection = false
+        }
+
         guard !pickerItems.isEmpty else {
-            photos = []
+            mediaItems = []
             currentSlideIndex = 0
-            statusMessage = "Photos cleared. Pick new photos to continue."
+            statusMessage = "Media cleared. Pick new photos or videos to continue."
             return
         }
 
-        var loadedPhotos: [PhotoItem] = []
+        var loadedMedia: [MediaItem] = []
 
         for item in pickerItems {
-            if let data = try? await item.loadTransferable(type: Data.self),
-               let image = UIImage(data: data) {
-                loadedPhotos.append(PhotoItem(image: image.normalizedOrientationImage()))
+            if item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) || $0.conforms(to: .video) }) {
+                if let videoURL = await importedVideoURL(from: item),
+                   let previewImage = await makeVideoThumbnail(for: videoURL) {
+                    let duration = await videoDuration(for: videoURL)
+                    loadedMedia.append(
+                        MediaItem(
+                            previewImage: previewImage,
+                            kind: .video(url: videoURL, duration: duration)
+                        )
+                    )
+                }
+            } else if let data = try? await item.loadTransferable(type: Data.self),
+                      let image = UIImage(data: data) {
+                loadedMedia.append(MediaItem(previewImage: image.normalizedOrientationImage(), kind: .photo))
             }
         }
 
-        photos = loadedPhotos
+        mediaItems = loadedMedia
         currentSlideIndex = 0
-        statusMessage = loadedPhotos.isEmpty
-            ? "No valid photos were selected."
-            : "\(loadedPhotos.count) photo(s) ready for your project."
+        statusMessage = loadedMedia.isEmpty
+            ? "No valid photos or videos were selected."
+            : "\(loadedMedia.count) media item(s) ready for your project."
+    }
+
+    private func importedVideoURL(from item: PhotosPickerItem) async -> URL? {
+        if let pickedMovie = try? await item.loadTransferable(type: PickedMovie.self),
+           let copiedURL = try? copyImportedFileToDocuments(pickedMovie.url) {
+            return copiedURL
+        }
+
+        if let pickedURL = try? await item.loadTransferable(type: URL.self),
+           let copiedURL = try? copyImportedFileToDocuments(pickedURL) {
+            return copiedURL
+        }
+
+        guard let videoData = try? await item.loadTransferable(type: Data.self) else {
+            return nil
+        }
+
+        let videoType = item.supportedContentTypes.first(where: { $0.conforms(to: .movie) || $0.conforms(to: .video) })
+        let preferredExtension = videoType?.preferredFilenameExtension ?? "mov"
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let destination = documents.appendingPathComponent("picked-video-\(UUID().uuidString).\(preferredExtension)")
+
+        do {
+            try videoData.write(to: destination, options: .atomic)
+            return destination
+        } catch {
+            return nil
+        }
+    }
+
+    private var normalizedNarrationSourceText: String {
+        narrationText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private func needsPreviewRefresh(for text: String, voiceIdentifier: String) -> Bool {
+        narrationPreviewAudioURL == nil
+            || narrationPreviewCues.isEmpty
+            || previewSourceText != text
+            || previewSourceVoiceIdentifier != voiceIdentifier
+    }
+
+    private func prepareNarrationPreview(
+        text: String,
+        voiceIdentifier: String,
+        startedMessage: String,
+        completedMessage: String
+    ) async throws {
+        configureAudioSessionIfNeeded()
+        isPreparingNarrationPreview = true
+        stopNarrationPreview()
+        narrationPreviewCaption = "Building narration preview..."
+        statusMessage = startedMessage
+        defer {
+            isPreparingNarrationPreview = false
+        }
+
+        let preview = try await narrationPreviewBuilder.buildPreview(text: text, voiceIdentifier: voiceIdentifier)
+        narrationPreviewPlayer = try AVAudioPlayer(contentsOf: preview.audioURL)
+        narrationPreviewPlayer?.prepareToPlay()
+        narrationPreviewAudioURL = preview.audioURL
+        narrationPreviewDuration = preview.duration
+        narrationPreviewCurrentTime = 0
+        narrationPreviewCues = preview.cues
+        narrationTimelineEngine = SubtitleTimelineEngine(cues: narrationPreviewCues)
+        narrationPreviewCaption = preview.cues.first?.text ?? "Preview ready."
+        previewSourceText = text
+        previewSourceVoiceIdentifier = voiceIdentifier
+        statusMessage = completedMessage
+    }
+
+    private func videoDuration(for url: URL) async -> Double {
+        let asset = AVURLAsset(url: url)
+        let duration = try? await asset.load(.duration)
+        return duration.map(CMTimeGetSeconds) ?? 0
+    }
+
+    private func makeVideoThumbnail(for url: URL) async -> UIImage? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let asset = AVURLAsset(url: url)
+                let generator = AVAssetImageGenerator(asset: asset)
+                generator.appliesPreferredTrackTransform = true
+                let time = CMTime(seconds: 0.1, preferredTimescale: 600)
+                if let cgImage = try? generator.copyCGImage(at: time, actualTime: nil) {
+                    continuation.resume(returning: UIImage(cgImage: cgImage))
+                } else {
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
     }
 
     private func configureAudioSessionIfNeeded() {
@@ -627,6 +796,23 @@ enum SpeechVoiceLibrary {
 
     static func normalizedCaptionText(_ text: String) -> String {
         collapseCaptionWhitespace(in: normalizeSpeechText(text))
+    }
+
+    static func normalizedTimingText(_ text: String) -> String {
+        let normalized = normalizedCaptionText(text)
+        let withoutSilentSymbols = normalized.replacingOccurrences(
+            of: "[()\\[\\]{}\"“”‘’]",
+            with: " ",
+            options: .regularExpression
+        )
+        let punctuationSoftened = withoutSilentSymbols.replacingOccurrences(
+            of: "[.。,;:!?，；：！？、]+",
+            with: " ",
+            options: .regularExpression
+        )
+        return punctuationSoftened
+            .replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
     static func makeUtterance(from text: String, voiceIdentifier: String) -> AVSpeechUtterance {

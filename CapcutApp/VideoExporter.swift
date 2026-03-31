@@ -2,11 +2,35 @@ import AVFoundation
 import UIKit
 
 struct VideoExporter {
-    private let renderSize = CGSize(width: 1080, height: 1920)
+    enum AspectRatio: String, CaseIterable, Identifiable {
+        case vertical = "9:16"
+        case classic = "4:3"
+
+        var id: String { rawValue }
+
+        var renderSize: CGSize {
+            switch self {
+            case .vertical:
+                return CGSize(width: 1080, height: 1920)
+            case .classic:
+                return CGSize(width: 1440, height: 1080)
+            }
+        }
+    }
+
+    struct MediaItem {
+        enum Kind {
+            case photo
+            case video(url: URL, duration: CMTime)
+        }
+
+        let previewImage: UIImage
+        let kind: Kind
+    }
+
     private let frameRate: Int32 = 30
     private let captionLagCompensation = CMTime(seconds: 0.30, preferredTimescale: 600)
     private let narrationDurationBias: Double = 1.90
-    private let maximumVideoDuration = CMTime(seconds: 300, preferredTimescale: 600)
 
     private struct CaptionSegment {
         let text: String
@@ -28,15 +52,21 @@ struct VideoExporter {
         let terminalPauseWeight: Double
     }
 
+    private struct TimelineSegment {
+        let mediaItem: MediaItem
+        let timeRange: CMTimeRange
+    }
+
     func exportVideo(
-        images: [UIImage],
+        mediaItems: [MediaItem],
         narrationText: String,
         backgroundMusicURL: URL?,
         voiceIdentifier: String,
+        aspectRatio: AspectRatio,
         externalCues: [ExternalCue] = [],
         externalNarrationAudioURL: URL? = nil
     ) async throws -> URL {
-        guard !images.isEmpty else {
+        guard !mediaItems.isEmpty else {
             throw ExportError.noPhotos
         }
 
@@ -51,15 +81,17 @@ struct VideoExporter {
             externalCues: externalCues,
             externalNarrationAudioURL: externalNarrationAudioURL
         )
-        let minimumVisualDuration = CMTime(seconds: max(Double(images.count) * 1.6, 3), preferredTimescale: 600)
+        let minimumVisualDuration = minimumVisualDuration(for: mediaItems)
         let totalDuration = narrationTimeline.duration > .zero
             ? max(narrationTimeline.duration, minimumVisualDuration)
             : minimumVisualDuration
+        let timelineSegments = try await makeTimelineSegments(for: mediaItems, totalDuration: totalDuration)
 
         try await renderSlideshow(
-            images: images,
+            timelineSegments: timelineSegments,
             captionSegments: narrationTimeline.captionSegments,
             totalDuration: totalDuration,
+            renderSize: aspectRatio.renderSize,
             outputURL: slideshowURL
         )
         try await mergeAudioAndVideo(
@@ -97,7 +129,7 @@ struct VideoExporter {
             let audioAsset = AVURLAsset(url: externalNarrationAudioURL)
             let audioDuration = try await audioAsset.load(.duration)
             let cueDuration = CMTime(seconds: externalCues.map(\.end).max() ?? 0, preferredTimescale: 600)
-            let resolvedDuration = min(max(audioDuration, cueDuration, CMTime(seconds: 1, preferredTimescale: 600)), maximumVideoDuration)
+            let resolvedDuration = max(audioDuration, cueDuration, CMTime(seconds: 1, preferredTimescale: 600))
             return NarrationTimeline(
                 duration: resolvedDuration,
                 captionSegments: captionSegments(from: externalCues),
@@ -125,10 +157,7 @@ struct VideoExporter {
             preferredTimescale: 600
         )
         let biasedAudioDuration = CMTimeMultiplyByFloat64(measuredNarrationDuration, multiplier: narrationDurationBias)
-        let totalDuration = min(
-            max(biasedAudioDuration, estimatedNarrationDuration, CMTime(seconds: 1, preferredTimescale: 600)),
-            maximumVideoDuration
-        )
+        let totalDuration = max(biasedAudioDuration, estimatedNarrationDuration, CMTime(seconds: 1, preferredTimescale: 600))
         let captionSegments = externalCues.isEmpty
             ? timedCaptionSegments(
                 from: narrationSegments,
@@ -188,9 +217,10 @@ struct VideoExporter {
     }
 
     private func renderSlideshow(
-        images: [UIImage],
+        timelineSegments: [TimelineSegment],
         captionSegments: [CaptionSegment],
         totalDuration: CMTime,
+        renderSize: CGSize,
         outputURL: URL
     ) async throws {
         if FileManager.default.fileExists(atPath: outputURL.path) {
@@ -222,7 +252,7 @@ struct VideoExporter {
         writer.startWriting()
         writer.startSession(atSourceTime: .zero)
 
-        let totalFrames = max(Int(ceil(CMTimeGetSeconds(totalDuration) * Double(frameRate))), images.count)
+        let totalFrames = max(Int(ceil(CMTimeGetSeconds(totalDuration) * Double(frameRate))), timelineSegments.count)
 
         for frameIndex in 0..<totalFrames {
             while !writerInput.isReadyForMoreMediaData {
@@ -230,9 +260,9 @@ struct VideoExporter {
             }
 
             let currentTime = CMTime(value: CMTimeValue(frameIndex), timescale: frameRate)
-            let image = imageForTime(currentTime, images: images, totalDuration: totalDuration)
+            let image = try await mediaFrameForTime(currentTime, timelineSegments: timelineSegments)
             let caption = captionText(for: currentTime, segments: captionSegments)
-            let pixelBuffer = try makePixelBuffer(from: image, caption: caption)
+            let pixelBuffer = try makePixelBuffer(from: image, caption: caption, renderSize: renderSize)
             let presentationTime = CMTime(value: CMTimeValue(frameIndex), timescale: frameRate)
             adaptor.append(pixelBuffer, withPresentationTime: presentationTime)
         }
@@ -348,7 +378,7 @@ struct VideoExporter {
         }
     }
 
-    private func makePixelBuffer(from image: UIImage, caption: String?) throws -> CVPixelBuffer {
+    private func makePixelBuffer(from image: UIImage, caption: String?, renderSize: CGSize) throws -> CVPixelBuffer {
         var pixelBuffer: CVPixelBuffer?
         let attributes = [
             kCVPixelBufferCGImageCompatibilityKey: true,
@@ -395,14 +425,14 @@ struct VideoExporter {
         image.draw(in: aspectFitRect)
 
         if let caption, !caption.isEmpty {
-            drawCaption(caption, in: context)
+            drawCaption(caption, in: context, renderSize: renderSize)
         }
         UIGraphicsPopContext()
 
         return pixelBuffer
     }
 
-    private func drawCaption(_ caption: String, in context: CGContext) {
+    private func drawCaption(_ caption: String, in context: CGContext, renderSize: CGSize) {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         paragraph.lineBreakMode = .byWordWrapping
@@ -482,18 +512,109 @@ struct VideoExporter {
         return segments.first?.text
     }
 
-    private func imageForTime(_ currentTime: CMTime, images: [UIImage], totalDuration: CMTime) -> UIImage {
-        guard let firstImage = images.first else {
-            return UIImage()
+    private func minimumVisualDuration(for mediaItems: [MediaItem]) -> CMTime {
+        let videoDuration = mediaItems.reduce(CMTime.zero) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case let .video(_, duration):
+                return partial + duration
+            }
         }
-        guard images.count > 1 else {
-            return firstImage
+        let photoCount = mediaItems.filter {
+            if case .photo = $0.kind { return true }
+            return false
+        }.count
+        let photoDuration = CMTime(seconds: max(Double(photoCount) * 1.6, photoCount > 0 ? 1.6 : 0), preferredTimescale: 600)
+        return max(videoDuration + photoDuration, CMTime(seconds: 3, preferredTimescale: 600))
+    }
+
+    private func makeTimelineSegments(for mediaItems: [MediaItem], totalDuration: CMTime) async throws -> [TimelineSegment] {
+        let totalVideoDuration = mediaItems.reduce(CMTime.zero) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case let .video(_, duration):
+                return partial + duration
+            }
         }
 
-        let totalSeconds = max(CMTimeGetSeconds(totalDuration), 0.1)
-        let progress = min(max(CMTimeGetSeconds(currentTime) / totalSeconds, 0), 0.999_999)
-        let index = min(Int(progress * Double(images.count)), images.count - 1)
-        return images[index]
+        let photoItems = mediaItems.filter {
+            if case .photo = $0.kind { return true }
+            return false
+        }
+        let remainingForPhotos = CMTimeMaximum(.zero, totalDuration - totalVideoDuration)
+        let perPhotoDuration = photoItems.isEmpty
+            ? CMTime(seconds: 0, preferredTimescale: 600)
+            : CMTimeMultiplyByFloat64(remainingForPhotos, multiplier: 1.0 / Double(photoItems.count))
+
+        var cursor = CMTime.zero
+        var segments: [TimelineSegment] = []
+
+        for item in mediaItems {
+            let duration: CMTime
+            switch item.kind {
+            case .photo:
+                duration = perPhotoDuration > .zero ? perPhotoDuration : CMTime(seconds: 1.6, preferredTimescale: 600)
+            case let .video(_, videoDuration):
+                duration = videoDuration
+            }
+            let segmentRange = CMTimeRange(start: cursor, duration: duration)
+            segments.append(TimelineSegment(mediaItem: item, timeRange: segmentRange))
+            cursor = cursor + duration
+        }
+
+        if let lastIndex = segments.indices.last, cursor < totalDuration {
+            let last = segments[lastIndex]
+            segments[lastIndex] = TimelineSegment(
+                mediaItem: last.mediaItem,
+                timeRange: CMTimeRange(start: last.timeRange.start, end: totalDuration)
+            )
+        }
+
+        return segments
+    }
+
+    private func mediaFrameForTime(_ currentTime: CMTime, timelineSegments: [TimelineSegment]) async throws -> UIImage {
+        guard let segment = timelineSegments.first(where: { $0.timeRange.containsTime(currentTime) }) ?? timelineSegments.last else {
+            return UIImage()
+        }
+
+        switch segment.mediaItem.kind {
+        case .photo:
+            return segment.mediaItem.previewImage
+        case let .video(url, duration):
+            let localTime = min(currentTime - segment.timeRange.start, duration)
+            do {
+                return try await thumbnailForVideo(url: url, localTime: localTime)
+            } catch {
+                return segment.mediaItem.previewImage
+            }
+        }
+    }
+
+    private func thumbnailForVideo(url: URL, localTime: CMTime) async throws -> UIImage {
+        try await withCheckedThrowingContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let asset = AVURLAsset(url: url)
+                let generator = AVAssetImageGenerator(asset: asset)
+                generator.appliesPreferredTrackTransform = true
+                let frameStep = CMTime(value: 1, timescale: self.frameRate)
+                generator.requestedTimeToleranceBefore = frameStep
+                generator.requestedTimeToleranceAfter = frameStep
+
+                let assetDuration = asset.duration
+                let latestFrameTime = assetDuration > frameStep ? assetDuration - frameStep : .zero
+                let safeTime = CMTimeMinimum(CMTimeMaximum(.zero, localTime), latestFrameTime)
+                do {
+                    var actualTime = CMTime.zero
+                    let cgImage = try generator.copyCGImage(at: safeTime, actualTime: &actualTime)
+                    continuation.resume(returning: UIImage(cgImage: cgImage))
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
     }
 
     private static func mediaDuration(for audioFile: AVAudioFile?) -> CMTime {
@@ -578,7 +699,7 @@ struct VideoExporter {
         let normalized = SpeechVoiceLibrary.normalizedCaptionText(text)
         guard !normalized.isEmpty else { return [] }
 
-        let phraseSeparators = CharacterSet(charactersIn: ",，、:：")
+        let phraseSeparators = CharacterSet(charactersIn: ",，、")
         let phrases = normalized.components(separatedBy: phraseSeparators)
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
@@ -671,17 +792,17 @@ struct VideoExporter {
     }
 
     private func speechWeight(for text: String) -> Double {
-        if containsCJK(text) {
-            let cjkCharacters = Double(text.filter { isCJK($0) }.count)
-            let latinCharacters = Double(text.filter { $0.isASCII && $0.isLetter }.count)
-            let punctuation = Double(text.filter { "，。、！？；：".contains($0) }.count)
-            return max((cjkCharacters * 1.15) + (latinCharacters * 0.35) + (punctuation * 1.4), 1.0)
+        let timingText = SpeechVoiceLibrary.normalizedTimingText(text)
+
+        if containsCJK(timingText) {
+            let cjkCharacters = Double(timingText.filter { isCJK($0) }.count)
+            let latinCharacters = Double(timingText.filter { $0.isASCII && $0.isLetter }.count)
+            return max((cjkCharacters * 1.15) + (latinCharacters * 0.35), 1.0)
         }
 
-        let words = text.split(whereSeparator: \.isWhitespace)
+        let words = timingText.split(whereSeparator: \.isWhitespace)
         let syllables = Double(words.reduce(0) { $0 + approximateSyllableCount(in: String($1)) })
-        let punctuation = Double(text.filter { ",.!?;:".contains($0) }.count)
-        return max((Double(words.count) * 1.1) + (syllables * 0.55) + (punctuation * 1.6), 1.0)
+        return max((Double(words.count) * 1.1) + (syllables * 0.55), 1.0)
     }
 
     private func estimatedNarrationSeconds(for texts: [String]) -> Double {
@@ -689,20 +810,20 @@ struct VideoExporter {
     }
 
     private func estimatedSecondsForSegment(_ text: String) -> Double {
-        if containsCJK(text) {
-            let cjkCharacters = Double(text.filter { isCJK($0) }.count)
-            let punctuation = Double(text.filter { "，。、！？；：".contains($0) }.count)
-            return max((cjkCharacters / 3.6) + (punctuation * 0.34), 0.9)
+        let timingText = SpeechVoiceLibrary.normalizedTimingText(text)
+
+        if containsCJK(timingText) {
+            let cjkCharacters = Double(timingText.filter { isCJK($0) }.count)
+            return max(cjkCharacters / 3.6, 0.9)
         }
 
-        let words = text.split(whereSeparator: \.isWhitespace)
+        let words = timingText.split(whereSeparator: \.isWhitespace)
         let syllables = Double(words.reduce(0) { $0 + approximateSyllableCount(in: String($1)) })
-        let punctuation = Double(text.filter { ",.!?;:".contains($0) }.count)
-        return max((Double(words.count) / 2.25) + (syllables * 0.06) + (punctuation * 0.18), 0.9)
+        return max((Double(words.count) / 2.25) + (syllables * 0.06), 0.9)
     }
 
     private func minimumCaptionSeconds(for text: String) -> Double {
-        containsCJK(text) ? 0.95 : 0.85
+        containsCJK(SpeechVoiceLibrary.normalizedTimingText(text)) ? 0.95 : 0.85
     }
 
     private func terminalPauseWeight(for text: String) -> Double {
