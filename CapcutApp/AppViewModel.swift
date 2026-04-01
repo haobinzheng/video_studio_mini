@@ -119,7 +119,13 @@ final class AppViewModel: NSObject, ObservableObject {
         DemoTrackOption(id: "local_forecast", name: "Local Forecast", description: "Bright, grooving, feel-good energy", fileName: "local_forecast", fileExtension: "mp3")
     ]
     @Published var selectedDemoTrackID = "dream_culture"
-    @Published var selectedAspectRatio: VideoExporter.AspectRatio = .vertical
+    @Published var selectedAspectRatio: VideoExporter.AspectRatio = .vertical {
+        didSet {
+            if oldValue != selectedAspectRatio {
+                invalidateRenderedVideo(reason: "Frame updated to \(selectedAspectRatio.rawValue). Build a new preview or final render to see the change.")
+            }
+        }
+    }
     @Published var musicVolume: Double = 0.6 {
         didSet {
             audioPlayer?.volume = Float(musicVolume)
@@ -331,6 +337,10 @@ final class AppViewModel: NSObject, ObservableObject {
         }
     }
 
+    func stopLiveNarrationSilently() {
+        stopLiveNarrationPlayback()
+    }
+
     func loadSampleNarration() {
         stopLiveNarrationPlayback()
         shouldPersistNarrationDraft = false
@@ -418,6 +428,12 @@ final class AppViewModel: NSObject, ObservableObject {
         statusMessage = "Background music stopped."
     }
 
+    func stopMusicSilently() {
+        audioPlayer?.stop()
+        audioPlayer?.currentTime = 0
+        isMusicPlaying = false
+    }
+
     func nextSlide() {
         guard !mediaItems.isEmpty else { return }
         currentSlideIndex = (currentSlideIndex + 1) % mediaItems.count
@@ -448,6 +464,13 @@ final class AppViewModel: NSObject, ObservableObject {
         mediaItems.insert(movedItem, at: destinationIndex)
         currentSlideIndex = mediaItems.firstIndex(where: { $0.id == sourceID }) ?? 0
         statusMessage = "Media order updated."
+    }
+
+    private func invalidateRenderedVideo(reason: String) {
+        videoPreviewURL = nil
+        exportedVideoURL = nil
+        exportProgress = 0
+        statusMessage = reason
     }
 
     func buildVideo() {

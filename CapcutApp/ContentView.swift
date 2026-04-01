@@ -18,6 +18,7 @@ struct ContentView: View {
     @State private var selectedStep: StudioStep = .narration
     @State private var isVoiceListExpanded = false
     @State private var draggedMediaItem: AppViewModel.MediaItem?
+    @State private var renderPreviewPlayer = AVPlayer()
     @FocusState private var isNarrationFocused: Bool
 
     var body: some View {
@@ -43,6 +44,20 @@ struct ContentView: View {
                     viewModel.importMusic(from: url)
                     selectedStep = .music
                 }
+            }
+            .onChange(of: selectedStep) { oldStep, newStep in
+                if oldStep == .narration && newStep != .narration {
+                    viewModel.stopLiveNarrationSilently()
+                }
+                if oldStep == .music && newStep != .music {
+                    viewModel.stopMusicSilently()
+                }
+            }
+            .onChange(of: viewModel.videoPreviewURL) { _, newValue in
+                updateRenderPreviewPlayer(for: newValue)
+            }
+            .onChange(of: viewModel.exportedVideoURL) { _, newValue in
+                updateRenderPreviewPlayer(for: newValue ?? viewModel.videoPreviewURL)
             }
         }
     }
@@ -1073,6 +1088,7 @@ struct ContentView: View {
                 .disabled(viewModel.isExportingVideo || viewModel.isPreparingVideoPreview || viewModel.isLoadingMediaSelection)
 
                 Button {
+                    renderPreviewPlayer.pause()
                     viewModel.buildVideo()
                 } label: {
                     HStack(spacing: 10) {
@@ -1147,7 +1163,7 @@ struct ContentView: View {
 
             if let displayedVideoURL = viewModel.exportedVideoURL ?? viewModel.videoPreviewURL {
                 VStack(alignment: .leading, spacing: 10) {
-                    VideoPlayer(player: AVPlayer(url: displayedVideoURL))
+                    VideoPlayer(player: renderPreviewPlayer)
                         .frame(height: 320)
                         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
 
@@ -1205,6 +1221,16 @@ struct ContentView: View {
     private func formatTime(_ seconds: Double) -> String {
         let total = max(Int(seconds.rounded(.down)), 0)
         return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    private func updateRenderPreviewPlayer(for url: URL?) {
+        renderPreviewPlayer.pause()
+        guard let url else {
+            renderPreviewPlayer.replaceCurrentItem(with: nil)
+            return
+        }
+
+        renderPreviewPlayer.replaceCurrentItem(with: AVPlayerItem(url: url))
     }
 }
 
