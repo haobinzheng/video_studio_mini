@@ -18,6 +18,49 @@ struct VideoExporter {
         }
     }
 
+    enum RenderQuality {
+        case preview
+        case final
+
+        var outputFileName: String {
+            switch self {
+            case .preview:
+                return "capcut-mini-preview.mov"
+            case .final:
+                return "capcut-mini-video.mov"
+            }
+        }
+
+        var frameRate: Int32 {
+            switch self {
+            case .preview:
+                return 8
+            case .final:
+                return 10
+            }
+        }
+
+        var maximumDuration: CMTime? {
+            switch self {
+            case .preview:
+                return CMTime(seconds: 8, preferredTimescale: 600)
+            case .final:
+                return nil
+            }
+        }
+
+        func renderSize(for aspectRatio: AspectRatio) -> CGSize {
+            switch (self, aspectRatio) {
+            case (.preview, .vertical):
+                return CGSize(width: 540, height: 960)
+            case (.preview, .classic):
+                return CGSize(width: 720, height: 540)
+            case (.final, _):
+                return aspectRatio.renderSize
+            }
+        }
+    }
+
     struct MediaItem {
         enum Kind {
             case photo
@@ -28,7 +71,6 @@ struct VideoExporter {
         let kind: Kind
     }
 
-    private let frameRate: Int32 = 10
     private let captionLagCompensation = CMTime(seconds: 0.30, preferredTimescale: 600)
     private let narrationDurationBias: Double = 1.90
 
@@ -104,8 +146,11 @@ struct VideoExporter {
         narrationText: String,
         backgroundMusicURL: URL?,
         backgroundMusicVolume: Double,
+        narrationVolume: Double,
+        videoAudioVolume: Double,
         voiceIdentifier: String,
         aspectRatio: AspectRatio,
+        renderQuality: RenderQuality = .final,
         externalCues: [ExternalCue] = [],
         externalNarrationAudioURL: URL? = nil,
         progressHandler: ((Double, String) -> Void)? = nil
@@ -117,7 +162,7 @@ struct VideoExporter {
         progressHandler?(0.08, "Preparing export workspace.")
         let workspace = try makeWorkspace()
         let slideshowURL = workspace.appendingPathComponent("slideshow.mov")
-        let finalURL = workspace.appendingPathComponent("capcut-mini-video.mov")
+        let finalURL = workspace.appendingPathComponent(renderQuality.outputFileName)
 
         progressHandler?(0.16, "Preparing narration and captions.")
         let narrationTimeline = try await synthesizeNarrationIfNeeded(
@@ -131,29 +176,112 @@ struct VideoExporter {
         let totalDuration = narrationTimeline.duration > .zero
             ? narrationTimeline.duration
             : minimumVisualDuration
-        let timelineSegments = try await makeTimelineSegments(for: mediaItems, totalDuration: totalDuration)
+        let resolvedDuration = renderQuality.maximumDuration.map { min(totalDuration, $0) } ?? totalDuration
+        let trimmedCaptionSegments = captionSegmentsTrimmed(to: resolvedDuration, segments: narrationTimeline.captionSegments)
+        let trimmedNarrationURLs = try await narrationURLsTrimmed(
+            narrationTimeline.utteranceAudioURLs,
+            maxDuration: resolvedDuration
+        )
+        let timelineSegments = try await makeTimelineSegments(for: mediaItems, totalDuration: resolvedDuration)
         progressHandler?(0.24, "Rendering video frames.")
 
         try await renderSlideshow(
             timelineSegments: timelineSegments,
-            captionSegments: narrationTimeline.captionSegments,
-            totalDuration: totalDuration,
-            renderSize: aspectRatio.renderSize,
+            captionSegments: trimmedCaptionSegments,
+            totalDuration: resolvedDuration,
+            renderSize: renderQuality.renderSize(for: aspectRatio),
+            frameRate: renderQuality.frameRate,
             progressHandler: progressHandler,
             outputURL: slideshowURL
         )
         progressHandler?(0.9, "Mixing narration and background music.")
         try await mergeAudioAndVideo(
             videoURL: slideshowURL,
-            narrationURLs: narrationTimeline.utteranceAudioURLs,
+            timelineSegments: timelineSegments,
+            narrationURLs: trimmedNarrationURLs,
             backgroundMusicURL: backgroundMusicURL,
             backgroundMusicVolume: backgroundMusicVolume,
-            totalDuration: totalDuration,
+            narrationVolume: narrationVolume,
+            videoAudioVolume: videoAudioVolume,
+            totalDuration: resolvedDuration,
             outputURL: finalURL
         )
         progressHandler?(1.0, "Finalizing exported video.")
 
         return finalURL
+    }
+
+    private func captionSegmentsTrimmed(to maxDuration: CMTime, segments: [CaptionSegment]) -> [CaptionSegment] {
+        guard maxDuration > .zero else { return [] }
+
+        var trimmed: [CaptionSegment] = []
+        for segment in segments {
+            if segment.timeRange.start >= maxDuration { break }
+            let end = min(segment.timeRange.end, maxDuration)
+            let duration = end - segment.timeRange.start
+            guard duration > .zero else { continue }
+            trimmed.append(
+                CaptionSegment(
+                    text: segment.text,
+                    timeRange: CMTimeRange(start: segment.timeRange.start, duration: duration)
+                )
+            )
+        }
+        return trimmed
+    }
+
+    private func narrationURLsTrimmed(_ narrationURLs: [URL], maxDuration: CMTime) async throws -> [URL] {
+        guard maxDuration > .zero else { return [] }
+
+        var trimmedURLs: [URL] = []
+        var cursor = CMTime.zero
+
+        for narrationURL in narrationURLs {
+            guard cursor < maxDuration else { break }
+            let narrationAsset = AVURLAsset(url: narrationURL)
+            let narrationDuration = try await narrationAsset.load(.duration)
+            let remaining = maxDuration - cursor
+
+            if narrationDuration <= remaining {
+                trimmedURLs.append(narrationURL)
+                cursor = cursor + narrationDuration
+            } else {
+                let trimmedURL = try await trimmedAudioCopy(from: narrationURL, duration: remaining)
+                trimmedURLs.append(trimmedURL)
+                break
+            }
+        }
+
+        return trimmedURLs
+    }
+
+    private func trimmedAudioCopy(from sourceURL: URL, duration: CMTime) async throws -> URL {
+        let asset = AVURLAsset(url: sourceURL)
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+            throw ExportError.exportSessionFailed
+        }
+
+        let outputURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("trimmed-audio-\(UUID().uuidString)")
+            .appendingPathExtension("m4a")
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try FileManager.default.removeItem(at: outputURL)
+        }
+
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .m4a
+        exportSession.timeRange = CMTimeRange(start: .zero, duration: duration)
+        await exportSession.export()
+
+        if let error = exportSession.error {
+            throw error
+        }
+
+        guard exportSession.status == .completed else {
+            throw ExportError.exportFailed
+        }
+
+        return outputURL
     }
 
     private func makeWorkspace() throws -> URL {
@@ -272,6 +400,7 @@ struct VideoExporter {
         captionSegments: [CaptionSegment],
         totalDuration: CMTime,
         renderSize: CGSize,
+        frameRate: Int32,
         progressHandler: ((Double, String) -> Void)?,
         outputURL: URL
     ) async throws {
@@ -353,9 +482,12 @@ struct VideoExporter {
 
     private func mergeAudioAndVideo(
         videoURL: URL,
+        timelineSegments: [TimelineSegment],
         narrationURLs: [URL],
         backgroundMusicURL: URL?,
         backgroundMusicVolume: Double,
+        narrationVolume: Double,
+        videoAudioVolume: Double,
         totalDuration: CMTime,
         outputURL: URL
     ) async throws {
@@ -377,6 +509,37 @@ struct VideoExporter {
 
         var audioMixParameters: [AVMutableAudioMixInputParameters] = []
 
+        let resolvedVideoVolume = Float(min(max(videoAudioVolume, 0), 1))
+        if resolvedVideoVolume > 0 {
+            for segment in timelineSegments {
+                guard case let .video(url, _) = segment.mediaItem.kind else { continue }
+
+                let clipAsset = AVURLAsset(url: url)
+                guard let clipAudioTrack = try await clipAsset.loadTracks(withMediaType: .audio).first else {
+                    continue
+                }
+                guard let compositionClipAudioTrack = composition.addMutableTrack(
+                    withMediaType: .audio,
+                    preferredTrackID: kCMPersistentTrackID_Invalid
+                ) else {
+                    continue
+                }
+
+                let clipDuration = try await clipAsset.load(.duration)
+                let segmentDuration = min(segment.timeRange.duration, clipDuration)
+                guard segmentDuration > .zero else { continue }
+
+                try compositionClipAudioTrack.insertTimeRange(
+                    CMTimeRange(start: .zero, duration: segmentDuration),
+                    of: clipAudioTrack,
+                    at: segment.timeRange.start
+                )
+                let clipAudioParameters = AVMutableAudioMixInputParameters(track: compositionClipAudioTrack)
+                clipAudioParameters.setVolume(resolvedVideoVolume, at: .zero)
+                audioMixParameters.append(clipAudioParameters)
+            }
+        }
+
         if !narrationURLs.isEmpty,
            let compositionNarrationTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
             var narrationCursor = CMTime.zero
@@ -395,7 +558,8 @@ struct VideoExporter {
             }
 
             let narrationParameters = AVMutableAudioMixInputParameters(track: compositionNarrationTrack)
-            narrationParameters.setVolume(1.0, at: .zero)
+            let resolvedNarrationVolume = Float(min(max(narrationVolume, 0), 1))
+            narrationParameters.setVolume(resolvedNarrationVolume, at: .zero)
             audioMixParameters.append(narrationParameters)
         }
 

@@ -5,8 +5,8 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
     enum StudioStep: String, CaseIterable, Identifiable {
-        case photos = "Media"
         case narration = "Script"
+        case photos = "Media"
         case music = "Music"
         case video = "Video"
 
@@ -24,6 +24,7 @@ struct ContentView: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 20) {
+                    brandHeader
                     stepPicker
                     activeSection
                     statusSection
@@ -86,6 +87,44 @@ struct ContentView: View {
         }
         .padding(10)
         .background(Color.white.opacity(0.6), in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+    }
+
+    private var brandHeader: some View {
+        HStack(spacing: 14) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 20, style: .continuous)
+                    .fill(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.94, green: 0.46, blue: 0.22),
+                                Color(red: 0.79, green: 0.23, blue: 0.10)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        )
+                    )
+                    .frame(width: 56, height: 56)
+
+                Image(systemName: "film.stack.fill")
+                    .font(.system(size: 24, weight: .bold))
+                    .foregroundStyle(.white)
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text("FluxCut Studio")
+                    .font(.title2.weight(.bold))
+                    .foregroundStyle(.primary)
+                Text("Script, media, music, and video in one fast studio flow.")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.58), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
     @ViewBuilder
@@ -203,6 +242,21 @@ struct ContentView: View {
             .padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.white.opacity(0.58), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+            if viewModel.mediaItems.contains(where: \.isVideo) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Video Volume In Final Video")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Slider(value: $viewModel.videoAudioVolume, in: 0...1)
+                        .tint(.orange)
+                    Text("Blend the original sound from your video clips into the final mix.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                .padding(14)
+                .background(Color.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
 
             if viewModel.mediaItems.isEmpty {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
@@ -708,7 +762,7 @@ struct ContentView: View {
                 .font(.title2.weight(.semibold))
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Choose a soundtrack, shape the playback level, and give your edit a stronger mood before export.")
+                Text("Import `.mp3`, `.m4a`, or `.wav` music, then set the level used in the final video mix.")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(
                         LinearGradient(
@@ -737,7 +791,7 @@ struct ContentView: View {
                         Text(viewModel.importedMusicName)
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.primary)
-                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
 
@@ -755,7 +809,7 @@ struct ContentView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text("Import Music")
                                 .font(.subheadline.weight(.semibold))
-                            Text("From Files")
+                            Text("MP3, M4A, WAV")
                                 .font(.caption2)
                                 .foregroundStyle(.white.opacity(0.82))
                         }
@@ -792,14 +846,6 @@ struct ContentView: View {
                     }
                 }
                 .pickerStyle(.menu)
-
-                Text("Pick a soundtrack and it becomes active right away.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                Text("Sample tracks by Kevin MacLeod / Incompetech, licensed under CC BY 3.0.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
             }
             .padding(14)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -809,14 +855,11 @@ struct ContentView: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                Text("Music Level In Final Video")
+                Text("Volume In Video")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Slider(value: $viewModel.musicVolume, in: 0...1)
                     .tint(.blue)
-                Text("This level is used for both music preview and the final exported video mix.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
             }
             .padding(14)
             .background(Color.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -850,37 +893,195 @@ struct ContentView: View {
 
     private var videoSection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("4. Create Video")
+            Text("Video")
                 .font(.title2.weight(.semibold))
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Aspect Ratio")
-                    .font(.caption.weight(.semibold))
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Choose the final format, start the render, and review your finished video in one place.")
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.20, green: 0.56, blue: 0.28),
+                                Color(red: 0.08, green: 0.34, blue: 0.18)
+                            ],
+                            startPoint: .leading,
+                            endPoint: .trailing
+                        )
+                    )
 
-                Picker("Aspect Ratio", selection: $viewModel.selectedAspectRatio) {
-                    ForEach(VideoExporter.AspectRatio.allCases) { ratio in
-                        Text(ratio.rawValue).tag(ratio)
+                HStack(spacing: 10) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.green.opacity(0.14))
+                            .frame(width: 30, height: 30)
+                        Image(systemName: "film.stack")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(Color.green.opacity(0.92))
+                    }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Format")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(viewModel.selectedAspectRatio.rawValue)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
                     }
                 }
-                .pickerStyle(.segmented)
-            }
 
-            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "rectangle.split.3x1")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(Color.green.opacity(0.92))
+                        Text("Choose Your Frame")
+                            .font(.subheadline.weight(.bold))
+                            .foregroundStyle(.primary)
+                    }
+
+                    Text("Pick `9:16` for vertical stories or `4:3` for a wider studio-style frame.")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    Picker("Aspect Ratio", selection: $viewModel.selectedAspectRatio) {
+                        ForEach(VideoExporter.AspectRatio.allCases) { ratio in
+                            Text(ratio.rawValue).tag(ratio)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                .padding(14)
+                .background(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color.green.opacity(0.10))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.green.opacity(0.25), lineWidth: 1)
+                )
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(Color.white.opacity(0.58), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Final Mix")
+                    .font(.headline)
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Original Video Sound")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Slider(value: $viewModel.videoAudioVolume, in: 0...1)
+                        .tint(.orange)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Narration")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Slider(value: $viewModel.narrationVolume, in: 0...1)
+                        .tint(.blue)
+                }
+
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Music")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Slider(value: $viewModel.musicVolume, in: 0...1)
+                        .tint(.green)
+                }
+
+                Text("Adjust the final mix here, then use Preview Video to test the rendered balance.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(14)
+            .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+            VStack(spacing: 12) {
+                Button {
+                    viewModel.buildVideoPreview()
+                } label: {
+                    HStack(spacing: 10) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(.white.opacity(0.18))
+                                .frame(width: 34, height: 34)
+                            Image(systemName: viewModel.isLoadingMediaSelection ? "hourglass" : "play.rectangle.fill")
+                                .font(.system(size: 15, weight: .bold))
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(viewModel.isLoadingMediaSelection ? "Loading Media..." : (viewModel.isPreparingVideoPreview ? "Building Preview..." : "Preview Video"))
+                                .font(.subheadline.weight(.bold))
+                            Text("Quick 8-second sample")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.white.opacity(0.82))
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .background(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.23, green: 0.49, blue: 0.93),
+                            Color(red: 0.13, green: 0.26, blue: 0.67)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                )
+                .opacity((viewModel.isExportingVideo || viewModel.isPreparingVideoPreview || viewModel.isLoadingMediaSelection) ? 0.6 : 1)
+                .disabled(viewModel.isExportingVideo || viewModel.isPreparingVideoPreview || viewModel.isLoadingMediaSelection)
+
                 Button {
                     viewModel.buildVideo()
                 } label: {
-                    Label(
-                        viewModel.isLoadingMediaSelection
-                            ? "Loading Media..."
-                            : (viewModel.isExportingVideo ? "Rendering..." : "Create Video"),
-                        systemImage: viewModel.isLoadingMediaSelection ? "hourglass" : "film.stack"
-                    )
-                        .frame(maxWidth: .infinity)
+                    HStack(spacing: 10) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                .fill(.white.opacity(0.18))
+                                .frame(width: 34, height: 34)
+                            Image(systemName: viewModel.isLoadingMediaSelection ? "hourglass" : "film.stack")
+                                .font(.system(size: 15, weight: .bold))
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(viewModel.isLoadingMediaSelection ? "Loading Media..." : (viewModel.isExportingVideo ? "Rendering..." : "Create Video"))
+                                .font(.subheadline.weight(.bold))
+                            Text("Final export")
+                                .font(.caption2.weight(.semibold))
+                                .foregroundStyle(.white.opacity(0.84))
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
                 }
-                .buttonStyle(.borderedProminent)
-                .tint(.green)
-                .disabled(viewModel.isExportingVideo || viewModel.isLoadingMediaSelection)
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .background(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.18, green: 0.63, blue: 0.31),
+                            Color(red: 0.07, green: 0.36, blue: 0.16)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                )
+                .opacity((viewModel.isExportingVideo || viewModel.isPreparingVideoPreview || viewModel.isLoadingMediaSelection) ? 0.6 : 1)
+                .disabled(viewModel.isExportingVideo || viewModel.isPreparingVideoPreview || viewModel.isLoadingMediaSelection)
 
                 if let exportedVideoURL = viewModel.exportedVideoURL {
                     ShareLink(item: exportedVideoURL) {
@@ -890,14 +1091,16 @@ struct ContentView: View {
                     .buttonStyle(.bordered)
                 }
             }
+            .padding(14)
+            .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
-            if viewModel.isExportingVideo {
+            if viewModel.isExportingVideo || viewModel.isPreparingVideoPreview {
                 VStack(alignment: .leading, spacing: 8) {
                     ProgressView(value: viewModel.exportProgress, total: 1)
                         .tint(.green)
 
                     HStack {
-                        Text("Rendering progress")
+                        Text(viewModel.isPreparingVideoPreview ? "Preview progress" : "Rendering progress")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         Spacer()
@@ -906,24 +1109,45 @@ struct ContentView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
+                .padding(14)
+                .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
 
-            if let exportedVideoURL = viewModel.exportedVideoURL {
-                VideoPlayer(player: AVPlayer(url: exportedVideoURL))
-                    .frame(height: 320)
-                    .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+            if let displayedVideoURL = viewModel.exportedVideoURL ?? viewModel.videoPreviewURL {
+                VStack(alignment: .leading, spacing: 10) {
+                    VideoPlayer(player: AVPlayer(url: displayedVideoURL))
+                        .frame(height: 320)
+                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
 
-                Text(exportedVideoURL.lastPathComponent)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(viewModel.exportedVideoURL != nil ? "Latest Render" : "Preview Render")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(displayedVideoURL.lastPathComponent)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(14)
+                .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
             } else {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .fill(Color.white.opacity(0.65))
                     .frame(maxHeight: .infinity)
                     .overlay {
-                        Text(viewModel.isExportingVideo ? "Rendering your video..." : "Your rendered video will appear here.")
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
+                        VStack(spacing: 8) {
+                            Text((viewModel.isExportingVideo || viewModel.isPreparingVideoPreview) ? "Rendering your video..." : "Your Final Video Preview")
+                                .font(.headline.weight(.bold))
+                                .foregroundStyle(.primary)
+                            if !viewModel.isExportingVideo && !viewModel.isPreparingVideoPreview {
+                                Text("Choose `9:16` or `4:3`, tap `Create Video`, then preview or share the finished result here.")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .multilineTextAlignment(.center)
+                        .padding(24)
                     }
             }
         }

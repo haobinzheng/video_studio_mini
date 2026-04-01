@@ -93,8 +93,10 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var narrationPreviewCaption = "Build a seekable preview to test subtitle sync."
     @Published var isMusicPlaying = false
     @Published var isExportingVideo = false
+    @Published var isPreparingVideoPreview = false
     @Published var exportProgress: Double = 0
     @Published var exportedVideoURL: URL?
+    @Published var videoPreviewURL: URL?
     var availableVoices: [VoiceOption] = []
     @Published var selectedVoiceIdentifier = "" {
         didSet {
@@ -105,8 +107,7 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var clipboardPreview = "Clipboard not checked yet."
     @Published var demoTracks: [DemoTrackOption] = [
         DemoTrackOption(id: "dream_culture", name: "Dream Culture", description: "Calming, relaxed, uplifting ambience", fileName: "dream_culture", fileExtension: "mp3"),
-        DemoTrackOption(id: "local_forecast", name: "Local Forecast", description: "Bright, grooving, feel-good energy", fileName: "local_forecast", fileExtension: "mp3"),
-        DemoTrackOption(id: "airship_serenity", name: "Airship Serenity", description: "Serene cinematic lift with warmth", fileName: "airship_serenity", fileExtension: "mp3")
+        DemoTrackOption(id: "local_forecast", name: "Local Forecast", description: "Bright, grooving, feel-good energy", fileName: "local_forecast", fileExtension: "mp3")
     ]
     @Published var selectedDemoTrackID = "dream_culture"
     @Published var selectedAspectRatio: VideoExporter.AspectRatio = .vertical
@@ -115,6 +116,8 @@ final class AppViewModel: NSObject, ObservableObject {
             audioPlayer?.volume = Float(musicVolume)
         }
     }
+    @Published var narrationVolume: Double = 1.0
+    @Published var videoAudioVolume: Double = 0.0
     @Published var statusMessage = "Pick photos, add a script, and import music to build your clip."
 
     private let videoExporter = VideoExporter()
@@ -294,7 +297,7 @@ final class AppViewModel: NSObject, ObservableObject {
 
     func loadSampleNarration() {
         narrationText = """
-        Welcome to my photo story. These images capture a few favorite moments, and this short voiceover helps turn them into a simple video draft. You can replace this sample with your own script any time.
+        Welcome to my photo story. These images capture a few favorite moments, and this short voiceover helps turn them into a simple video draft. As the sequence moves forward, each frame adds a little more energy, rhythm, and emotion to the final cut. You can replace this sample with your own script any time and shape the pacing to match the story you want to tell.
         """
         statusMessage = "Sample narration loaded."
     }
@@ -404,20 +407,35 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     func buildVideo() {
+        runVideoRender(renderQuality: .final, successMessage: "Video created successfully. Preview or share it below.")
+    }
+
+    func buildVideoPreview() {
+        runVideoRender(renderQuality: .preview, successMessage: "Preview ready. Review the result below before creating the final video.")
+    }
+
+    private func runVideoRender(renderQuality: VideoExporter.RenderQuality, successMessage: String) {
         guard !isLoadingMediaSelection else {
-            statusMessage = "Media is still loading. Please wait a moment, then create the video."
+            statusMessage = "Media is still loading. Please wait a moment, then try again."
             return
         }
 
         guard !mediaItems.isEmpty else {
-            statusMessage = "Pick photos or videos before creating a video."
+            statusMessage = "Pick photos or videos before rendering."
             return
         }
 
-        isExportingVideo = true
+        if renderQuality == .preview {
+            isPreparingVideoPreview = true
+            videoPreviewURL = nil
+        } else {
+            isExportingVideo = true
+            exportedVideoURL = nil
+        }
         exportProgress = 0.02
-        exportedVideoURL = nil
-        statusMessage = "Preparing narration, captions, and media for export."
+        statusMessage = renderQuality == .preview
+            ? "Preparing a faster preview render."
+            : "Preparing narration, captions, and media for export."
 
         let exportMediaItems = mediaItems.map { item in
             let exportKind: VideoExporter.MediaItem.Kind
@@ -437,6 +455,8 @@ final class AppViewModel: NSObject, ObservableObject {
         let narrationText = normalizedNarrationSourceText
         let backgroundMusicURL = importedMusicURL
         let backgroundMusicVolume = musicVolume
+        let narrationVolume = narrationVolume
+        let videoAudioVolume = videoAudioVolume
         let voiceIdentifier = selectedVoiceIdentifier
         let exporter = videoExporter
         let aspectRatio = selectedAspectRatio
@@ -448,12 +468,18 @@ final class AppViewModel: NSObject, ObservableObject {
                     try await prepareNarrationPreview(
                         text: narrationText,
                         voiceIdentifier: voiceIdentifier,
-                        startedMessage: "Preparing narration and captions for video export.",
-                        completedMessage: "Narration and captions are ready. Rendering your video now."
+                        startedMessage: renderQuality == .preview
+                            ? "Preparing narration and captions for the quick preview."
+                            : "Preparing narration and captions for video export.",
+                        completedMessage: renderQuality == .preview
+                            ? "Preview narration is ready. Building a short sample render now."
+                            : "Narration and captions are ready. Rendering your video now."
                     )
                 } else {
                     exportProgress = 0.22
-                    statusMessage = "Rendering your video. This can take a moment."
+                    statusMessage = renderQuality == .preview
+                        ? "Building a short preview render."
+                        : "Rendering your video. This can take a moment."
                 }
 
                 let previewAudioURL = narrationText.isEmpty ? nil : narrationPreviewAudioURL
@@ -464,8 +490,11 @@ final class AppViewModel: NSObject, ObservableObject {
                         narrationText: narrationText,
                         backgroundMusicURL: backgroundMusicURL,
                         backgroundMusicVolume: backgroundMusicVolume,
+                        narrationVolume: narrationVolume,
+                        videoAudioVolume: videoAudioVolume,
                         voiceIdentifier: voiceIdentifier,
                         aspectRatio: aspectRatio,
+                        renderQuality: renderQuality,
                         externalCues: previewCues,
                         externalNarrationAudioURL: previewAudioURL,
                         progressHandler: { progress, message in
@@ -476,15 +505,23 @@ final class AppViewModel: NSObject, ObservableObject {
                         }
                     )
                 }.value
-                exportedVideoURL = exportedURL
+                if renderQuality == .preview {
+                    videoPreviewURL = exportedURL
+                } else {
+                    exportedVideoURL = exportedURL
+                }
                 exportProgress = 1.0
-                statusMessage = "Video created successfully. Preview or share it below."
+                statusMessage = successMessage
             } catch {
                 exportProgress = 0
                 statusMessage = error.localizedDescription.isEmpty ? "Video export failed." : error.localizedDescription
             }
 
-            isExportingVideo = false
+            if renderQuality == .preview {
+                isPreparingVideoPreview = false
+            } else {
+                isExportingVideo = false
+            }
         }
     }
 
