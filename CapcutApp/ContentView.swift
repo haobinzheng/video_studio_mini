@@ -838,7 +838,8 @@ struct ContentView: View {
                         Text(viewModel.importedMusicName)
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.primary)
-                            .fixedSize(horizontal: false, vertical: true)
+                            .lineLimit(1)
+                            .truncationMode(.middle)
                     }
                 }
 
@@ -920,6 +921,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.blue)
+                .disabled(!viewModel.hasSelectedMusic)
 
                 Button {
                     viewModel.stopMusic()
@@ -929,6 +931,7 @@ struct ContentView: View {
                 }
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
+                .disabled(!viewModel.hasSelectedMusic)
             }
 
             Spacer(minLength: 0)

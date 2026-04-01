@@ -361,15 +361,15 @@ final class AppViewModel: NSObject, ObservableObject {
     func importMusic(from selectedURL: URL) {
         configureAudioSessionIfNeeded()
 
-        let canAccess = selectedURL.startAccessingSecurityScopedResource()
-        defer {
-            if canAccess {
-                selectedURL.stopAccessingSecurityScopedResource()
-            }
-        }
-
         do {
             stopMusic()
+            let canAccess = selectedURL.startAccessingSecurityScopedResource()
+            defer {
+                if canAccess {
+                    selectedURL.stopAccessingSecurityScopedResource()
+                }
+            }
+
             let destination = try copyImportedFileToDocuments(selectedURL)
             importedMusicURL = destination
             importedMusicName = destination.lastPathComponent
@@ -397,6 +397,7 @@ final class AppViewModel: NSObject, ObservableObject {
         }
 
         do {
+            stopMusic()
             importedMusicURL = bundledURL
             importedMusicName = "\(track.name).\(track.fileExtension)"
             try prepareAudioPlayer(with: bundledURL)
@@ -783,6 +784,10 @@ final class AppViewModel: NSObject, ObservableObject {
         audioPlayer?.volume = Float(musicVolume)
         audioPlayer?.prepareToPlay()
         isMusicPlaying = false
+    }
+
+    var hasSelectedMusic: Bool {
+        importedMusicURL != nil
     }
 
     private func startNarrationPreviewTimer() {
