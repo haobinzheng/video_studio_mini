@@ -550,12 +550,37 @@ struct ContentView: View {
                 .disabled(viewModel.narrationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
 
-            TextEditor(text: $viewModel.narrationText)
-                .frame(maxWidth: .infinity, minHeight: 260, maxHeight: .infinity)
-                .padding(12)
-                .scrollContentBackground(.hidden)
-                .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-                .focused($isNarrationFocused)
+            Button {
+                viewModel.recoverLastNarrationDraft()
+            } label: {
+                HStack(spacing: 8) {
+                    ZStack {
+                        Circle()
+                            .fill(Color.blue.opacity(0.14))
+                            .frame(width: 28, height: 28)
+                        Image(systemName: "arrow.uturn.backward.circle.fill")
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(Color.blue.opacity(0.92))
+                    }
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text("Recover Last Script")
+                            .font(.caption.weight(.semibold))
+                        Text("Restore saved draft")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 8)
+                .background(Color.white.opacity(0.88), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.blue.opacity(0.10), lineWidth: 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
 
             HStack(spacing: 10) {
                 inlineScriptActionButton(
@@ -569,6 +594,13 @@ struct ContentView: View {
                     viewModel.loadSampleNarration()
                 }
             }
+
+            TextEditor(text: $viewModel.narrationText)
+                .frame(maxWidth: .infinity, minHeight: 260, maxHeight: .infinity)
+                .padding(12)
+                .scrollContentBackground(.hidden)
+                .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+                .focused($isNarrationFocused)
 
             narrationPreviewSection
         }

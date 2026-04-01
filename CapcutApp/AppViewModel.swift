@@ -34,6 +34,8 @@ private struct PickedMovie: Transferable {
 
 @MainActor
 final class AppViewModel: NSObject, ObservableObject {
+    private static let savedNarrationDraftKey = "fluxcut.savedNarrationDraft"
+
     struct MediaItem: Identifiable, Equatable {
         enum Kind: Equatable {
             case photo
@@ -74,7 +76,11 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     @Published var mediaItems: [MediaItem] = []
-    @Published var narrationText = "Welcome to my CapCut-style video. Add your own script here."
+    @Published var narrationText = "Welcome to my CapCut-style video. Add your own script here." {
+        didSet {
+            saveNarrationDraft()
+        }
+    }
     @Published var selectedPhotoItems: [PhotosPickerItem] = [] {
         didSet {
             Task {
@@ -101,6 +107,9 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var selectedVoiceIdentifier = "" {
         didSet {
             selectedVoiceName = selectedVoiceDisplayName
+            if oldValue != selectedVoiceIdentifier {
+                stopLiveNarrationPlayback(reason: "Voice updated. Tap Play Voice to hear the new selection.")
+            }
         }
     }
     @Published var selectedVoiceName = "No Apple voice selected yet."
@@ -141,6 +150,11 @@ final class AppViewModel: NSObject, ObservableObject {
     private var didConfigureAudioSession = false
 
     override init() {
+        let savedDraft = UserDefaults.standard.string(forKey: Self.savedNarrationDraftKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        if let savedDraft, !savedDraft.isEmpty {
+            narrationText = savedDraft
+        }
         super.init()
         availableVoices = SpeechVoiceLibrary.initialVoiceOptions
         if let firstVoice = availableVoices.first {
@@ -157,11 +171,8 @@ final class AppViewModel: NSObject, ObservableObject {
 
         configureAudioSessionIfNeeded()
 
-        if speechSynthesizer.isSpeaking {
-            speechSynthesizer.stopSpeaking(at: .immediate)
-            isSpeaking = false
-            pendingUtteranceCount = 0
-            statusMessage = "Narration stopped."
+        if speechSynthesizer.isSpeaking || isSpeaking || pendingUtteranceCount > 0 {
+            stopLiveNarrationPlayback(reason: "Narration stopped.")
             return
         }
 
@@ -295,6 +306,28 @@ final class AppViewModel: NSObject, ObservableObject {
         statusMessage = "Narration text cleared."
     }
 
+    func recoverLastNarrationDraft() {
+        let savedDraft = UserDefaults.standard.string(forKey: Self.savedNarrationDraftKey)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let savedDraft, !savedDraft.isEmpty else {
+            statusMessage = "No saved script is available to recover."
+            return
+        }
+
+        narrationText = savedDraft
+        statusMessage = "Last saved script recovered."
+    }
+
+    private func stopLiveNarrationPlayback(reason: String? = nil) {
+        speechSynthesizer.stopSpeaking(at: .immediate)
+        isSpeaking = false
+        pendingUtteranceCount = 0
+        if let reason {
+            statusMessage = reason
+        }
+    }
+
     func loadSampleNarration() {
         narrationText = """
         Welcome to my photo story. These images capture a few favorite moments, and this short voiceover helps turn them into a simple video draft. As the sequence moves forward, each frame adds a little more energy, rhythm, and emotion to the final cut. You can replace this sample with your own script any time and shape the pacing to match the story you want to tell.
@@ -348,6 +381,10 @@ final class AppViewModel: NSObject, ObservableObject {
         } catch {
             statusMessage = "Could not load bundled sample music."
         }
+    }
+
+    private func saveNarrationDraft() {
+        UserDefaults.standard.set(narrationText, forKey: Self.savedNarrationDraftKey)
     }
 
     func toggleMusicPlayback() {
@@ -921,7 +958,7 @@ enum SpeechVoiceLibrary {
     }
 
     static func makeUtterance(from text: String, voiceIdentifier: String) -> AVSpeechUtterance {
-        let selectedVoice = voice(for: voiceIdentifier)
+        let selectedVoice = resolvedVoice(for: text, preferredIdentifier: voiceIdentifier)
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = selectedVoice
         utterance.rate = speakingRate(for: selectedVoice)
@@ -976,6 +1013,41 @@ enum SpeechVoiceLibrary {
         return AVSpeechSynthesisVoice(language: firstFallbackIdentifier)
     }
 
+    private static func resolvedVoice(for text: String, preferredIdentifier: String) -> AVSpeechSynthesisVoice? {
+        let preferredVoice = voice(for: preferredIdentifier)
+        let expectsCJKVoice = containsCJKContent(in: text)
+
+        if let preferredVoice, isVoice(preferredVoice, compatibleWithCJK: expectsCJKVoice) {
+            return preferredVoice
+        }
+
+        let candidateVoices = AVSpeechSynthesisVoice.speechVoices().filter {
+            isSupportedLanguage($0.language) &&
+            !isNoveltyVoice($0) &&
+            isVoice($0, compatibleWithCJK: expectsCJKVoice)
+        }
+
+        if !candidateVoices.isEmpty {
+            return candidateVoices.sorted {
+                let lhsLanguageRank = preferredLanguageRank($0.language)
+                let rhsLanguageRank = preferredLanguageRank($1.language)
+                if lhsLanguageRank != rhsLanguageRank {
+                    return lhsLanguageRank > rhsLanguageRank
+                }
+
+                let lhsQuality = qualityRank(qualityLabel(for: $0))
+                let rhsQuality = qualityRank(qualityLabel(for: $1))
+                if lhsQuality != rhsQuality {
+                    return lhsQuality > rhsQuality
+                }
+
+                return $0.name < $1.name
+            }.first
+        }
+
+        return defaultVoice
+    }
+
     private static func chunkedText(from text: String) -> [String] {
         let normalized = normalizedCaptionText(text)
 
@@ -1017,6 +1089,24 @@ enum SpeechVoiceLibrary {
         }
 
         return normalized
+    }
+
+    private static func containsCJKContent(in text: String) -> Bool {
+        text.contains { character in
+            guard let scalar = character.unicodeScalars.first else { return false }
+            return (0x4E00...0x9FFF).contains(scalar.value)
+                || (0x3400...0x4DBF).contains(scalar.value)
+                || (0x3040...0x30FF).contains(scalar.value)
+                || (0xAC00...0xD7AF).contains(scalar.value)
+        }
+    }
+
+    private static func isVoice(_ voice: AVSpeechSynthesisVoice, compatibleWithCJK expectsCJKVoice: Bool) -> Bool {
+        if expectsCJKVoice {
+            return voice.language.hasPrefix("zh") || voice.language.hasPrefix("yue")
+        }
+
+        return voice.language.hasPrefix("en")
     }
 
     private static func collapseCaptionWhitespace(in text: String) -> String {
