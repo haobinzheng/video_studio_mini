@@ -216,6 +216,17 @@ struct ContentView: View {
                         )
                     )
 
+                HStack(spacing: 8) {
+                    Image(systemName: "text.bubble.fill")
+                        .font(.system(size: 12, weight: .bold))
+                    Text(viewModel.estimatedNarrationMetaLine)
+                        .font(.caption.weight(.semibold))
+                }
+                .foregroundStyle(Color(red: 0.63, green: 0.24, blue: 0.10))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(Color.white.opacity(0.66), in: Capsule())
+
                 if !viewModel.mediaItems.isEmpty {
                     Button {
                         viewModel.clearMediaSelection()
@@ -1118,8 +1129,8 @@ struct ContentView: View {
                     ),
                     in: RoundedRectangle(cornerRadius: 18, style: .continuous)
                 )
-                .opacity((viewModel.isExportingVideo || viewModel.isPreparingVideoPreview || viewModel.isLoadingMediaSelection) ? 0.6 : 1)
-                .disabled(viewModel.isExportingVideo || viewModel.isPreparingVideoPreview || viewModel.isLoadingMediaSelection)
+                .opacity(viewModel.canStartVideoRender ? 1 : 0.6)
+                .disabled(!viewModel.canStartVideoRender)
 
                 Button {
                     renderPreviewPlayer.pause()
@@ -1162,8 +1173,8 @@ struct ContentView: View {
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .stroke(Color.white.opacity(0.16), lineWidth: 1)
                 )
-                .opacity((viewModel.isExportingVideo || viewModel.isPreparingVideoPreview || viewModel.isLoadingMediaSelection) ? 0.6 : 1)
-                .disabled(viewModel.isExportingVideo || viewModel.isPreparingVideoPreview || viewModel.isLoadingMediaSelection)
+                .opacity(viewModel.canStartVideoRender ? 1 : 0.6)
+                .disabled(!viewModel.canStartVideoRender)
 
                 Group {
                     if let exportedVideoURL = viewModel.exportedVideoURL {

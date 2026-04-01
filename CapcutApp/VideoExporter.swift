@@ -124,27 +124,56 @@ struct VideoExporter {
         let timeRange: CMTimeRange
     }
 
+    private struct RenderProfile {
+        let renderSize: CGSize
+        let frameRate: Int32
+        let longFormOptimized: Bool
+        let videoSampleStride: Int32
+    }
+
+    private struct VideoPressure {
+        let totalVideoSeconds: Double
+        let longestClipSeconds: Double
+        let clipCount: Int
+    }
+
     private final class VideoFrameCache {
+        private struct CachedFrame {
+            let key: String
+            let image: UIImage
+        }
+
         private let frameRate: Int32
         private let renderSize: CGSize
+        private let sampleStride: Int32
         private var generators: [URL: AVAssetImageGenerator] = [:]
         private var durations: [URL: CMTime] = [:]
+        private var cachedFramesByURL: [URL: CachedFrame] = [:]
 
-        init(frameRate: Int32, renderSize: CGSize) {
+        init(frameRate: Int32, renderSize: CGSize, sampleStride: Int32) {
             self.frameRate = frameRate
             self.renderSize = renderSize
+            self.sampleStride = max(sampleStride, 1)
         }
 
         func image(for url: URL, localTime: CMTime) async throws -> UIImage {
+            let cacheKey = sampledFrameCacheKey(for: url, localTime: localTime)
+            if let cachedFrame = cachedFramesByURL[url], cachedFrame.key == cacheKey {
+                return cachedFrame.image
+            }
+
             let generator = try await generatorForVideo(at: url)
             let assetDuration = durations[url] ?? .zero
             let frameStep = CMTime(value: 1, timescale: frameRate)
             let latestFrameTime = assetDuration > frameStep ? assetDuration - frameStep : .zero
-            let safeTime = CMTimeMinimum(CMTimeMaximum(.zero, localTime), latestFrameTime)
+            let sampledTime = sampledLocalTime(for: localTime)
+            let safeTime = CMTimeMinimum(CMTimeMaximum(.zero, sampledTime), latestFrameTime)
 
             var actualTime = CMTime.zero
             let cgImage = try generator.copyCGImage(at: safeTime, actualTime: &actualTime)
-            return UIImage(cgImage: cgImage)
+            let image = UIImage(cgImage: cgImage)
+            cachedFramesByURL[url] = CachedFrame(key: cacheKey, image: image)
+            return image
         }
 
         private func generatorForVideo(at url: URL) async throws -> AVAssetImageGenerator {
@@ -163,6 +192,19 @@ struct VideoExporter {
             generators[url] = generator
             durations[url] = try await asset.load(.duration)
             return generator
+        }
+
+        private func sampledLocalTime(for localTime: CMTime) -> CMTime {
+            let sampledRate = max(frameRate / sampleStride, 1)
+            let seconds = CMTimeGetSeconds(localTime)
+            guard seconds.isFinite else { return .zero }
+            let sampledSeconds = (seconds * Double(sampledRate)).rounded(.down) / Double(sampledRate)
+            return CMTime(seconds: max(sampledSeconds, 0), preferredTimescale: 600)
+        }
+
+        private func sampledFrameCacheKey(for url: URL, localTime: CMTime) -> String {
+            let sampledTime = sampledLocalTime(for: localTime)
+            return "\(url.path)|\(sampledTime.value)|\(sampledTime.timescale)"
         }
     }
 
@@ -202,20 +244,28 @@ struct VideoExporter {
             ? narrationTimeline.duration
             : minimumVisualDuration
         let resolvedDuration = renderQuality.maximumDuration.map { min(totalDuration, $0) } ?? totalDuration
+        let timelineSegments = try await makeTimelineSegments(for: mediaItems, totalDuration: resolvedDuration)
+        let videoPressure = videoPressure(for: timelineSegments)
+        let renderProfile = resolvedRenderProfile(
+            for: renderQuality,
+            aspectRatio: aspectRatio,
+            duration: resolvedDuration,
+            videoPressure: videoPressure
+        )
         let trimmedCaptionSegments = captionSegmentsTrimmed(to: resolvedDuration, segments: narrationTimeline.captionSegments)
         let trimmedNarrationURLs = try await narrationURLsTrimmed(
             narrationTimeline.utteranceAudioURLs,
             maxDuration: resolvedDuration
         )
-        let timelineSegments = try await makeTimelineSegments(for: mediaItems, totalDuration: resolvedDuration)
-        progressHandler?(0.24, "Rendering video frames.")
+        progressHandler?(0.24, renderProfile.longFormOptimized ? "Optimizing a long-form render." : "Rendering video frames.")
 
         try await renderSlideshow(
             timelineSegments: timelineSegments,
             captionSegments: trimmedCaptionSegments,
             totalDuration: resolvedDuration,
-            renderSize: renderQuality.renderSize(for: aspectRatio),
-            frameRate: renderQuality.frameRate,
+            renderSize: renderProfile.renderSize,
+            frameRate: renderProfile.frameRate,
+            videoSampleStride: renderProfile.videoSampleStride,
             progressHandler: progressHandler,
             outputURL: slideshowURL
         )
@@ -341,7 +391,7 @@ struct VideoExporter {
             )
         }
 
-        let narrationSegments = SpeechVoiceLibrary.narrationSegments(from: trimmedText)
+        let narrationSegments = SpeechVoiceLibrary.narrationSegments(from: trimmedText, optimizeForLongForm: true)
         let utterances = narrationSegments.map {
             SpeechVoiceLibrary.makeUtterance(from: $0, voiceIdentifier: voiceIdentifier)
         }
@@ -426,6 +476,7 @@ struct VideoExporter {
         totalDuration: CMTime,
         renderSize: CGSize,
         frameRate: Int32,
+        videoSampleStride: Int32,
         progressHandler: ((Double, String) -> Void)?,
         outputURL: URL
     ) async throws {
@@ -458,7 +509,12 @@ struct VideoExporter {
         writer.startWriting()
         writer.startSession(atSourceTime: .zero)
 
-        let videoFrameCache = VideoFrameCache(frameRate: frameRate, renderSize: renderSize)
+        let videoFrameCache = VideoFrameCache(
+            frameRate: frameRate,
+            renderSize: renderSize,
+            sampleStride: videoSampleStride
+        )
+        
 
         let totalFrames = max(Int(ceil(CMTimeGetSeconds(totalDuration) * Double(frameRate))), timelineSegments.count)
 
@@ -695,10 +751,11 @@ struct VideoExporter {
         let paragraph = NSMutableParagraphStyle()
         paragraph.alignment = .center
         paragraph.lineBreakMode = .byWordWrapping
-        let maxTextWidth = renderSize.width - 120
-        let maxTextHeight: CGFloat = 240
-        let minimumFontSize: CGFloat = 20
-        var fontSize: CGFloat = renderSize.width < renderSize.height ? 34 : 30
+        let widthScale = max(min(renderSize.width / 720, 1.0), 0.5)
+        let maxTextWidth = renderSize.width - max(72, 120 * widthScale)
+        let maxTextHeight: CGFloat = max(140, 240 * widthScale)
+        let minimumFontSize: CGFloat = max(14, 20 * widthScale)
+        var fontSize: CGFloat = renderSize.width < renderSize.height ? max(18, 34 * widthScale) : max(16, 30 * widthScale)
         var measuredText = CGRect.zero
         var attributes: [NSAttributedString.Key: Any] = [:]
 
@@ -723,7 +780,7 @@ struct VideoExporter {
             fontSize -= 2
         }
 
-        let boxPadding: CGFloat = 16
+        let boxPadding: CGFloat = max(10, 16 * widthScale)
         let bottomInset = max(renderSize.height * 0.025, 24)
         let boxRect = CGRect(
             x: (renderSize.width - measuredText.width) / 2 - boxPadding,
@@ -830,7 +887,34 @@ struct VideoExporter {
             cursor = cursor + duration
         }
 
-        if let lastIndex = segments.indices.last, cursor < totalDuration {
+        let videoItems = mediaItems.filter {
+            if case .video = $0.kind { return true }
+            return false
+        }
+
+        if cursor < totalDuration, photoItems.isEmpty, !videoItems.isEmpty {
+            var loopIndex = 0
+            while cursor < totalDuration {
+                let item = videoItems[loopIndex % videoItems.count]
+                guard case let .video(_, videoDuration) = item.kind else {
+                    loopIndex += 1
+                    continue
+                }
+
+                let remainingDuration = totalDuration - cursor
+                let duration = min(videoDuration, remainingDuration)
+                guard duration > .zero else { break }
+
+                segments.append(
+                    TimelineSegment(
+                        mediaItem: item,
+                        timeRange: CMTimeRange(start: cursor, duration: duration)
+                    )
+                )
+                cursor = cursor + duration
+                loopIndex += 1
+            }
+        } else if let lastIndex = segments.indices.last, cursor < totalDuration {
             let last = segments[lastIndex]
             segments[lastIndex] = TimelineSegment(
                 mediaItem: last.mediaItem,
@@ -1144,5 +1228,95 @@ struct VideoExporter {
                 return "Video export did not complete."
             }
         }
+    }
+
+    private func resolvedRenderProfile(
+        for quality: RenderQuality,
+        aspectRatio: AspectRatio,
+        duration: CMTime,
+        videoPressure: VideoPressure
+    ) -> RenderProfile {
+        let seconds = CMTimeGetSeconds(duration)
+        let baseSize = quality.renderSize(for: aspectRatio)
+        let baseRate = quality.frameRate
+        let hasHeavyVideoLoad =
+            videoPressure.clipCount >= 3 &&
+            (videoPressure.totalVideoSeconds > 600 || videoPressure.longestClipSeconds > 240)
+
+        guard seconds.isFinite, seconds > 180 else {
+            return RenderProfile(renderSize: baseSize, frameRate: baseRate, longFormOptimized: false, videoSampleStride: 1)
+        }
+
+        switch quality {
+        case .preview:
+            return RenderProfile(renderSize: baseSize, frameRate: baseRate, longFormOptimized: false, videoSampleStride: 1)
+        case .finalStandard:
+            if hasHeavyVideoLoad || seconds > 900 {
+                return RenderProfile(
+                    renderSize: aspectRatio == .vertical ? CGSize(width: 360, height: 640) : CGSize(width: 480, height: 360),
+                    frameRate: 8,
+                    longFormOptimized: true,
+                    videoSampleStride: 2
+                )
+            }
+            if seconds > 420 {
+                return RenderProfile(
+                    renderSize: aspectRatio == .vertical ? CGSize(width: 640, height: 1136) : CGSize(width: 854, height: 640),
+                    frameRate: 6,
+                    longFormOptimized: true,
+                    videoSampleStride: 4
+                )
+            }
+            return RenderProfile(
+                renderSize: baseSize,
+                frameRate: 8,
+                longFormOptimized: true,
+                videoSampleStride: 3
+            )
+        case .finalHigh:
+            if hasHeavyVideoLoad || seconds > 900 {
+                return RenderProfile(
+                    renderSize: aspectRatio == .vertical ? CGSize(width: 360, height: 640) : CGSize(width: 480, height: 360),
+                    frameRate: 10,
+                    longFormOptimized: true,
+                    videoSampleStride: 2
+                )
+            }
+            if seconds > 420 {
+                return RenderProfile(
+                    renderSize: aspectRatio == .vertical ? CGSize(width: 720, height: 1280) : CGSize(width: 960, height: 720),
+                    frameRate: 8,
+                    longFormOptimized: true,
+                    videoSampleStride: 3
+                )
+            }
+            return RenderProfile(
+                renderSize: aspectRatio == .vertical ? CGSize(width: 720, height: 1280) : CGSize(width: 960, height: 720),
+                frameRate: 10,
+                longFormOptimized: true,
+                videoSampleStride: 2
+            )
+        }
+    }
+
+    private func videoPressure(for timelineSegments: [TimelineSegment]) -> VideoPressure {
+        var accumulatedVideoSeconds: Double = 0
+        var longestClipSeconds: Double = 0
+        var clipCount = 0
+
+        for segment in timelineSegments {
+            guard case .video = segment.mediaItem.kind else { continue }
+            let clipSeconds = max(CMTimeGetSeconds(segment.timeRange.duration), 0)
+            guard clipSeconds.isFinite, clipSeconds > 0 else { continue }
+            accumulatedVideoSeconds += clipSeconds
+            longestClipSeconds = max(longestClipSeconds, clipSeconds)
+            clipCount += 1
+        }
+
+        return VideoPressure(
+            totalVideoSeconds: accumulatedVideoSeconds,
+            longestClipSeconds: longestClipSeconds,
+            clipCount: clipCount
+        )
     }
 }

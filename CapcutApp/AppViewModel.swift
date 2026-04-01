@@ -859,6 +859,26 @@ final class AppViewModel: NSObject, ObservableObject {
         return "\(formatPreviewTime(narrationPreviewDuration)) total"
     }
 
+    var estimatedNarrationMetaLine: String {
+        let normalized = normalizedNarrationSourceText
+        guard !normalized.isEmpty else { return "Add a script to estimate pacing." }
+
+        let segments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
+        let estimatedSeconds = max(segments.reduce(0.0) { partial, segment in
+            let timingText = SpeechVoiceLibrary.normalizedTimingText(segment)
+            if SpeechVoiceLibrary.containsCJKContent(in: timingText) {
+                return partial + max(Double(timingText.count) / 3.6, 0.8)
+            }
+            let words = timingText.split(whereSeparator: \.isWhitespace)
+            return partial + max(Double(words.count) / 2.4, 0.8)
+        }, 1)
+        return "Narration Length: \(formatPreviewTime(estimatedSeconds))"
+    }
+
+    var canStartVideoRender: Bool {
+        !isLoadingMediaSelection && !mediaItems.isEmpty && !isExportingVideo && !isPreparingVideoPreview
+    }
+
     var hasNarrationPreview: Bool {
         narrationPreviewDuration > 0 && !narrationPreviewCues.isEmpty
     }
@@ -970,12 +990,14 @@ enum SpeechVoiceLibrary {
             ?? defaultVoice
     }
 
-    static func makeUtterances(from text: String, voiceIdentifier: String) -> [AVSpeechUtterance] {
-        narrationSegments(from: text).map { makeUtterance(from: $0, voiceIdentifier: voiceIdentifier) }
+    static func makeUtterances(from text: String, voiceIdentifier: String, optimizeForLongForm: Bool = false) -> [AVSpeechUtterance] {
+        narrationSegments(from: text, optimizeForLongForm: optimizeForLongForm).map {
+            makeUtterance(from: $0, voiceIdentifier: voiceIdentifier)
+        }
     }
 
-    static func narrationSegments(from text: String) -> [String] {
-        chunkedText(from: text)
+    static func narrationSegments(from text: String, optimizeForLongForm: Bool = false) -> [String] {
+        chunkedText(from: text, optimizeForLongForm: optimizeForLongForm)
     }
 
     static func normalizedCaptionText(_ text: String) -> String {
@@ -1090,7 +1112,7 @@ enum SpeechVoiceLibrary {
         return defaultVoice
     }
 
-    private static func chunkedText(from text: String) -> [String] {
+    private static func chunkedText(from text: String, optimizeForLongForm: Bool) -> [String] {
         let normalized = normalizedCaptionText(text)
 
         guard !normalized.isEmpty else { return [] }
@@ -1102,10 +1124,75 @@ enum SpeechVoiceLibrary {
             .filter { !$0.isEmpty }
 
         if !chunks.isEmpty {
-            return chunks
+            return optimizeForLongForm
+                ? coalescedNarrationChunks(from: chunks, sourceText: normalized)
+                : chunks
         }
 
         return [normalized]
+    }
+
+    private static func coalescedNarrationChunks(from chunks: [String], sourceText: String) -> [String] {
+        guard chunks.count > 24 else { return chunks }
+
+        let isCJK = containsCJKContent(in: sourceText)
+        let targetUnits: Int
+        let hardUnits: Int
+
+        if isCJK {
+            targetUnits = chunks.count > 80 ? 110 : 80
+            hardUnits = targetUnits + 28
+        } else {
+            targetUnits = chunks.count > 80 ? 36 : 28
+            hardUnits = targetUnits + 10
+        }
+
+        var merged: [String] = []
+        var currentParts: [String] = []
+        var currentUnits = 0
+
+        func flushCurrent() {
+            guard !currentParts.isEmpty else { return }
+            merged.append(currentParts.joined(separator: isCJK ? " " : " "))
+            currentParts.removeAll(keepingCapacity: true)
+            currentUnits = 0
+        }
+
+        for chunk in chunks {
+            let normalizedChunk = chunk.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !normalizedChunk.isEmpty else { continue }
+
+            let chunkUnits: Int = {
+                if isCJK {
+                    return normalizedChunk.count
+                } else {
+                    return max(normalizedChunk.split(whereSeparator: \.isWhitespace).count, 1)
+                }
+            }()
+
+            if currentParts.isEmpty {
+                currentParts = [normalizedChunk]
+                currentUnits = chunkUnits
+                continue
+            }
+
+            let nextUnits = currentUnits + chunkUnits
+            if nextUnits <= targetUnits || currentUnits < (targetUnits / 2) {
+                currentParts.append(normalizedChunk)
+                currentUnits = nextUnits
+            } else {
+                flushCurrent()
+                currentParts = [normalizedChunk]
+                currentUnits = chunkUnits
+            }
+
+            if currentUnits >= hardUnits {
+                flushCurrent()
+            }
+        }
+
+        flushCurrent()
+        return merged.isEmpty ? chunks : merged
     }
 
     private static func normalizeSpeechText(_ text: String) -> String {
@@ -1133,7 +1220,7 @@ enum SpeechVoiceLibrary {
         return normalized
     }
 
-    private static func containsCJKContent(in text: String) -> Bool {
+    static func containsCJKContent(in text: String) -> Bool {
         text.contains { character in
             guard let scalar = character.unicodeScalars.first else { return false }
             return (0x4E00...0x9FFF).contains(scalar.value)

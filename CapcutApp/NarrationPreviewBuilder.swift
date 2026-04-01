@@ -31,7 +31,7 @@ struct NarrationPreviewBuilder {
 
     func buildPreview(text: String, voiceIdentifier: String) async throws -> PreviewResult {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let segments = SpeechVoiceLibrary.narrationSegments(from: normalized)
+        let segments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
         guard !segments.isEmpty else {
             throw PreviewError.emptyNarration
         }
