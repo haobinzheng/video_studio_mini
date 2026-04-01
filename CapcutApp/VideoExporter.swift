@@ -208,6 +208,26 @@ struct VideoExporter {
         }
     }
 
+    func estimatedExportSpec(
+        mediaItems: [MediaItem],
+        durationSeconds: Double,
+        aspectRatio: AspectRatio,
+        finalQuality: FinalExportQuality
+    ) -> String {
+        let safeDuration = CMTime(seconds: max(durationSeconds, 1), preferredTimescale: 600)
+        let timelineSegments = estimatedTimelineSegments(for: mediaItems, totalDuration: safeDuration)
+        let pressure = videoPressure(for: timelineSegments)
+        let profile = resolvedRenderProfile(
+            for: finalQuality.renderQuality,
+            aspectRatio: aspectRatio,
+            duration: safeDuration,
+            videoPressure: pressure
+        )
+        let width = Int(profile.renderSize.width.rounded())
+        let height = Int(profile.renderSize.height.rounded())
+        return "\(aspectRatio.rawValue) \(width)x\(height) \(approximateDurationLabel(for: durationSeconds))"
+    }
+
     func exportVideo(
         mediaItems: [MediaItem],
         narrationText: String,
@@ -745,6 +765,87 @@ struct VideoExporter {
         UIGraphicsPopContext()
 
         return pixelBuffer
+    }
+
+    private func estimatedTimelineSegments(for mediaItems: [MediaItem], totalDuration: CMTime) -> [TimelineSegment] {
+        guard !mediaItems.isEmpty, totalDuration > .zero else { return [] }
+
+        let videoItems = mediaItems.filter {
+            if case .video = $0.kind { return true }
+            return false
+        }
+        let photoItems = mediaItems.filter {
+            if case .photo = $0.kind { return true }
+            return false
+        }
+
+        let totalVideoDuration = videoItems.reduce(CMTime.zero) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case let .video(_, duration):
+                return partial + duration
+            }
+        }
+
+        let remainingDuration = CMTimeMaximum(totalDuration - totalVideoDuration, .zero)
+        let photoDuration: CMTime = {
+            guard !photoItems.isEmpty, remainingDuration > .zero else { return .zero }
+            return CMTimeMultiplyByFloat64(remainingDuration, multiplier: 1.0 / Double(photoItems.count))
+        }()
+
+        var segments: [TimelineSegment] = []
+        var cursor = CMTime.zero
+
+        for item in mediaItems {
+            let duration: CMTime
+            switch item.kind {
+            case .photo:
+                duration = photoDuration
+            case let .video(_, clipDuration):
+                duration = clipDuration
+            }
+
+            guard duration > .zero else { continue }
+            let remaining = totalDuration - cursor
+            guard remaining > .zero else { break }
+            let clippedDuration = CMTimeMinimum(duration, remaining)
+            segments.append(TimelineSegment(mediaItem: item, timeRange: CMTimeRange(start: cursor, duration: clippedDuration)))
+            cursor = cursor + clippedDuration
+        }
+
+        let loopSource = segments.filter {
+            if case .video = $0.mediaItem.kind { return true }
+            return false
+        }
+
+        if cursor < totalDuration, photoItems.isEmpty, !videoItems.isEmpty, !loopSource.isEmpty {
+            var loopIndex = 0
+            while cursor < totalDuration {
+                let item = loopSource[loopIndex % loopSource.count].mediaItem
+                let duration: CMTime
+                switch item.kind {
+                case .photo:
+                    duration = .zero
+                case let .video(_, clipDuration):
+                    duration = clipDuration
+                }
+                guard duration > .zero else { break }
+                let remaining = totalDuration - cursor
+                let clippedDuration = CMTimeMinimum(duration, remaining)
+                segments.append(TimelineSegment(mediaItem: item, timeRange: CMTimeRange(start: cursor, duration: clippedDuration)))
+                cursor = cursor + clippedDuration
+                loopIndex += 1
+            }
+        } else if cursor < totalDuration, let lastIndex = segments.indices.last {
+            let existing = segments[lastIndex]
+            segments[lastIndex] = TimelineSegment(
+                mediaItem: existing.mediaItem,
+                timeRange: CMTimeRange(start: existing.timeRange.start, duration: totalDuration - existing.timeRange.start)
+            )
+        }
+
+        return segments
     }
 
     private func drawCaption(_ caption: String, in context: CGContext, renderSize: CGSize) {
@@ -1318,5 +1419,16 @@ struct VideoExporter {
             longestClipSeconds: longestClipSeconds,
             clipCount: clipCount
         )
+    }
+
+    private func approximateDurationLabel(for seconds: Double) -> String {
+        let totalSeconds = max(Int(seconds.rounded()), 0)
+        let hours = totalSeconds / 3600
+        let minutes = (totalSeconds % 3600) / 60
+
+        if hours > 0 {
+            return String(format: "~%dh %02dm", hours, minutes)
+        }
+        return "~\(max(minutes, 1))min"
     }
 }

@@ -79,6 +79,9 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var narrationText = "Welcome to my CapCut-style video. Add your own script here." {
         didSet {
             saveNarrationDraft()
+            if oldValue != narrationText {
+                markVideoRenderDirty(reason: "Script updated. Build a new preview or final render to reflect the latest narration.")
+            }
         }
     }
     @Published var selectedPhotoItems: [PhotosPickerItem] = [] {
@@ -122,6 +125,7 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var selectedAspectRatio: VideoExporter.AspectRatio = .vertical {
         didSet {
             if oldValue != selectedAspectRatio {
+                hasPendingVideoChanges = true
                 invalidateRenderedVideo(reason: "Frame updated to \(selectedAspectRatio.rawValue). Build a new preview or final render to see the change.")
             }
         }
@@ -129,6 +133,7 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var selectedFinalExportQuality: VideoExporter.FinalExportQuality = .standard {
         didSet {
             if oldValue != selectedFinalExportQuality {
+                hasPendingVideoChanges = true
                 invalidateRenderedVideo(reason: "Final quality updated to \(selectedFinalExportQuality.rawValue). Build a new preview or final render to see the change.")
             }
         }
@@ -136,11 +141,27 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var musicVolume: Double = 0.6 {
         didSet {
             audioPlayer?.volume = Float(musicVolume)
+            if oldValue != musicVolume {
+                markVideoRenderDirty(reason: "Music level updated. Build a new preview or final render to hear the change.")
+            }
         }
     }
-    @Published var narrationVolume: Double = 1.0
-    @Published var videoAudioVolume: Double = 0.0
+    @Published var narrationVolume: Double = 1.0 {
+        didSet {
+            if oldValue != narrationVolume {
+                markVideoRenderDirty(reason: "Narration level updated. Build a new preview or final render to hear the change.")
+            }
+        }
+    }
+    @Published var videoAudioVolume: Double = 0.0 {
+        didSet {
+            if oldValue != videoAudioVolume {
+                markVideoRenderDirty(reason: "Video sound level updated. Build a new preview or final render to hear the change.")
+            }
+        }
+    }
     @Published var statusMessage = "Pick photos, add a script, and import music to build your clip."
+    @Published var hasPendingVideoChanges = true
 
     private let videoExporter = VideoExporter()
     private let narrationPreviewBuilder = NarrationPreviewBuilder()
@@ -374,6 +395,7 @@ final class AppViewModel: NSObject, ObservableObject {
             importedMusicURL = destination
             importedMusicName = destination.lastPathComponent
             try prepareAudioPlayer(with: destination)
+            hasPendingVideoChanges = true
             statusMessage = "Music imported and ready to play."
         } catch {
             statusMessage = error.localizedDescription.isEmpty ? "Could not import that music file." : error.localizedDescription
@@ -401,10 +423,20 @@ final class AppViewModel: NSObject, ObservableObject {
             importedMusicURL = bundledURL
             importedMusicName = "\(track.name).\(track.fileExtension)"
             try prepareAudioPlayer(with: bundledURL)
+            hasPendingVideoChanges = true
             statusMessage = "\(track.name) is ready to play."
         } catch {
             statusMessage = "Could not load bundled sample music."
         }
+    }
+
+    func clearMusicSelection() {
+        stopMusicSilently()
+        audioPlayer = nil
+        importedMusicURL = nil
+        importedMusicName = "No music selected"
+        hasPendingVideoChanges = true
+        statusMessage = "Music cleared. Your video will export without background music."
     }
 
     private func saveNarrationDraft() {
@@ -456,6 +488,7 @@ final class AppViewModel: NSObject, ObservableObject {
         selectedPhotoItems = []
         mediaItems = []
         currentSlideIndex = 0
+        hasPendingVideoChanges = true
         statusMessage = "Media cleared. Import a new set whenever you're ready."
     }
 
@@ -471,6 +504,7 @@ final class AppViewModel: NSObject, ObservableObject {
         let destinationIndex = mediaItems.firstIndex(where: { $0.id == targetID }) ?? targetIndex
         mediaItems.insert(movedItem, at: destinationIndex)
         currentSlideIndex = mediaItems.firstIndex(where: { $0.id == sourceID }) ?? 0
+        hasPendingVideoChanges = true
         statusMessage = "Media order updated."
     }
 
@@ -585,6 +619,7 @@ final class AppViewModel: NSObject, ObservableObject {
                 } else {
                     exportedVideoURL = exportedURL
                 }
+                hasPendingVideoChanges = false
                 exportProgress = 1.0
                 statusMessage = successMessage
             } catch {
@@ -653,6 +688,7 @@ final class AppViewModel: NSObject, ObservableObject {
 
         mediaItems = loadedMedia
         currentSlideIndex = 0
+        hasPendingVideoChanges = true
         statusMessage = loadedMedia.isEmpty
             ? "No valid photos or videos were selected."
             : "\(loadedMedia.count) media item(s) ready for your project."
@@ -860,23 +896,81 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     var estimatedNarrationMetaLine: String {
-        let normalized = normalizedNarrationSourceText
-        guard !normalized.isEmpty else { return "Add a script to estimate pacing." }
+        guard estimatedNarrationDurationSeconds > 0 else { return "Add a script to estimate pacing." }
+        return "Narration Length: \(formatPreviewTime(estimatedNarrationDurationSeconds))"
+    }
 
-        let segments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
-        let estimatedSeconds = max(segments.reduce(0.0) { partial, segment in
-            let timingText = SpeechVoiceLibrary.normalizedTimingText(segment)
-            if SpeechVoiceLibrary.containsCJKContent(in: timingText) {
-                return partial + max(Double(timingText.count) / 3.6, 0.8)
+    var estimatedExportSpecLine: String {
+        guard estimatedNarrationDurationSeconds > 0 else {
+            return "\(selectedAspectRatio.rawValue) • add a script to estimate export specs"
+        }
+
+        let exporterMediaItems = mediaItems.map { item in
+            let kind: VideoExporter.MediaItem.Kind
+            switch item.kind {
+            case .photo:
+                kind = .photo
+            case let .video(url, duration):
+                kind = .video(url: url, duration: CMTime(seconds: duration, preferredTimescale: 600))
             }
-            let words = timingText.split(whereSeparator: \.isWhitespace)
-            return partial + max(Double(words.count) / 2.4, 0.8)
-        }, 1)
-        return "Narration Length: \(formatPreviewTime(estimatedSeconds))"
+            return VideoExporter.MediaItem(previewImage: item.previewImage, kind: kind)
+        }
+
+        return videoExporter.estimatedExportSpec(
+            mediaItems: exporterMediaItems,
+            durationSeconds: estimatedNarrationDurationSeconds,
+            aspectRatio: selectedAspectRatio,
+            finalQuality: selectedFinalExportQuality
+        )
+    }
+
+    var mediaSelectionMetaLine: String {
+        guard !mediaItems.isEmpty else { return "No media selected yet." }
+
+        let photoCount = mediaItems.reduce(0) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial + 1
+            case .video:
+                return partial
+            }
+        }
+
+        let totalVideoSeconds = mediaItems.reduce(0.0) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case let .video(_, duration):
+                return partial + duration
+            }
+        }
+
+        let videoCount = mediaItems.reduce(0) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case .video:
+                return partial + 1
+            }
+        }
+
+        let photoLabel = photoCount == 1 ? "1 photo" : "\(photoCount) photos"
+        let videoLabel = videoCount == 1 ? "1 video" : "\(videoCount) videos"
+        let videoMinutes = max(Int((totalVideoSeconds / 60).rounded()), 0)
+        let durationLabel = videoMinutes == 1 ? "1 min" : "\(videoMinutes) min"
+        return "\(photoLabel) • \(videoLabel) • \(durationLabel)"
+    }
+
+    var mediaSelectionLoadingLine: String {
+        if selectedPhotoItems.isEmpty {
+            return "Loading media selection..."
+        }
+        let itemCount = selectedPhotoItems.count
+        return itemCount == 1 ? "Loading 1 selected item..." : "Loading \(itemCount) selected items..."
     }
 
     var canStartVideoRender: Bool {
-        !isLoadingMediaSelection && !mediaItems.isEmpty && !isExportingVideo && !isPreparingVideoPreview
+        !isLoadingMediaSelection && !mediaItems.isEmpty && !isExportingVideo && !isPreparingVideoPreview && hasPendingVideoChanges
     }
 
     var hasNarrationPreview: Bool {
@@ -888,6 +982,28 @@ final class AppViewModel: NSObject, ObservableObject {
         let minutes = totalSeconds / 60
         let seconds = totalSeconds % 60
         return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    private var estimatedNarrationDurationSeconds: Double {
+        let normalized = normalizedNarrationSourceText
+        guard !normalized.isEmpty else { return 0 }
+
+        let segments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
+        return max(segments.reduce(0.0) { partial, segment in
+            let timingText = SpeechVoiceLibrary.normalizedTimingText(segment)
+            if SpeechVoiceLibrary.containsCJKContent(in: timingText) {
+                return partial + max(Double(timingText.count) / 3.6, 0.8)
+            }
+            let words = timingText.split(whereSeparator: \.isWhitespace)
+            return partial + max(Double(words.count) / 2.4, 0.8)
+        }, 1)
+    }
+
+    private func markVideoRenderDirty(reason: String) {
+        hasPendingVideoChanges = true
+        if exportedVideoURL != nil || videoPreviewURL != nil {
+            statusMessage = reason
+        }
     }
 }
 

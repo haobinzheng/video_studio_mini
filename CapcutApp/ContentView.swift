@@ -52,6 +52,10 @@ struct ContentView: View {
                 if oldStep == .music && newStep != .music {
                     viewModel.stopMusicSilently()
                 }
+                if oldStep == .video && newStep != .video {
+                    renderPreviewPlayer.pause()
+                    renderPreviewPlayer.seek(to: .zero)
+                }
             }
             .onChange(of: viewModel.videoPreviewURL) { _, newValue in
                 updateRenderPreviewPlayer(for: newValue)
@@ -226,6 +230,30 @@ struct ContentView: View {
                 .padding(.horizontal, 10)
                 .padding(.vertical, 7)
                 .background(Color.white.opacity(0.66), in: Capsule())
+
+                if viewModel.isLoadingMediaSelection {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text(viewModel.mediaSelectionLoadingLine)
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(Color(red: 0.63, green: 0.24, blue: 0.10))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.white.opacity(0.66), in: Capsule())
+                } else if !viewModel.mediaItems.isEmpty {
+                    HStack(spacing: 8) {
+                        Image(systemName: "photo.on.rectangle.angled")
+                            .font(.system(size: 12, weight: .bold))
+                        Text(viewModel.mediaSelectionMetaLine)
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(Color(red: 0.63, green: 0.24, blue: 0.10))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.white.opacity(0.66), in: Capsule())
+                }
 
                 if !viewModel.mediaItems.isEmpty {
                     Button {
@@ -814,6 +842,87 @@ struct ContentView: View {
         )
     }
 
+    private var videoAspectRatioCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "rectangle.split.3x1")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Color.green.opacity(0.92))
+                Text("Choose Your Frame")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.primary)
+            }
+
+            Text("Pick `9:16` for vertical stories or `4:3` for a wider studio-style frame.")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Picker("Aspect Ratio", selection: $viewModel.selectedAspectRatio) {
+                ForEach(VideoExporter.AspectRatio.allCases) { ratio in
+                    Text(ratio.rawValue).tag(ratio)
+                }
+            }
+            .pickerStyle(.segmented)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.green.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.green.opacity(0.25), lineWidth: 1)
+        )
+    }
+
+    private var videoQualityCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "sparkles.rectangle.stack")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Color.green.opacity(0.92))
+                Text("Final Quality")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.primary)
+            }
+
+            Text("Use `Standard` for faster, safer exports or `High` for a sharper final video.")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Picker("Final Quality", selection: $viewModel.selectedFinalExportQuality) {
+                ForEach(VideoExporter.FinalExportQuality.allCases) { quality in
+                    Text(quality.rawValue).tag(quality)
+                }
+            }
+            .pickerStyle(.segmented)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.green.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.green.opacity(0.25), lineWidth: 1)
+        )
+    }
+
+    private var estimatedExportSpecCard: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("Estimated Export Spec")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+
+            Text(viewModel.estimatedExportSpecLine)
+                .font(.subheadline.weight(.bold))
+                .foregroundStyle(.primary)
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
     private var musicSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Music")
@@ -890,6 +999,43 @@ struct ContentView: View {
                     ),
                     in: RoundedRectangle(cornerRadius: 18, style: .continuous)
                 )
+
+                if viewModel.hasSelectedMusic {
+                    Button {
+                        viewModel.clearMusicSelection()
+                    } label: {
+                        HStack(spacing: 10) {
+                            ZStack {
+                                Circle()
+                                    .fill(Color.red.opacity(0.14))
+                                    .frame(width: 30, height: 30)
+                                Image(systemName: "trash.fill")
+                                    .font(.system(size: 13, weight: .bold))
+                                    .foregroundStyle(Color.red.opacity(0.92))
+                            }
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text("Clear Music")
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                Text("Export with narration only")
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "arrow.clockwise")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 11)
+                        .background(Color.white.opacity(0.86), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(Color.red.opacity(0.12), lineWidth: 1)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
@@ -990,67 +1136,9 @@ struct ContentView: View {
                     }
                 }
 
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "rectangle.split.3x1")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(Color.green.opacity(0.92))
-                        Text("Choose Your Frame")
-                            .font(.subheadline.weight(.bold))
-                            .foregroundStyle(.primary)
-                    }
-
-                    Text("Pick `9:16` for vertical stories or `4:3` for a wider studio-style frame.")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-
-                    Picker("Aspect Ratio", selection: $viewModel.selectedAspectRatio) {
-                        ForEach(VideoExporter.AspectRatio.allCases) { ratio in
-                            Text(ratio.rawValue).tag(ratio)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                }
-                .padding(14)
-                .background(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(Color.green.opacity(0.10))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(Color.green.opacity(0.25), lineWidth: 1)
-                )
-
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 8) {
-                        Image(systemName: "sparkles.rectangle.stack")
-                            .font(.system(size: 13, weight: .bold))
-                            .foregroundStyle(Color.green.opacity(0.92))
-                        Text("Final Quality")
-                            .font(.subheadline.weight(.bold))
-                            .foregroundStyle(.primary)
-                    }
-
-                    Text("Use `Standard` for faster, safer exports or `High` for a sharper final video.")
-                        .font(.caption.weight(.semibold))
-                        .foregroundStyle(.secondary)
-
-                    Picker("Final Quality", selection: $viewModel.selectedFinalExportQuality) {
-                        ForEach(VideoExporter.FinalExportQuality.allCases) { quality in
-                            Text(quality.rawValue).tag(quality)
-                        }
-                    }
-                    .pickerStyle(.segmented)
-                }
-                .padding(14)
-                .background(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .fill(Color.green.opacity(0.10))
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: 18, style: .continuous)
-                        .stroke(Color.green.opacity(0.25), lineWidth: 1)
-                )
+                videoAspectRatioCard
+                videoQualityCard
+                estimatedExportSpecCard
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
@@ -1107,7 +1195,7 @@ struct ContentView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(viewModel.isLoadingMediaSelection ? "Loading Media..." : (viewModel.isPreparingVideoPreview ? "Building Preview..." : "Preview Video"))
                                 .font(.subheadline.weight(.bold))
-                            Text("Quick 8-second sample")
+                            Text(viewModel.hasPendingVideoChanges ? "Quick 8-second sample" : "Up to date")
                                 .font(.caption2.weight(.semibold))
                                 .foregroundStyle(.white.opacity(0.82))
                         }
@@ -1147,7 +1235,7 @@ struct ContentView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(viewModel.isLoadingMediaSelection ? "Loading Media..." : (viewModel.isExportingVideo ? "Rendering..." : "Create Video"))
                                 .font(.subheadline.weight(.bold))
-                            Text("\(viewModel.selectedFinalExportQuality.rawValue) final export")
+                            Text(viewModel.hasPendingVideoChanges ? "\(viewModel.selectedFinalExportQuality.rawValue) final export" : "Up to date")
                                 .font(.caption2.weight(.semibold))
                                 .foregroundStyle(.white.opacity(0.84))
                         }
