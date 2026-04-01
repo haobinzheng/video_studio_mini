@@ -1006,6 +1006,37 @@ struct ContentView: View {
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .stroke(Color.green.opacity(0.25), lineWidth: 1)
                 )
+
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "sparkles.rectangle.stack")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(Color.green.opacity(0.92))
+                        Text("Final Quality")
+                            .font(.subheadline.weight(.bold))
+                            .foregroundStyle(.primary)
+                    }
+
+                    Text("Use `Standard` for faster, safer exports or `High` for a sharper final video.")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+
+                    Picker("Final Quality", selection: $viewModel.selectedFinalExportQuality) {
+                        ForEach(VideoExporter.FinalExportQuality.allCases) { quality in
+                            Text(quality.rawValue).tag(quality)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                }
+                .padding(14)
+                .background(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .fill(Color.green.opacity(0.10))
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(Color.green.opacity(0.25), lineWidth: 1)
+                )
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
@@ -1102,7 +1133,7 @@ struct ContentView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(viewModel.isLoadingMediaSelection ? "Loading Media..." : (viewModel.isExportingVideo ? "Rendering..." : "Create Video"))
                                 .font(.subheadline.weight(.bold))
-                            Text("Final export")
+                            Text("\(viewModel.selectedFinalExportQuality.rawValue) final export")
                                 .font(.caption2.weight(.semibold))
                                 .foregroundStyle(.white.opacity(0.84))
                         }
@@ -1131,12 +1162,72 @@ struct ContentView: View {
                 .opacity((viewModel.isExportingVideo || viewModel.isPreparingVideoPreview || viewModel.isLoadingMediaSelection) ? 0.6 : 1)
                 .disabled(viewModel.isExportingVideo || viewModel.isPreparingVideoPreview || viewModel.isLoadingMediaSelection)
 
-                if let exportedVideoURL = viewModel.exportedVideoURL {
-                    ShareLink(item: exportedVideoURL) {
-                        Label("Share", systemImage: "square.and.arrow.up")
-                            .frame(maxWidth: .infinity)
+                Group {
+                    if let exportedVideoURL = viewModel.exportedVideoURL {
+                        ShareLink(item: exportedVideoURL) {
+                            HStack(spacing: 10) {
+                                ZStack {
+                                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                        .fill(.white.opacity(0.18))
+                                        .frame(width: 34, height: 34)
+                                    Image(systemName: "square.and.arrow.up")
+                                        .font(.system(size: 15, weight: .bold))
+                                }
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Text("Share Video")
+                                        .font(.subheadline.weight(.bold))
+                                    Text("Exported final file")
+                                        .font(.caption2.weight(.semibold))
+                                        .foregroundStyle(.white.opacity(0.84))
+                                }
+                                Spacer()
+                            }
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 12)
+                        }
+                        .buttonStyle(.plain)
+                        .foregroundStyle(.white)
+                        .background(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.92, green: 0.53, blue: 0.18),
+                                    Color(red: 0.73, green: 0.34, blue: 0.08)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            ),
+                            in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .stroke(Color.white.opacity(0.16), lineWidth: 1)
+                        )
+                    } else {
+                        HStack(spacing: 10) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 12, style: .continuous)
+                                    .fill(.white.opacity(0.18))
+                                    .frame(width: 34, height: 34)
+                                Image(systemName: "square.and.arrow.up")
+                                    .font(.system(size: 15, weight: .bold))
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Share Video")
+                                    .font(.subheadline.weight(.bold))
+                                Text("Available after final render")
+                                    .font(.caption2.weight(.semibold))
+                                    .foregroundStyle(.white.opacity(0.82))
+                            }
+                            Spacer()
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 12)
+                        .foregroundStyle(.white)
+                        .background(
+                            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                                .fill(Color.gray.opacity(0.45))
+                        )
                     }
-                    .buttonStyle(.bordered)
                 }
             }
             .padding(14)
@@ -1168,13 +1259,14 @@ struct ContentView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(viewModel.exportedVideoURL != nil ? "Latest Render" : "Preview Render")
+                        Text(viewModel.exportedVideoURL != nil ? "Final Video" : "Preview Render")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
-                        Text(displayedVideoURL.lastPathComponent)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .fixedSize(horizontal: false, vertical: true)
+                        if let fileSize = formattedFileSize(for: displayedVideoURL) {
+                            Text("File Size: \(fileSize)")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                        }
                     }
                 }
                 .padding(14)
@@ -1188,11 +1280,6 @@ struct ContentView: View {
                             Text((viewModel.isExportingVideo || viewModel.isPreparingVideoPreview) ? "Rendering your video..." : "Your Final Video Preview")
                                 .font(.headline.weight(.bold))
                                 .foregroundStyle(.primary)
-                            if !viewModel.isExportingVideo && !viewModel.isPreparingVideoPreview {
-                                Text("Choose `9:16` or `4:3`, tap `Create Video`, then preview or share the finished result here.")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                            }
                         }
                         .multilineTextAlignment(.center)
                         .padding(24)
@@ -1221,6 +1308,18 @@ struct ContentView: View {
     private func formatTime(_ seconds: Double) -> String {
         let total = max(Int(seconds.rounded(.down)), 0)
         return String(format: "%d:%02d", total / 60, total % 60)
+    }
+
+    private func formattedFileSize(for url: URL) -> String? {
+        guard let values = try? url.resourceValues(forKeys: [.fileSizeKey]),
+              let fileSize = values.fileSize else {
+            return nil
+        }
+
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: Int64(fileSize))
     }
 
     private func updateRenderPreviewPlayer(for url: URL?) {

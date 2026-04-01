@@ -126,6 +126,13 @@ final class AppViewModel: NSObject, ObservableObject {
             }
         }
     }
+    @Published var selectedFinalExportQuality: VideoExporter.FinalExportQuality = .standard {
+        didSet {
+            if oldValue != selectedFinalExportQuality {
+                invalidateRenderedVideo(reason: "Final quality updated to \(selectedFinalExportQuality.rawValue). Build a new preview or final render to see the change.")
+            }
+        }
+    }
     @Published var musicVolume: Double = 0.6 {
         didSet {
             audioPlayer?.volume = Float(musicVolume)
@@ -474,7 +481,7 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     func buildVideo() {
-        runVideoRender(renderQuality: .final, successMessage: "Video created successfully. Preview or share it below.")
+        runVideoRender(renderQuality: selectedFinalExportQuality.renderQuality, successMessage: "Video created successfully. Preview or share it below.")
     }
 
     func buildVideoPreview() {
@@ -859,7 +866,7 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 }
 
-extension AppViewModel: @preconcurrency AVAudioPlayerDelegate {
+extension AppViewModel: AVAudioPlayerDelegate {
     nonisolated func audioPlayerDidFinishPlaying(_ player: AVAudioPlayer, successfully flag: Bool) {
         Task { @MainActor in
             self.isMusicPlaying = false
@@ -867,7 +874,7 @@ extension AppViewModel: @preconcurrency AVAudioPlayerDelegate {
     }
 }
 
-extension AppViewModel: @preconcurrency AVSpeechSynthesizerDelegate {
+extension AppViewModel: AVSpeechSynthesizerDelegate {
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
         Task { @MainActor in
             self.isSpeaking = true

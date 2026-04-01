@@ -20,13 +20,14 @@ struct VideoExporter {
 
     enum RenderQuality {
         case preview
-        case final
+        case finalStandard
+        case finalHigh
 
         var outputFileName: String {
             switch self {
             case .preview:
                 return "capcut-mini-preview.mov"
-            case .final:
+            case .finalStandard, .finalHigh:
                 return "capcut-mini-video.mov"
             }
         }
@@ -35,8 +36,10 @@ struct VideoExporter {
             switch self {
             case .preview:
                 return 8
-            case .final:
+            case .finalStandard:
                 return 10
+            case .finalHigh:
+                return 12
             }
         }
 
@@ -44,7 +47,7 @@ struct VideoExporter {
             switch self {
             case .preview:
                 return CMTime(seconds: 8, preferredTimescale: 600)
-            case .final:
+            case .finalStandard, .finalHigh:
                 return nil
             }
         }
@@ -55,8 +58,30 @@ struct VideoExporter {
                 return CGSize(width: 540, height: 960)
             case (.preview, .classic):
                 return CGSize(width: 720, height: 540)
-            case (.final, _):
-                return aspectRatio.renderSize
+            case (.finalStandard, .vertical):
+                return CGSize(width: 720, height: 1280)
+            case (.finalStandard, .classic):
+                return CGSize(width: 960, height: 720)
+            case (.finalHigh, .vertical):
+                return CGSize(width: 900, height: 1600)
+            case (.finalHigh, .classic):
+                return CGSize(width: 1200, height: 900)
+            }
+        }
+    }
+
+    enum FinalExportQuality: String, CaseIterable, Identifiable {
+        case standard = "Standard"
+        case high = "High"
+
+        var id: String { rawValue }
+
+        var renderQuality: RenderQuality {
+            switch self {
+            case .standard:
+                return .finalStandard
+            case .high:
+                return .finalHigh
             }
         }
     }
@@ -110,8 +135,8 @@ struct VideoExporter {
             self.renderSize = renderSize
         }
 
-        func image(for url: URL, localTime: CMTime) throws -> UIImage {
-            let generator = try generatorForVideo(at: url)
+        func image(for url: URL, localTime: CMTime) async throws -> UIImage {
+            let generator = try await generatorForVideo(at: url)
             let assetDuration = durations[url] ?? .zero
             let frameStep = CMTime(value: 1, timescale: frameRate)
             let latestFrameTime = assetDuration > frameStep ? assetDuration - frameStep : .zero
@@ -122,7 +147,7 @@ struct VideoExporter {
             return UIImage(cgImage: cgImage)
         }
 
-        private func generatorForVideo(at url: URL) throws -> AVAssetImageGenerator {
+        private func generatorForVideo(at url: URL) async throws -> AVAssetImageGenerator {
             if let generator = generators[url] {
                 return generator
             }
@@ -136,7 +161,7 @@ struct VideoExporter {
             generator.requestedTimeToleranceAfter = frameStep
 
             generators[url] = generator
-            durations[url] = asset.duration
+            durations[url] = try await asset.load(.duration)
             return generator
         }
     }
@@ -150,7 +175,7 @@ struct VideoExporter {
         videoAudioVolume: Double,
         voiceIdentifier: String,
         aspectRatio: AspectRatio,
-        renderQuality: RenderQuality = .final,
+        renderQuality: RenderQuality = .finalStandard,
         externalCues: [ExternalCue] = [],
         externalNarrationAudioURL: URL? = nil,
         progressHandler: ((Double, String) -> Void)? = nil
@@ -445,12 +470,12 @@ struct VideoExporter {
             let currentTime = CMTime(value: CMTimeValue(frameIndex), timescale: frameRate)
             let caption = captionText(for: currentTime, segments: captionSegments)
             let presentationTime = CMTime(value: CMTimeValue(frameIndex), timescale: frameRate)
+            let image = try await mediaFrameForTime(
+                currentTime,
+                timelineSegments: timelineSegments,
+                videoFrameCache: videoFrameCache
+            )
             try autoreleasepool {
-                let image = try mediaFrameForTime(
-                    currentTime,
-                    timelineSegments: timelineSegments,
-                    videoFrameCache: videoFrameCache
-                )
                 let pixelBuffer = try makePixelBuffer(from: image, caption: caption, renderSize: renderSize)
                 if !adaptor.append(pixelBuffer, withPresentationTime: presentationTime) {
                     throw writer.error ?? ExportError.videoWriterSetupFailed
@@ -820,7 +845,7 @@ struct VideoExporter {
         _ currentTime: CMTime,
         timelineSegments: [TimelineSegment],
         videoFrameCache: VideoFrameCache
-    ) throws -> UIImage {
+    ) async throws -> UIImage {
         guard let segment = timelineSegments.first(where: { $0.timeRange.containsTime(currentTime) }) ?? timelineSegments.last else {
             return UIImage()
         }
@@ -831,7 +856,7 @@ struct VideoExporter {
         case let .video(url, duration):
             let localTime = min(currentTime - segment.timeRange.start, duration)
             do {
-                return try videoFrameCache.image(for: url, localTime: localTime)
+                return try await videoFrameCache.image(for: url, localTime: localTime)
             } catch {
                 return segment.mediaItem.previewImage
             }
