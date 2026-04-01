@@ -142,6 +142,7 @@ final class AppViewModel: NSObject, ObservableObject {
     private var previewSourceVoiceIdentifier = ""
     private var pendingUtteranceCount = 0
     private var didLoadFullVoiceList = false
+    private var shouldPersistNarrationDraft = true
     private lazy var speechSynthesizer: AVSpeechSynthesizer = {
         let synthesizer = AVSpeechSynthesizer()
         synthesizer.delegate = self
@@ -302,6 +303,7 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     func clearNarration() {
+        stopLiveNarrationPlayback()
         narrationText = ""
         statusMessage = "Narration text cleared."
     }
@@ -315,6 +317,7 @@ final class AppViewModel: NSObject, ObservableObject {
             return
         }
 
+        stopLiveNarrationPlayback()
         narrationText = savedDraft
         statusMessage = "Last saved script recovered."
     }
@@ -329,9 +332,12 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     func loadSampleNarration() {
+        stopLiveNarrationPlayback()
+        shouldPersistNarrationDraft = false
         narrationText = """
         Welcome to my photo story. These images capture a few favorite moments, and this short voiceover helps turn them into a simple video draft. As the sequence moves forward, each frame adds a little more energy, rhythm, and emotion to the final cut. You can replace this sample with your own script any time and shape the pacing to match the story you want to tell.
         """
+        shouldPersistNarrationDraft = true
         statusMessage = "Sample narration loaded."
     }
 
@@ -384,6 +390,7 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     private func saveNarrationDraft() {
+        guard shouldPersistNarrationDraft else { return }
         UserDefaults.standard.set(narrationText, forKey: Self.savedNarrationDraftKey)
     }
 
