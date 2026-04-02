@@ -779,25 +779,21 @@ struct VideoExporter {
             return false
         }
 
-        let totalVideoDuration = videoItems.reduce(CMTime.zero) { partial, item in
-            switch item.kind {
-            case .photo:
-                return partial
-            case let .video(_, duration):
-                return partial + duration
-            }
-        }
-
-        let remainingDuration = CMTimeMaximum(totalDuration - totalVideoDuration, .zero)
+        let usesMixedLooping = !videoItems.isEmpty
         let photoDuration: CMTime = {
-            guard !photoItems.isEmpty, remainingDuration > .zero else { return .zero }
-            return CMTimeMultiplyByFloat64(remainingDuration, multiplier: 1.0 / Double(photoItems.count))
+            guard !photoItems.isEmpty else { return .zero }
+            if usesMixedLooping {
+                return CMTime(seconds: 2.0, preferredTimescale: 600)
+            }
+            return CMTimeMultiplyByFloat64(totalDuration, multiplier: 1.0 / Double(photoItems.count))
         }()
 
         var segments: [TimelineSegment] = []
         var cursor = CMTime.zero
+        var loopIndex = 0
 
-        for item in mediaItems {
+        while cursor < totalDuration {
+            let item = mediaItems[loopIndex % mediaItems.count]
             let duration: CMTime
             switch item.kind {
             case .photo:
@@ -806,43 +802,16 @@ struct VideoExporter {
                 duration = clipDuration
             }
 
-            guard duration > .zero else { continue }
+            guard duration > .zero else { break }
             let remaining = totalDuration - cursor
-            guard remaining > .zero else { break }
             let clippedDuration = CMTimeMinimum(duration, remaining)
             segments.append(TimelineSegment(mediaItem: item, timeRange: CMTimeRange(start: cursor, duration: clippedDuration)))
             cursor = cursor + clippedDuration
-        }
+            loopIndex += 1
 
-        let loopSource = segments.filter {
-            if case .video = $0.mediaItem.kind { return true }
-            return false
-        }
-
-        if cursor < totalDuration, photoItems.isEmpty, !videoItems.isEmpty, !loopSource.isEmpty {
-            var loopIndex = 0
-            while cursor < totalDuration {
-                let item = loopSource[loopIndex % loopSource.count].mediaItem
-                let duration: CMTime
-                switch item.kind {
-                case .photo:
-                    duration = .zero
-                case let .video(_, clipDuration):
-                    duration = clipDuration
-                }
-                guard duration > .zero else { break }
-                let remaining = totalDuration - cursor
-                let clippedDuration = CMTimeMinimum(duration, remaining)
-                segments.append(TimelineSegment(mediaItem: item, timeRange: CMTimeRange(start: cursor, duration: clippedDuration)))
-                cursor = cursor + clippedDuration
-                loopIndex += 1
+            if !usesMixedLooping && loopIndex >= mediaItems.count {
+                break
             }
-        } else if cursor < totalDuration, let lastIndex = segments.indices.last {
-            let existing = segments[lastIndex]
-            segments[lastIndex] = TimelineSegment(
-                mediaItem: existing.mediaItem,
-                timeRange: CMTimeRange(start: existing.timeRange.start, duration: totalDuration - existing.timeRange.start)
-            )
         }
 
         return segments
@@ -948,79 +917,54 @@ struct VideoExporter {
     }
 
     private func makeTimelineSegments(for mediaItems: [MediaItem], totalDuration: CMTime) async throws -> [TimelineSegment] {
-        let totalVideoDuration = mediaItems.reduce(CMTime.zero) { partial, item in
-            switch item.kind {
-            case .photo:
-                return partial
-            case let .video(_, duration):
-                return partial + duration
-            }
-        }
-
         let photoItems = mediaItems.filter {
             if case .photo = $0.kind { return true }
             return false
         }
-        let remainingForPhotos = CMTimeMaximum(.zero, totalDuration - totalVideoDuration)
-        let perPhotoDuration = photoItems.isEmpty
-            ? CMTime(seconds: 0, preferredTimescale: 600)
-            : CMTimeMultiplyByFloat64(remainingForPhotos, multiplier: 1.0 / Double(photoItems.count))
+        let videoItems = mediaItems.filter {
+            if case .video = $0.kind { return true }
+            return false
+        }
+        let usesMixedLooping = !videoItems.isEmpty
+        let perPhotoDuration: CMTime = {
+            guard !photoItems.isEmpty else { return CMTime(seconds: 0, preferredTimescale: 600) }
+            if usesMixedLooping {
+                return CMTime(seconds: 2.0, preferredTimescale: 600)
+            }
+            return CMTimeMultiplyByFloat64(totalDuration, multiplier: 1.0 / Double(photoItems.count))
+        }()
 
         var cursor = CMTime.zero
         var segments: [TimelineSegment] = []
+        var loopIndex = 0
 
-        for item in mediaItems {
+        while cursor < totalDuration {
+            let item = mediaItems[loopIndex % mediaItems.count]
             let remainingDuration = totalDuration - cursor
             guard remainingDuration > .zero else { break }
 
             let intendedDuration: CMTime
             switch item.kind {
             case .photo:
-                intendedDuration = perPhotoDuration > .zero ? perPhotoDuration : CMTime(seconds: 1.6, preferredTimescale: 600)
+                intendedDuration = perPhotoDuration > .zero ? perPhotoDuration : CMTime(seconds: 2.0, preferredTimescale: 600)
             case let .video(_, videoDuration):
                 intendedDuration = videoDuration
             }
 
             let duration = min(intendedDuration, remainingDuration)
-            guard duration > .zero else { continue }
-            let segmentRange = CMTimeRange(start: cursor, duration: duration)
-            segments.append(TimelineSegment(mediaItem: item, timeRange: segmentRange))
-            cursor = cursor + duration
-        }
-
-        let videoItems = mediaItems.filter {
-            if case .video = $0.kind { return true }
-            return false
-        }
-
-        if cursor < totalDuration, photoItems.isEmpty, !videoItems.isEmpty {
-            var loopIndex = 0
-            while cursor < totalDuration {
-                let item = videoItems[loopIndex % videoItems.count]
-                guard case let .video(_, videoDuration) = item.kind else {
-                    loopIndex += 1
-                    continue
-                }
-
-                let remainingDuration = totalDuration - cursor
-                let duration = min(videoDuration, remainingDuration)
-                guard duration > .zero else { break }
-
-                segments.append(
-                    TimelineSegment(
-                        mediaItem: item,
-                        timeRange: CMTimeRange(start: cursor, duration: duration)
-                    )
+            guard duration > .zero else { break }
+            segments.append(
+                TimelineSegment(
+                    mediaItem: item,
+                    timeRange: CMTimeRange(start: cursor, duration: duration)
                 )
-                cursor = cursor + duration
-                loopIndex += 1
-            }
-        } else if let lastIndex = segments.indices.last, cursor < totalDuration {
-            let last = segments[lastIndex]
-            segments[lastIndex] = TimelineSegment(
-                mediaItem: last.mediaItem,
-                timeRange: CMTimeRange(start: last.timeRange.start, end: totalDuration)
             )
+            cursor = cursor + duration
+            loopIndex += 1
+
+            if !usesMixedLooping && loopIndex >= mediaItems.count {
+                break
+            }
         }
 
         return segments

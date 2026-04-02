@@ -19,19 +19,34 @@ struct ContentView: View {
     @State private var isVoiceListExpanded = false
     @State private var draggedMediaItem: AppViewModel.MediaItem?
     @State private var renderPreviewPlayer = AVPlayer()
+    @State private var scriptScrollProxy: ScrollViewProxy?
     @FocusState private var isNarrationFocused: Bool
 
     var body: some View {
         NavigationStack {
-            ScrollView {
+            VStack(alignment: .leading, spacing: 20) {
                 VStack(alignment: .leading, spacing: 20) {
                     brandHeader
                     stepPicker
-                    activeSection
-                    statusSection
                 }
                 .padding(20)
+                .padding(.bottom, 4)
                 .frame(maxWidth: .infinity, alignment: .top)
+
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 20) {
+                            activeSection
+                            statusSection
+                        }
+                        .padding(.horizontal, 20)
+                        .padding(.bottom, 20)
+                        .frame(maxWidth: .infinity, alignment: .top)
+                    }
+                    .onAppear {
+                        scriptScrollProxy = proxy
+                    }
+                }
             }
             .background(appBackground)
             .navigationTitle("")
@@ -463,6 +478,10 @@ struct ContentView: View {
 
     private var narrationSection: some View {
         VStack(alignment: .leading, spacing: 14) {
+            Color.clear
+                .frame(height: 1)
+                .id("script-top")
+
             Text("Script")
                 .font(.title2.weight(.semibold))
 
@@ -601,7 +620,10 @@ struct ContentView: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.primary)
-                .disabled(viewModel.narrationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                .disabled(
+                    viewModel.isPreparingNarrationPreview
+                        || viewModel.narrationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+                )
             }
 
             Button {
@@ -635,6 +657,7 @@ struct ContentView: View {
             }
             .buttonStyle(.plain)
             .foregroundStyle(.primary)
+            .disabled(viewModel.isPreparingNarrationPreview)
 
             HStack(spacing: 10) {
                 inlineScriptActionButton(
@@ -648,18 +671,44 @@ struct ContentView: View {
                     viewModel.loadSampleNarration()
                 }
             }
+            .disabled(viewModel.isPreparingNarrationPreview)
+
+            HStack(spacing: 10) {
+                scriptJumpButton(title: "Top", systemImage: "arrow.up.to.line") {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        scriptScrollProxy?.scrollTo("script-top", anchor: .top)
+                    }
+                }
+
+                scriptJumpButton(title: "Preview", systemImage: "waveform.path.ecg") {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        scriptScrollProxy?.scrollTo("script-preview", anchor: .top)
+                    }
+                }
+
+                scriptJumpButton(title: "Bottom", systemImage: "arrow.down.to.line") {
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        scriptScrollProxy?.scrollTo("script-bottom", anchor: .bottom)
+                    }
+                }
+            }
 
             TextEditor(text: $viewModel.narrationText)
-                .frame(maxWidth: .infinity, minHeight: 260, maxHeight: .infinity)
+                .frame(maxWidth: .infinity, minHeight: 320, maxHeight: 320)
                 .padding(12)
                 .scrollContentBackground(.hidden)
                 .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .focused($isNarrationFocused)
 
             narrationPreviewSection
+                .id("script-preview")
+
+            Color.clear
+                .frame(height: 1)
+                .id("script-bottom")
         }
         .padding(20)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(Color.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
     }
 
@@ -685,6 +734,7 @@ struct ContentView: View {
                 .foregroundStyle(.secondary)
 
             Button {
+                isNarrationFocused = false
                 viewModel.buildNarrationPreview()
             } label: {
                 HStack {
@@ -711,6 +761,7 @@ struct ContentView: View {
                     tint: .orange,
                     isEnabled: viewModel.hasNarrationPreview
                 ) {
+                    isNarrationFocused = false
                     viewModel.toggleNarrationPreviewPlayback()
                 }
 
@@ -720,6 +771,7 @@ struct ContentView: View {
                     tint: .red,
                     isEnabled: viewModel.hasNarrationPreview
                 ) {
+                    isNarrationFocused = false
                     viewModel.stopNarrationPreview()
                 }
             }
@@ -760,14 +812,16 @@ struct ContentView: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
 
-                Text(viewModel.narrationPreviewCaption)
-                    .font(.body.weight(.semibold))
-                    .lineLimit(nil)
-                    .multilineTextAlignment(.leading)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: .infinity, minHeight: 120, alignment: .topLeading)
-                    .padding(14)
-                    .background(Color.white.opacity(0.85), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                ScrollView {
+                    Text(viewModel.narrationPreviewCaption)
+                        .font(.body.weight(.semibold))
+                        .lineLimit(nil)
+                        .multilineTextAlignment(.leading)
+                        .frame(maxWidth: .infinity, alignment: .topLeading)
+                        .padding(14)
+                }
+                .frame(maxWidth: .infinity, minHeight: 120, maxHeight: 120, alignment: .topLeading)
+                .background(Color.white.opacity(0.85), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
         }
         .padding(16)
@@ -833,6 +887,29 @@ struct ContentView: View {
             }
             .frame(maxWidth: .infinity)
             .padding(.vertical, 11)
+        }
+        .buttonStyle(.plain)
+        .foregroundStyle(.primary)
+        .background(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .fill(Color.white.opacity(0.82))
+        )
+    }
+
+    private func scriptJumpButton(
+        title: String,
+        systemImage: String,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 13, weight: .semibold))
+                Text(title)
+                    .font(.caption.weight(.semibold))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 10)
         }
         .buttonStyle(.plain)
         .foregroundStyle(.primary)
@@ -1360,6 +1437,17 @@ struct ContentView: View {
                         .frame(height: 320)
                         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
 
+                    HStack(spacing: 10) {
+                        Text("AirPlay")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+
+                        AirPlayRoutePicker()
+                            .frame(width: 36, height: 36)
+
+                        Spacer()
+                    }
+
                     VStack(alignment: .leading, spacing: 2) {
                         Text(viewModel.exportedVideoURL != nil ? "Final Video" : "Preview Render")
                             .font(.caption.weight(.semibold))
@@ -1431,6 +1519,8 @@ struct ContentView: View {
             return
         }
 
+        renderPreviewPlayer.allowsExternalPlayback = true
+        renderPreviewPlayer.usesExternalPlaybackWhileExternalScreenIsActive = true
         renderPreviewPlayer.replaceCurrentItem(with: AVPlayerItem(url: url))
     }
 }
@@ -1511,4 +1601,17 @@ private struct LoopingVideoPreview: View {
             store.setActive(false)
         }
     }
+}
+
+private struct AirPlayRoutePicker: UIViewRepresentable {
+    func makeUIView(context: Context) -> AVRoutePickerView {
+        let view = AVRoutePickerView()
+        view.prioritizesVideoDevices = true
+        view.tintColor = UIColor.systemBlue
+        view.activeTintColor = UIColor.systemOrange
+        view.backgroundColor = .clear
+        return view
+    }
+
+    func updateUIView(_ uiView: AVRoutePickerView, context: Context) {}
 }

@@ -81,6 +81,7 @@ final class AppViewModel: NSObject, ObservableObject {
             saveNarrationDraft()
             if oldValue != narrationText {
                 markVideoRenderDirty(reason: "Script updated. Build a new preview or final render to reflect the latest narration.")
+                invalidateNarrationPreviewIfNeeded()
             }
         }
     }
@@ -112,6 +113,7 @@ final class AppViewModel: NSObject, ObservableObject {
             selectedVoiceName = selectedVoiceDisplayName
             if oldValue != selectedVoiceIdentifier {
                 stopLiveNarrationPlayback(reason: "Voice updated. Tap Play Voice to hear the new selection.")
+                invalidateNarrationPreviewIfNeeded()
             }
         }
     }
@@ -174,6 +176,7 @@ final class AppViewModel: NSObject, ObservableObject {
     private var narrationTimelineEngine = SubtitleTimelineEngine(cues: [])
     private var previewSourceText = ""
     private var previewSourceVoiceIdentifier = ""
+    private var narrationPreviewIsFullLength = false
     private var pendingUtteranceCount = 0
     private var didLoadFullVoiceList = false
     private var shouldPersistNarrationDraft = true
@@ -242,6 +245,7 @@ final class AppViewModel: NSObject, ObservableObject {
                 try await prepareNarrationPreview(
                     text: text,
                     voiceIdentifier: voiceIdentifier,
+                    maximumDuration: 180,
                     startedMessage: "Generating seekable narration preview.",
                     completedMessage: "Seekable narration preview is ready."
                 )
@@ -572,11 +576,17 @@ final class AppViewModel: NSObject, ObservableObject {
 
         Task {
             do {
-                if !narrationText.isEmpty, needsPreviewRefresh(for: narrationText, voiceIdentifier: voiceIdentifier) {
+                let requiresFullNarrationPreview = renderQuality != .preview
+                if !narrationText.isEmpty, needsPreviewRefresh(
+                    for: narrationText,
+                    voiceIdentifier: voiceIdentifier,
+                    requireFullLength: requiresFullNarrationPreview
+                ) {
                     exportProgress = 0.08
                     try await prepareNarrationPreview(
                         text: narrationText,
                         voiceIdentifier: voiceIdentifier,
+                        maximumDuration: renderQuality == .preview ? 180 : nil,
                         startedMessage: renderQuality == .preview
                             ? "Preparing narration and captions for the quick preview."
                             : "Preparing narration and captions for video export.",
@@ -726,29 +736,35 @@ final class AppViewModel: NSObject, ObservableObject {
         narrationText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func needsPreviewRefresh(for text: String, voiceIdentifier: String) -> Bool {
+    private func needsPreviewRefresh(for text: String, voiceIdentifier: String, requireFullLength: Bool = false) -> Bool {
         narrationPreviewAudioURL == nil
             || narrationPreviewCues.isEmpty
             || previewSourceText != text
             || previewSourceVoiceIdentifier != voiceIdentifier
+            || (requireFullLength && !narrationPreviewIsFullLength)
     }
 
     private func prepareNarrationPreview(
         text: String,
         voiceIdentifier: String,
+        maximumDuration: TimeInterval? = nil,
         startedMessage: String,
         completedMessage: String
     ) async throws {
         configureAudioSessionIfNeeded()
         isPreparingNarrationPreview = true
-        stopNarrationPreview()
+        clearNarrationPreviewState(resetCaption: true)
         narrationPreviewCaption = "Building narration preview..."
         statusMessage = startedMessage
         defer {
             isPreparingNarrationPreview = false
         }
 
-        let preview = try await narrationPreviewBuilder.buildPreview(text: text, voiceIdentifier: voiceIdentifier)
+        let preview = try await narrationPreviewBuilder.buildPreview(
+            text: text,
+            voiceIdentifier: voiceIdentifier,
+            maximumDuration: maximumDuration
+        )
         narrationPreviewPlayer = try AVAudioPlayer(contentsOf: preview.audioURL)
         narrationPreviewPlayer?.prepareToPlay()
         narrationPreviewAudioURL = preview.audioURL
@@ -759,7 +775,31 @@ final class AppViewModel: NSObject, ObservableObject {
         narrationPreviewCaption = preview.cues.first?.text ?? "Preview ready."
         previewSourceText = text
         previewSourceVoiceIdentifier = voiceIdentifier
+        narrationPreviewIsFullLength = maximumDuration == nil
         statusMessage = completedMessage
+    }
+
+    private func invalidateNarrationPreviewIfNeeded() {
+        guard hasNarrationPreview || narrationPreviewDuration > 0 || narrationPreviewPlayer != nil else { return }
+        clearNarrationPreviewState(resetCaption: true)
+    }
+
+    private func clearNarrationPreviewState(resetCaption: Bool) {
+        narrationPreviewPlayer?.stop()
+        narrationPreviewPlayer = nil
+        narrationPreviewAudioURL = nil
+        narrationPreviewDuration = 0
+        narrationPreviewCurrentTime = 0
+        narrationPreviewCues = []
+        narrationTimelineEngine = SubtitleTimelineEngine(cues: [])
+        previewSourceText = ""
+        previewSourceVoiceIdentifier = ""
+        narrationPreviewIsFullLength = false
+        isNarrationPreviewPlaying = false
+        stopNarrationPreviewTimer()
+        if resetCaption {
+            narrationPreviewCaption = "Build a seekable preview to test subtitle sync."
+        }
     }
 
     private func videoDuration(for url: URL) async -> Double {
@@ -789,7 +829,7 @@ final class AppViewModel: NSObject, ObservableObject {
         guard !didConfigureAudioSession else { return }
         do {
             let session = AVAudioSession.sharedInstance()
-            try session.setCategory(.playback, mode: .default, options: [.mixWithOthers])
+            try session.setCategory(.playback, mode: .moviePlayback, policy: .longFormVideo, options: [])
             try session.setActive(true)
             didConfigureAudioSession = true
         } catch {
@@ -970,11 +1010,20 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     var canStartVideoRender: Bool {
-        !isLoadingMediaSelection && !mediaItems.isEmpty && !isExportingVideo && !isPreparingVideoPreview && hasPendingVideoChanges
+        !isLoadingMediaSelection
+            && !mediaItems.isEmpty
+            && !isExportingVideo
+            && !isPreparingVideoPreview
+            && !isPreparingNarrationPreview
+            && hasPendingVideoChanges
     }
 
     var hasNarrationPreview: Bool {
-        narrationPreviewDuration > 0 && !narrationPreviewCues.isEmpty
+        !isPreparingNarrationPreview
+            && narrationPreviewDuration > 0
+            && !narrationPreviewCues.isEmpty
+            && previewSourceText == normalizedNarrationSourceText
+            && previewSourceVoiceIdentifier == selectedVoiceIdentifier
     }
 
     private func formatPreviewTime(_ value: TimeInterval) -> String {

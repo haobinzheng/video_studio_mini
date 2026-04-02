@@ -29,9 +29,10 @@ struct NarrationPreviewBuilder {
         let weight: Double
     }
 
-    func buildPreview(text: String, voiceIdentifier: String) async throws -> PreviewResult {
+    func buildPreview(text: String, voiceIdentifier: String, maximumDuration: TimeInterval? = nil) async throws -> PreviewResult {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let segments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
+        let allSegments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
+        let segments = cappedPreviewSegments(from: allSegments, maximumDuration: maximumDuration)
         guard !segments.isEmpty else {
             throw PreviewError.emptyNarration
         }
@@ -62,6 +63,23 @@ struct NarrationPreviewBuilder {
             cues: cues,
             duration: measuredDuration
         )
+    }
+
+    private func cappedPreviewSegments(from segments: [String], maximumDuration: TimeInterval?) -> [String] {
+        guard let maximumDuration else { return segments }
+        var selected: [String] = []
+        var accumulated: TimeInterval = 0
+
+        for segment in segments {
+            let estimated = estimatedSeconds(for: segment)
+            if !selected.isEmpty, accumulated + estimated > maximumDuration {
+                break
+            }
+            selected.append(segment)
+            accumulated += estimated
+        }
+
+        return selected
     }
 
     private func makeWorkspace() throws -> URL {
