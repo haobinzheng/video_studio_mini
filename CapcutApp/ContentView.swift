@@ -1363,7 +1363,7 @@ struct ContentView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(viewModel.isLoadingMediaSelection ? "Loading Media..." : (viewModel.isPreparingVideoPreview ? "Building Preview..." : "Preview Video"))
                                 .font(.subheadline.weight(.bold))
-                            Text(viewModel.hasPendingVideoChanges ? "Quick 8-second sample" : "Up to date")
+                            Text(viewModel.hasPendingPreviewChanges ? "Quick 8-second sample" : "Up to date")
                                 .font(.caption2.weight(.semibold))
                                 .foregroundStyle(.white.opacity(0.82))
                         }
@@ -1385,8 +1385,8 @@ struct ContentView: View {
                     ),
                     in: RoundedRectangle(cornerRadius: 18, style: .continuous)
                 )
-                .opacity(viewModel.canStartVideoRender ? 1 : 0.6)
-                .disabled(!viewModel.canStartVideoRender)
+                .opacity(viewModel.canStartVideoPreviewRender ? 1 : 0.6)
+                .disabled(!viewModel.canStartVideoPreviewRender)
 
                 Button {
                     renderPreviewPlayer.pause()
@@ -1403,7 +1403,7 @@ struct ContentView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(viewModel.isLoadingMediaSelection ? "Loading Media..." : (viewModel.isExportingVideo ? "Rendering..." : "Create Video"))
                                 .font(.subheadline.weight(.bold))
-                            Text(viewModel.hasPendingVideoChanges ? "\(viewModel.selectedFinalExportQuality.rawValue) final export" : "Up to date")
+                            Text(viewModel.hasPendingFinalVideoChanges ? "\(viewModel.selectedFinalExportQuality.rawValue) final export" : "Up to date")
                                 .font(.caption2.weight(.semibold))
                                 .foregroundStyle(.white.opacity(0.84))
                         }
@@ -1429,8 +1429,8 @@ struct ContentView: View {
                     RoundedRectangle(cornerRadius: 18, style: .continuous)
                         .stroke(Color.white.opacity(0.16), lineWidth: 1)
                 )
-                .opacity(viewModel.canStartVideoRender ? 1 : 0.6)
-                .disabled(!viewModel.canStartVideoRender)
+                .opacity(viewModel.canStartFinalVideoRender ? 1 : 0.6)
+                .disabled(!viewModel.canStartFinalVideoRender)
 
                 Group {
                     if let exportedVideoURL = viewModel.exportedVideoURL {

@@ -81,7 +81,7 @@ final class AppViewModel: NSObject, ObservableObject {
         didSet {
             saveNarrationDraft()
             if oldValue != narrationText {
-                markVideoRenderDirty(reason: "Script updated. Build a new preview or final render to reflect the latest narration.")
+                markAllVideoRendersDirty(reason: "Script updated. Build a new preview or final render to reflect the latest narration.")
                 invalidateNarrationPreviewIfNeeded()
             }
         }
@@ -115,6 +115,7 @@ final class AppViewModel: NSObject, ObservableObject {
             selectedVoiceName = selectedVoiceDisplayName
             if oldValue != selectedVoiceIdentifier {
                 stopLiveNarrationPlayback(reason: "Voice updated. Tap Play Voice to hear the new selection.")
+                markAllVideoRendersDirty(reason: "Voice updated. Build a new preview or final render to hear the change.")
                 invalidateNarrationPreviewIfNeeded()
             }
         }
@@ -129,7 +130,8 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var selectedAspectRatio: VideoExporter.AspectRatio = .vertical {
         didSet {
             if oldValue != selectedAspectRatio {
-                hasPendingVideoChanges = true
+                hasPendingPreviewChanges = true
+                hasPendingFinalVideoChanges = true
                 invalidateRenderedVideo(reason: "Frame updated to \(selectedAspectRatio.rawValue). Build a new preview or final render to see the change.")
             }
         }
@@ -137,8 +139,10 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var selectedFinalExportQuality: VideoExporter.FinalExportQuality = .standard {
         didSet {
             if oldValue != selectedFinalExportQuality {
-                hasPendingVideoChanges = true
-                invalidateRenderedVideo(reason: "Final quality updated to \(selectedFinalExportQuality.rawValue). Build a new preview or final render to see the change.")
+                hasPendingFinalVideoChanges = true
+                exportedVideoURL = nil
+                exportProgress = 0
+                statusMessage = "Final quality updated to \(selectedFinalExportQuality.rawValue). Build a new final render to see the change."
             }
         }
     }
@@ -146,26 +150,27 @@ final class AppViewModel: NSObject, ObservableObject {
         didSet {
             audioPlayer?.volume = Float(musicVolume)
             if oldValue != musicVolume {
-                markVideoRenderDirty(reason: "Music level updated. Build a new preview or final render to hear the change.")
+                markAllVideoRendersDirty(reason: "Music level updated. Build a new preview or final render to hear the change.")
             }
         }
     }
     @Published var narrationVolume: Double = 1.0 {
         didSet {
             if oldValue != narrationVolume {
-                markVideoRenderDirty(reason: "Narration level updated. Build a new preview or final render to hear the change.")
+                markAllVideoRendersDirty(reason: "Narration level updated. Build a new preview or final render to hear the change.")
             }
         }
     }
     @Published var videoAudioVolume: Double = 0.0 {
         didSet {
             if oldValue != videoAudioVolume {
-                markVideoRenderDirty(reason: "Video sound level updated. Build a new preview or final render to hear the change.")
+                markAllVideoRendersDirty(reason: "Video sound level updated. Build a new preview or final render to hear the change.")
             }
         }
     }
     @Published var statusMessage = "Pick photos, add a script, and import music to build your clip."
-    @Published var hasPendingVideoChanges = true
+    @Published var hasPendingPreviewChanges = true
+    @Published var hasPendingFinalVideoChanges = true
 
     private let videoExporter = VideoExporter()
     private let narrationPreviewBuilder = NarrationPreviewBuilder()
@@ -423,7 +428,8 @@ final class AppViewModel: NSObject, ObservableObject {
             importedMusicURL = bundledURL
             importedMusicName = "\(track.name).\(track.fileExtension)"
             try prepareAudioPlayer(with: bundledURL)
-            hasPendingVideoChanges = true
+            hasPendingPreviewChanges = true
+            hasPendingFinalVideoChanges = true
             statusMessage = "\(track.name) is ready to play."
         } catch {
             statusMessage = "Could not load bundled sample music."
@@ -436,7 +442,8 @@ final class AppViewModel: NSObject, ObservableObject {
         importedMusicURL = nil
         importedMusicName = "No music selected"
         isImportingMusic = false
-        hasPendingVideoChanges = true
+        hasPendingPreviewChanges = true
+        hasPendingFinalVideoChanges = true
         statusMessage = "Music cleared. Your video will export without background music."
     }
 
@@ -489,7 +496,8 @@ final class AppViewModel: NSObject, ObservableObject {
         selectedPhotoItems = []
         mediaItems = []
         currentSlideIndex = 0
-        hasPendingVideoChanges = true
+        hasPendingPreviewChanges = true
+        hasPendingFinalVideoChanges = true
         statusMessage = "Media cleared. Import a new set whenever you're ready."
     }
 
@@ -505,7 +513,8 @@ final class AppViewModel: NSObject, ObservableObject {
         let destinationIndex = mediaItems.firstIndex(where: { $0.id == targetID }) ?? targetIndex
         mediaItems.insert(movedItem, at: destinationIndex)
         currentSlideIndex = mediaItems.firstIndex(where: { $0.id == sourceID }) ?? 0
-        hasPendingVideoChanges = true
+        hasPendingPreviewChanges = true
+        hasPendingFinalVideoChanges = true
         statusMessage = "Media order updated."
     }
 
@@ -623,10 +632,12 @@ final class AppViewModel: NSObject, ObservableObject {
                 }.value
                 if renderQuality == .preview {
                     videoPreviewURL = exportedURL
+                    hasPendingPreviewChanges = false
                 } else {
                     exportedVideoURL = exportedURL
+                    hasPendingPreviewChanges = false
+                    hasPendingFinalVideoChanges = false
                 }
-                hasPendingVideoChanges = false
                 exportProgress = 1.0
                 statusMessage = successMessage
             } catch {
@@ -695,7 +706,8 @@ final class AppViewModel: NSObject, ObservableObject {
 
         mediaItems = loadedMedia
         currentSlideIndex = 0
-        hasPendingVideoChanges = true
+        hasPendingPreviewChanges = true
+        hasPendingFinalVideoChanges = true
         statusMessage = loadedMedia.isEmpty
             ? "No valid photos or videos were selected."
             : "\(loadedMedia.count) media item(s) ready for your project."
@@ -870,7 +882,8 @@ final class AppViewModel: NSObject, ObservableObject {
             importedMusicURL = imported.url
             importedMusicName = imported.displayName
             try prepareAudioPlayer(with: imported.url)
-            hasPendingVideoChanges = true
+            hasPendingPreviewChanges = true
+            hasPendingFinalVideoChanges = true
             statusMessage = imported.wasExtractedFromVideo
                 ? "Video soundtrack extracted and ready to play."
                 : "Music imported and ready to play."
@@ -1158,13 +1171,22 @@ final class AppViewModel: NSObject, ObservableObject {
         return itemCount == 1 ? "Loading 1 selected item..." : "Loading \(itemCount) selected items..."
     }
 
-    var canStartVideoRender: Bool {
+    var canStartVideoPreviewRender: Bool {
         !isLoadingMediaSelection
             && !mediaItems.isEmpty
             && !isExportingVideo
             && !isPreparingVideoPreview
             && !isPreparingNarrationPreview
-            && hasPendingVideoChanges
+            && hasPendingPreviewChanges
+    }
+
+    var canStartFinalVideoRender: Bool {
+        !isLoadingMediaSelection
+            && !mediaItems.isEmpty
+            && !isExportingVideo
+            && !isPreparingVideoPreview
+            && !isPreparingNarrationPreview
+            && hasPendingFinalVideoChanges
     }
 
     var hasNarrationPreview: Bool {
@@ -1197,8 +1219,9 @@ final class AppViewModel: NSObject, ObservableObject {
         }, 1)
     }
 
-    private func markVideoRenderDirty(reason: String) {
-        hasPendingVideoChanges = true
+    private func markAllVideoRendersDirty(reason: String) {
+        hasPendingPreviewChanges = true
+        hasPendingFinalVideoChanges = true
         if exportedVideoURL != nil || videoPreviewURL != nil {
             statusMessage = reason
         }
