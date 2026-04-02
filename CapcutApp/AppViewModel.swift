@@ -1,4 +1,5 @@
 import AVFoundation
+import CryptoKit
 import CoreTransferable
 import PhotosUI
 import SwiftUI
@@ -94,6 +95,7 @@ final class AppViewModel: NSObject, ObservableObject {
     }
     @Published var currentSlideIndex = 0
     @Published var importedMusicName = "No music selected"
+    @Published var isImportingMusic = false
     @Published var isLoadingMediaSelection = false
     @Published var isSpeaking = false
     @Published var isPreparingNarrationPreview = false
@@ -385,25 +387,19 @@ final class AppViewModel: NSObject, ObservableObject {
 
     func importMusic(from selectedURL: URL) {
         configureAudioSessionIfNeeded()
-
-        do {
-            stopMusic()
-            let canAccess = selectedURL.startAccessingSecurityScopedResource()
-            defer {
-                if canAccess {
-                    selectedURL.stopAccessingSecurityScopedResource()
-                }
-            }
-
-            let destination = try copyImportedFileToDocuments(selectedURL)
-            importedMusicURL = destination
-            importedMusicName = destination.lastPathComponent
-            try prepareAudioPlayer(with: destination)
-            hasPendingVideoChanges = true
-            statusMessage = "Music imported and ready to play."
-        } catch {
-            statusMessage = error.localizedDescription.isEmpty ? "Could not import that music file." : error.localizedDescription
+        Task {
+            await importMusicAsset(from: selectedURL)
         }
+    }
+
+    func importMusicVideo(from item: PhotosPickerItem) async {
+        configureAudioSessionIfNeeded()
+        guard let pickedURL = await importedVideoURL(from: item) else {
+            statusMessage = "Could not load that video from Photos."
+            return
+        }
+
+        await importMusicAsset(from: pickedURL, shouldManageSecurityScope: false)
     }
 
     func loadSelectedBundledMusic() {
@@ -439,6 +435,7 @@ final class AppViewModel: NSObject, ObservableObject {
         audioPlayer = nil
         importedMusicURL = nil
         importedMusicName = "No music selected"
+        isImportingMusic = false
         hasPendingVideoChanges = true
         statusMessage = "Music cleared. Your video will export without background music."
     }
@@ -853,6 +850,154 @@ final class AppViewModel: NSObject, ObservableObject {
         return destination
     }
 
+    private func importMusicAsset(from selectedURL: URL, shouldManageSecurityScope: Bool = true) async {
+        isImportingMusic = true
+        statusMessage = "Importing soundtrack..."
+        defer {
+            isImportingMusic = false
+        }
+
+        do {
+            stopMusicSilently()
+            let canAccess = shouldManageSecurityScope ? selectedURL.startAccessingSecurityScopedResource() : false
+            defer {
+                if canAccess {
+                    selectedURL.stopAccessingSecurityScopedResource()
+                }
+            }
+
+            let imported = try await prepareImportedMusicAsset(from: selectedURL)
+            importedMusicURL = imported.url
+            importedMusicName = imported.displayName
+            try prepareAudioPlayer(with: imported.url)
+            hasPendingVideoChanges = true
+            statusMessage = imported.wasExtractedFromVideo
+                ? "Video soundtrack extracted and ready to play."
+                : "Music imported and ready to play."
+        } catch {
+            statusMessage = error.localizedDescription.isEmpty ? "Could not import that music file." : error.localizedDescription
+        }
+    }
+
+    private func prepareImportedMusicAsset(from sourceURL: URL) async throws -> (url: URL, displayName: String, wasExtractedFromVideo: Bool) {
+        let sourceType = importedMediaType(for: sourceURL)
+        switch sourceType {
+        case .audio:
+            let destination = try copyImportedFileToDocuments(sourceURL)
+            return (destination, destination.lastPathComponent, false)
+        case .video:
+            let extractedURL = try await extractAudioTrackIfNeeded(from: sourceURL)
+            return (extractedURL, extractedURL.lastPathComponent, true)
+        case .unknown:
+            throw NSError(
+                domain: "FluxCutMusicImport",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "That file format is not supported for music. Use audio or a video with a soundtrack."]
+            )
+        }
+    }
+
+    private enum ImportedMediaType {
+        case audio
+        case video
+        case unknown
+    }
+
+    private func importedMediaType(for url: URL) -> ImportedMediaType {
+        guard let contentType = UTType(filenameExtension: url.pathExtension) else {
+            return .unknown
+        }
+        if contentType.conforms(to: .audio) || contentType.conforms(to: .mpeg4Audio) || contentType.conforms(to: .mp3) || contentType.conforms(to: .wav) {
+            return .audio
+        }
+        if contentType.conforms(to: .movie) || contentType.conforms(to: .video) || contentType.conforms(to: .mpeg4Movie) || contentType.conforms(to: .quickTimeMovie) {
+            return .video
+        }
+        return .unknown
+    }
+
+    private func extractAudioTrackIfNeeded(from sourceURL: URL) async throws -> URL {
+        let destination = try extractedAudioCacheURL(for: sourceURL)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            return destination
+        }
+
+        let asset = AVURLAsset(url: sourceURL)
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        guard !audioTracks.isEmpty else {
+            throw NSError(
+                domain: "FluxCutMusicImport",
+                code: 2,
+                userInfo: [NSLocalizedDescriptionKey: "That video does not contain an audio track to use as music."]
+            )
+        }
+
+        guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
+            throw NSError(
+                domain: "FluxCutMusicImport",
+                code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "FluxCut could not prepare audio extraction for that video."]
+            )
+        }
+
+        let parent = destination.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+
+        exportSession.outputURL = destination
+        exportSession.outputFileType = .m4a
+        exportSession.shouldOptimizeForNetworkUse = false
+
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            exportSession.exportAsynchronously {
+                switch exportSession.status {
+                case .completed:
+                    continuation.resume()
+                case .failed:
+                    continuation.resume(throwing: exportSession.error ?? NSError(
+                        domain: "FluxCutMusicImport",
+                        code: 4,
+                        userInfo: [NSLocalizedDescriptionKey: "Audio extraction from that video failed."]
+                    ))
+                case .cancelled:
+                    continuation.resume(throwing: NSError(
+                        domain: "FluxCutMusicImport",
+                        code: 5,
+                        userInfo: [NSLocalizedDescriptionKey: "Audio extraction was cancelled."]
+                    ))
+                default:
+                    continuation.resume(throwing: NSError(
+                        domain: "FluxCutMusicImport",
+                        code: 6,
+                        userInfo: [NSLocalizedDescriptionKey: "Audio extraction did not finish correctly."]
+                    ))
+                }
+            }
+        }
+
+        return destination
+    }
+
+    private func extractedAudioCacheURL(for sourceURL: URL) throws -> URL {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let sharedAudioFolder = documents.appendingPathComponent("SharedAudio", isDirectory: true)
+        let baseName = sourceURL.deletingPathExtension().lastPathComponent
+        let safeBaseName = sanitizeFileComponent(baseName.isEmpty ? "video-soundtrack" : baseName)
+        let fileSize = (try? FileManager.default.attributesOfItem(atPath: sourceURL.path)[.size] as? NSNumber)?.stringValue ?? "0"
+        let rawKey = "\(safeBaseName.lowercased())|\(fileSize)|\(sourceURL.pathExtension.lowercased())"
+        let digest = Insecure.MD5.hash(data: Data(rawKey.utf8)).map { String(format: "%02x", $0) }.joined().prefix(12)
+        return sharedAudioFolder.appendingPathComponent("\(safeBaseName)-\(digest).m4a")
+    }
+
+    private func sanitizeFileComponent(_ text: String) -> String {
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_"))
+        let scalarView = text.unicodeScalars.map { allowed.contains($0) ? Character($0) : "-" }
+        let cleaned = String(scalarView).trimmingCharacters(in: CharacterSet(charactersIn: "-"))
+        return cleaned.isEmpty ? "soundtrack" : cleaned
+    }
+
     private func prepareAudioPlayer(with url: URL) throws {
         audioPlayer = try AVAudioPlayer(contentsOf: url)
         audioPlayer?.delegate = self
@@ -864,6 +1009,10 @@ final class AppViewModel: NSObject, ObservableObject {
 
     var hasSelectedMusic: Bool {
         importedMusicURL != nil
+    }
+
+    var shareableMusicURL: URL? {
+        importedMusicURL
     }
 
     private func startNarrationPreviewTimer() {

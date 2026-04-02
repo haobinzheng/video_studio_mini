@@ -15,6 +15,7 @@ struct ContentView: View {
 
     @ObservedObject var viewModel: AppViewModel
     @State private var isMusicImporterPresented = false
+    @State private var selectedMusicVideoItem: PhotosPickerItem?
     @State private var selectedStep: StudioStep = .narration
     @State private var isVoiceListExpanded = false
     @State private var draggedMediaItem: AppViewModel.MediaItem?
@@ -53,11 +54,21 @@ struct ContentView: View {
             .navigationBarTitleDisplayMode(.inline)
             .fileImporter(
                 isPresented: $isMusicImporterPresented,
-                allowedContentTypes: [.audio, .mpeg4Audio, .mp3, .wav]
+                allowedContentTypes: [.audio, .mpeg4Audio, .mp3, .wav, .movie, .video, .mpeg4Movie, .quickTimeMovie]
             ) { result in
                 if case let .success(url) = result {
                     viewModel.importMusic(from: url)
                     selectedStep = .music
+                }
+            }
+            .onChange(of: selectedMusicVideoItem) { _, newValue in
+                guard let newValue else { return }
+                Task {
+                    await viewModel.importMusicVideo(from: newValue)
+                    await MainActor.run {
+                        selectedMusicVideoItem = nil
+                        selectedStep = .music
+                    }
                 }
             }
             .onChange(of: selectedStep) { oldStep, newStep in
@@ -1006,19 +1017,6 @@ struct ContentView: View {
                 .font(.title2.weight(.semibold))
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Import `.mp3`, `.m4a`, or `.wav` music, then set the level used in the final video mix.")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.77, green: 0.28, blue: 0.12),
-                                Color(red: 0.48, green: 0.16, blue: 0.08)
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-
                 HStack(spacing: 10) {
                     ZStack {
                         Circle()
@@ -1035,47 +1033,104 @@ struct ContentView: View {
                         Text(viewModel.importedMusicName)
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.primary)
-                            .lineLimit(1)
+                            .lineLimit(2)
                             .truncationMode(.middle)
                     }
                 }
 
-                Button {
-                    isMusicImporterPresented = true
-                } label: {
-                    HStack(spacing: 10) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(.white.opacity(0.18))
-                                .frame(width: 30, height: 30)
-                            Image(systemName: "waveform.badge.plus")
-                                .font(.system(size: 14, weight: .bold))
+                VStack(spacing: 12) {
+                    Button {
+                        isMusicImporterPresented = true
+                    } label: {
+                        HStack(spacing: 10) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(.white.opacity(0.18))
+                                    .frame(width: 30, height: 30)
+                                Image(systemName: "waveform.badge.plus")
+                                    .font(.system(size: 14, weight: .bold))
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Import From Files")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("Audio or video")
+                                    .font(.caption2)
+                                    .foregroundStyle(.white.opacity(0.82))
+                            }
+                            Spacer()
                         }
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Import Music")
-                                .font(.subheadline.weight(.semibold))
-                            Text("MP3, M4A, WAV")
-                                .font(.caption2)
-                                .foregroundStyle(.white.opacity(0.82))
-                        }
-                        Spacer()
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .background(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.20, green: 0.45, blue: 0.86),
+                                Color(red: 0.12, green: 0.24, blue: 0.62)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    )
+                    .disabled(viewModel.isImportingMusic)
+                    .opacity(viewModel.isImportingMusic ? 0.55 : 1)
+
+                    PhotosPicker(
+                        selection: $selectedMusicVideoItem,
+                        matching: .videos
+                    ) {
+                        HStack(spacing: 10) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(.white.opacity(0.18))
+                                    .frame(width: 30, height: 30)
+                                Image(systemName: "film.badge.plus")
+                                    .font(.system(size: 14, weight: .bold))
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Use Video Soundtrack")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("Extract soundtrack")
+                                    .font(.caption2)
+                                    .foregroundStyle(.white.opacity(0.82))
+                            }
+                            Spacer()
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .background(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.30, green: 0.56, blue: 0.82),
+                                Color(red: 0.13, green: 0.31, blue: 0.52)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    )
+                    .disabled(viewModel.isImportingMusic)
+                    .opacity(viewModel.isImportingMusic ? 0.55 : 1)
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white)
-                .background(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.20, green: 0.45, blue: 0.86),
-                            Color(red: 0.12, green: 0.24, blue: 0.62)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-                )
+
+                if viewModel.isImportingMusic {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .scaleEffect(0.8)
+                        Text("Preparing soundtrack...")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(Color.blue.opacity(0.9))
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(Color.white.opacity(0.72), in: Capsule())
+                }
 
                 if viewModel.hasSelectedMusic {
                     Button {
@@ -1166,6 +1221,42 @@ struct ContentView: View {
                 .buttonStyle(.borderedProminent)
                 .tint(.red)
                 .disabled(!viewModel.hasSelectedMusic)
+            }
+
+            if let shareableMusicURL = viewModel.shareableMusicURL {
+                ShareLink(item: shareableMusicURL) {
+                    HStack(spacing: 10) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                .fill(.white.opacity(0.18))
+                                .frame(width: 30, height: 30)
+                            Image(systemName: "square.and.arrow.up.fill")
+                                .font(.system(size: 14, weight: .bold))
+                        }
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Export Soundtrack")
+                                .font(.subheadline.weight(.semibold))
+                        }
+                        Spacer()
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.white)
+                .background(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.22, green: 0.61, blue: 0.48),
+                            Color(red: 0.10, green: 0.36, blue: 0.28)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                )
+                .disabled(viewModel.isImportingMusic)
+                .opacity(viewModel.isImportingMusic ? 0.55 : 1)
             }
 
             Spacer(minLength: 0)
