@@ -159,7 +159,7 @@ struct ContentView: View {
                 Text("FluxCut Studio")
                     .font(.title2.weight(.bold))
                     .foregroundStyle(.primary)
-                Text("Script, media, music, and video in one fast studio flow.")
+                Text("Script. Media. Music. All in Flow.")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
             }
