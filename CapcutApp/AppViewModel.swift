@@ -36,6 +36,7 @@ private struct PickedMovie: Transferable {
 @MainActor
 final class AppViewModel: NSObject, ObservableObject {
     private static let savedNarrationDraftKey = "fluxcut.savedNarrationDraft"
+    private static let hiddenVoiceIdentifiersKey = "fluxcut.hiddenVoiceIdentifiers"
 
     struct MediaItem: Identifiable, Equatable {
         enum Kind: Equatable {
@@ -77,7 +78,19 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     @Published var mediaItems: [MediaItem] = []
-    @Published var narrationText = "Welcome to my CapCut-style video. Add your own script here." {
+    @Published var narrationText = """
+    Welcome to FluxCut. This introduction is both a sample script and a quick user guide you can read or play out loud.
+
+    Start in Script. Type or paste your narration, then choose an iPhone voice for playback and export. The voice list comes from Apple voices available to apps on your iPhone. You can select a voice, hide voices you do not want to see, and tap Reload iPhone Voices later if you install more enhanced or premium voices in iPhone settings.
+
+    Use Play Script to hear the current script right away. Build Preview is an optional testing tool. It creates a shorter narration preview so you can check timing and subtitle flow before making the final video.
+
+    In Media, import photos and videos, then review the order. In Music, you can import normal audio files or use a video soundtrack. FluxCut can extract audio from a video and let you reuse it as music.
+
+    In Video, choose the aspect ratio, preview the result, and create the final render. You can also adjust the final mix for narration, original video sound, and music.
+
+    Replace this introduction with your own script any time and start building your video.
+    """ {
         didSet {
             saveNarrationDraft()
             if oldValue != narrationText {
@@ -109,12 +122,12 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var exportProgress: Double = 0
     @Published var exportedVideoURL: URL?
     @Published var videoPreviewURL: URL?
-    var availableVoices: [VoiceOption] = []
+    @Published var availableVoices: [VoiceOption] = []
     @Published var selectedVoiceIdentifier = "" {
         didSet {
             selectedVoiceName = selectedVoiceDisplayName
             if oldValue != selectedVoiceIdentifier {
-                stopLiveNarrationPlayback(reason: "Voice updated. Tap Play Voice to hear the new selection.")
+                stopLiveNarrationPlayback(reason: "Voice updated. Tap Play Script to hear the new selection.")
                 markAllVideoRendersDirty(reason: "Voice updated. Build a new preview or final render to hear the change.")
                 invalidateNarrationPreviewIfNeeded()
             }
@@ -133,6 +146,15 @@ final class AppViewModel: NSObject, ObservableObject {
                 hasPendingPreviewChanges = true
                 hasPendingFinalVideoChanges = true
                 invalidateRenderedVideo(reason: "Frame updated to \(selectedAspectRatio.rawValue). Build a new preview or final render to see the change.")
+            }
+        }
+    }
+    @Published var selectedTimingMode: VideoExporter.TimingMode = .story {
+        didSet {
+            if oldValue != selectedTimingMode {
+                hasPendingPreviewChanges = true
+                hasPendingFinalVideoChanges = true
+                invalidateRenderedVideo(reason: "\(selectedTimingMode.rawValue) mode is active. Build a new preview or final render to see the change.")
             }
         }
     }
@@ -171,6 +193,7 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var statusMessage = "Pick photos, add a script, and import music to build your clip."
     @Published var hasPendingPreviewChanges = true
     @Published var hasPendingFinalVideoChanges = true
+    @Published var voiceReloadFeedback = ""
 
     private let videoExporter = VideoExporter()
     private let narrationPreviewBuilder = NarrationPreviewBuilder()
@@ -187,21 +210,30 @@ final class AppViewModel: NSObject, ObservableObject {
     private var pendingUtteranceCount = 0
     private var didLoadFullVoiceList = false
     private var shouldPersistNarrationDraft = true
-    private lazy var speechSynthesizer: AVSpeechSynthesizer = {
-        let synthesizer = AVSpeechSynthesizer()
-        synthesizer.delegate = self
-        return synthesizer
-    }()
+    private var hiddenVoiceIdentifiers: Set<String> = []
+    private var allAvailableVoices: [VoiceOption] = []
+    private var speechSynthesizer = AVSpeechSynthesizer()
     private var didConfigureAudioSession = false
 
     override init() {
+        if let hidden = UserDefaults.standard.array(forKey: Self.hiddenVoiceIdentifiersKey) as? [String] {
+            hiddenVoiceIdentifiers = Set(hidden)
+        }
         let savedDraft = UserDefaults.standard.string(forKey: Self.savedNarrationDraftKey)?
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if let savedDraft, !savedDraft.isEmpty {
             narrationText = savedDraft
         }
         super.init()
-        availableVoices = SpeechVoiceLibrary.initialVoiceOptions
+        speechSynthesizer.delegate = self
+        allAvailableVoices = SpeechVoiceLibrary.initialVoiceOptions
+        availableVoices = filteredVoices(from: allAvailableVoices)
+        if availableVoices.isEmpty {
+            availableVoices = allAvailableVoices
+        }
+        voiceReloadFeedback = availableVoices.isEmpty
+            ? "No iPhone voices loaded yet"
+            : "\(availableVoices.count) iPhone voices ready"
         if let firstVoice = availableVoices.first {
             selectedVoiceIdentifier = firstVoice.id
             selectedVoiceName = firstVoice.displayName
@@ -214,16 +246,36 @@ final class AppViewModel: NSObject, ObservableObject {
             return
         }
 
+        if availableVoices.isEmpty {
+            reloadAvailableVoices(restoringHiddenVoices: false)
+        }
+        selectLanguageCompatibleVoiceIfNeeded(for: narrationText)
+        reconcileSelectedVoice()
+        let activeVoiceIdentifier = resolvedPlayableVoiceIdentifier()
+        guard !activeVoiceIdentifier.isEmpty else {
+            statusMessage = "Reload iPhone voices first, then try Play Script again."
+            return
+        }
+        if selectedVoiceIdentifier != activeVoiceIdentifier {
+            selectedVoiceIdentifier = activeVoiceIdentifier
+            selectedVoiceName = selectedVoiceDisplayName
+        }
+
         configureAudioSessionIfNeeded()
 
-        if speechSynthesizer.isSpeaking || isSpeaking || pendingUtteranceCount > 0 {
+        if !speechSynthesizer.isSpeaking && pendingUtteranceCount > 0 {
+            pendingUtteranceCount = 0
+            isSpeaking = false
+        }
+
+        if speechSynthesizer.isSpeaking || isSpeaking {
             stopLiveNarrationPlayback(reason: "Narration stopped.")
             return
         }
 
         let utterances = SpeechVoiceLibrary.makeUtterances(
             from: narrationText,
-            voiceIdentifier: selectedVoiceIdentifier
+            voiceIdentifier: activeVoiceIdentifier
         )
         guard !utterances.isEmpty else {
             statusMessage = "Add some narration text before starting text-to-speech."
@@ -234,8 +286,7 @@ final class AppViewModel: NSObject, ObservableObject {
         for utterance in utterances {
             speechSynthesizer.speak(utterance)
         }
-        isSpeaking = true
-        statusMessage = "Narration is playing with \(selectedVoiceDisplayName)."
+        statusMessage = "Starting script playback with \(selectedVoiceDisplayName)."
     }
 
     func buildNarrationPreview() {
@@ -371,6 +422,7 @@ final class AppViewModel: NSObject, ObservableObject {
         speechSynthesizer.stopSpeaking(at: .immediate)
         isSpeaking = false
         pendingUtteranceCount = 0
+        resetSpeechSynthesizer()
         if let reason {
             statusMessage = reason
         }
@@ -384,10 +436,20 @@ final class AppViewModel: NSObject, ObservableObject {
         stopLiveNarrationPlayback()
         shouldPersistNarrationDraft = false
         narrationText = """
-        Welcome to my photo story. These images capture a few favorite moments, and this short voiceover helps turn them into a simple video draft. As the sequence moves forward, each frame adds a little more energy, rhythm, and emotion to the final cut. You can replace this sample with your own script any time and shape the pacing to match the story you want to tell.
+        Welcome to FluxCut. This introduction is both a sample script and a quick user guide you can read or play out loud.
+
+        Start in Script. Type or paste your narration, then choose an iPhone voice for playback and export. The voice list comes from Apple voices available to apps on your iPhone. You can select a voice, hide voices you do not want to see, and tap Reload iPhone Voices later if you install more enhanced or premium voices in iPhone settings.
+
+        Use Play Script to hear the current script right away. Build Preview is an optional testing tool. It creates a shorter narration preview so you can check timing and subtitle flow before making the final video.
+
+        In Media, import photos and videos, then review the order. In Music, you can import normal audio files or use a video soundtrack. FluxCut can extract audio from a video and let you reuse it as music.
+
+        In Video, choose the aspect ratio, preview the result, and create the final render. You can also adjust the final mix for narration, original video sound, and music.
+
+        Replace this introduction with your own script any time and start building your video.
         """
         shouldPersistNarrationDraft = true
-        statusMessage = "Sample narration loaded."
+        statusMessage = "Introduction loaded."
     }
 
     func importMusic(from selectedURL: URL) {
@@ -539,8 +601,10 @@ final class AppViewModel: NSObject, ObservableObject {
             return
         }
 
-        guard !mediaItems.isEmpty else {
-            statusMessage = "Pick photos or videos before rendering."
+        guard hasRenderableMediaForSelectedMode else {
+            statusMessage = selectedTimingMode == .video
+                ? "Import at least one video before using Video mode."
+                : "Pick photos or videos before rendering."
             return
         }
 
@@ -579,11 +643,13 @@ final class AppViewModel: NSObject, ObservableObject {
         let voiceIdentifier = selectedVoiceIdentifier
         let exporter = videoExporter
         let aspectRatio = selectedAspectRatio
+        let timingMode = selectedTimingMode
 
         Task {
             do {
-                let requiresFullNarrationPreview = renderQuality != .preview
-                if !narrationText.isEmpty, needsPreviewRefresh(
+                let shouldPrepareNarration = timingMode != .video && !narrationText.isEmpty
+                let requiresFullNarrationPreview = renderQuality != .preview && timingMode == .story
+                if shouldPrepareNarration, needsPreviewRefresh(
                     for: narrationText,
                     voiceIdentifier: voiceIdentifier,
                     requireFullLength: requiresFullNarrationPreview
@@ -607,8 +673,8 @@ final class AppViewModel: NSObject, ObservableObject {
                         : "Rendering your video. This can take a moment."
                 }
 
-                let previewAudioURL = narrationText.isEmpty ? nil : narrationPreviewAudioURL
-                let previewCues = narrationText.isEmpty ? [] : narrationPreviewCues
+                let previewAudioURL = (timingMode == .video || narrationText.isEmpty) ? nil : narrationPreviewAudioURL
+                let previewCues = (timingMode == .video || narrationText.isEmpty) ? [] : narrationPreviewCues
                 let exportedURL = try await Task.detached(priority: .userInitiated) {
                     try await exporter.exportVideo(
                         mediaItems: exportMediaItems,
@@ -619,6 +685,7 @@ final class AppViewModel: NSObject, ObservableObject {
                         videoAudioVolume: videoAudioVolume,
                         voiceIdentifier: voiceIdentifier,
                         aspectRatio: aspectRatio,
+                        timingMode: timingMode,
                         renderQuality: renderQuality,
                         externalCues: previewCues,
                         externalNarrationAudioURL: previewAudioURL,
@@ -656,19 +723,68 @@ final class AppViewModel: NSObject, ObservableObject {
     func loadAvailableVoicesIfNeeded() {
         guard !didLoadFullVoiceList else { return }
         didLoadFullVoiceList = true
+        reloadAvailableVoices(restoringHiddenVoices: false)
+    }
+
+    func reloadAvailableVoices(restoringHiddenVoices: Bool = true) {
+        resetSpeechSynthesizer()
+        if restoringHiddenVoices {
+            hiddenVoiceIdentifiers.removeAll()
+            saveHiddenVoiceIdentifiers()
+        }
 
         let loadedVoices = SpeechVoiceLibrary.voiceOptions
         if !loadedVoices.isEmpty {
             objectWillChange.send()
-            availableVoices = loadedVoices
-            if !availableVoices.contains(where: { $0.id == selectedVoiceIdentifier }) {
-                selectedVoiceIdentifier = availableVoices.first?.id ?? ""
-            } else {
-                selectedVoiceName = selectedVoiceDisplayName
+            allAvailableVoices = loadedVoices
+            availableVoices = filteredVoices(from: allAvailableVoices)
+            if availableVoices.isEmpty {
+                availableVoices = allAvailableVoices
             }
+            reconcileSelectedVoice()
+            voiceReloadFeedback = "\(availableVoices.count) iPhone voices loaded"
+            statusMessage = "Voice list refreshed."
         } else {
-            statusMessage = "No Apple voices were available from the speech framework on this device."
+            let restoredFallbackVoices = SpeechVoiceLibrary.voiceOptions
+            if !restoredFallbackVoices.isEmpty {
+                objectWillChange.send()
+                allAvailableVoices = restoredFallbackVoices
+                availableVoices = filteredVoices(from: allAvailableVoices)
+                if availableVoices.isEmpty {
+                    availableVoices = allAvailableVoices
+                }
+                reconcileSelectedVoice()
+                voiceReloadFeedback = "\(availableVoices.count) iPhone voices loaded"
+                statusMessage = "Voice list refreshed."
+            } else {
+                voiceReloadFeedback = "No iPhone voices found"
+                statusMessage = "No Apple voices were available from the speech framework on this device."
+            }
         }
+    }
+
+    func hideVoice(withId voiceID: String) {
+        guard availableVoices.count > 1 else {
+            statusMessage = "Keep at least one voice available in FluxCut."
+            return
+        }
+
+        stopLiveNarrationPlayback()
+        resetSpeechSynthesizer()
+        hiddenVoiceIdentifiers.insert(voiceID)
+        saveHiddenVoiceIdentifiers()
+        availableVoices = filteredVoices(from: allAvailableVoices)
+
+        if availableVoices.isEmpty {
+            hiddenVoiceIdentifiers.remove(voiceID)
+            saveHiddenVoiceIdentifiers()
+            availableVoices = filteredVoices(from: allAvailableVoices)
+        }
+
+        reconcileSelectedVoice()
+        invalidateNarrationPreviewIfNeeded()
+        voiceReloadFeedback = "\(availableVoices.count) iPhone voices shown"
+        statusMessage = "Voice removed from this list. Tap Reload iPhone Voices to bring everything back."
     }
 
     private func loadSelectedMedia(from pickerItems: [PhotosPickerItem]) async {
@@ -1082,6 +1198,10 @@ final class AppViewModel: NSObject, ObservableObject {
         availableVoices.first(where: { $0.id == selectedVoiceIdentifier })?.displayName ?? "No Apple voice selected yet."
     }
 
+    var canHideVoices: Bool {
+        availableVoices.count > 1
+    }
+
     var narrationPreviewSummary: String {
         if isPreparingNarrationPreview {
             return "Generating preview audio and subtitle cues from your current script."
@@ -1103,10 +1223,6 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     var estimatedExportSpecLine: String {
-        guard estimatedNarrationDurationSeconds > 0 else {
-            return "\(selectedAspectRatio.rawValue) • add a script to estimate export specs"
-        }
-
         let exporterMediaItems = mediaItems.map { item in
             let kind: VideoExporter.MediaItem.Kind
             switch item.kind {
@@ -1118,11 +1234,18 @@ final class AppViewModel: NSObject, ObservableObject {
             return VideoExporter.MediaItem(previewImage: item.previewImage, kind: kind)
         }
 
+        guard estimatedDurationSecondsForSelectedMode > 0 else {
+            return selectedTimingMode == .video
+                ? "Video mode • add videos to estimate export specs"
+                : "\(selectedAspectRatio.rawValue) • add script or media to estimate export specs"
+        }
+
         return videoExporter.estimatedExportSpec(
             mediaItems: exporterMediaItems,
-            durationSeconds: estimatedNarrationDurationSeconds,
+            durationSeconds: estimatedDurationSecondsForSelectedMode,
             aspectRatio: selectedAspectRatio,
-            finalQuality: selectedFinalExportQuality
+            finalQuality: selectedFinalExportQuality,
+            timingMode: selectedTimingMode
         )
     }
 
@@ -1173,7 +1296,7 @@ final class AppViewModel: NSObject, ObservableObject {
 
     var canStartVideoPreviewRender: Bool {
         !isLoadingMediaSelection
-            && !mediaItems.isEmpty
+            && hasRenderableMediaForSelectedMode
             && !isExportingVideo
             && !isPreparingVideoPreview
             && !isPreparingNarrationPreview
@@ -1182,7 +1305,7 @@ final class AppViewModel: NSObject, ObservableObject {
 
     var canStartFinalVideoRender: Bool {
         !isLoadingMediaSelection
-            && !mediaItems.isEmpty
+            && hasRenderableMediaForSelectedMode
             && !isExportingVideo
             && !isPreparingVideoPreview
             && !isPreparingNarrationPreview
@@ -1219,12 +1342,138 @@ final class AppViewModel: NSObject, ObservableObject {
         }, 1)
     }
 
+    private var estimatedMediaOnlyDurationSeconds: Double {
+        guard !mediaItems.isEmpty else { return 0 }
+
+        let totalVideoSeconds = mediaItems.reduce(0.0) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case let .video(_, duration):
+                return partial + max(duration, 0)
+            }
+        }
+
+        let photoCount = mediaItems.reduce(0) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial + 1
+            case .video:
+                return partial
+            }
+        }
+
+        let photoSeconds = max(Double(photoCount) * 1.6, photoCount > 0 ? 1.6 : 0)
+        return max(totalVideoSeconds + photoSeconds, 3)
+    }
+
+    private var estimatedVideoOnlyDurationSeconds: Double {
+        let totalVideoSeconds = mediaItems.reduce(0.0) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case let .video(_, duration):
+                return partial + max(duration, 0)
+            }
+        }
+
+        return totalVideoSeconds
+    }
+
+    private var estimatedDurationSecondsForSelectedMode: Double {
+        switch selectedTimingMode {
+        case .video:
+            return estimatedVideoOnlyDurationSeconds
+        case .realLife:
+            return estimatedMediaOnlyDurationSeconds
+        case .story:
+            return estimatedNarrationDurationSeconds > 0 ? estimatedNarrationDurationSeconds : estimatedMediaOnlyDurationSeconds
+        }
+    }
+
+    private var hasRenderableMediaForSelectedMode: Bool {
+        switch selectedTimingMode {
+        case .video:
+            return mediaItems.contains(where: \.isVideo)
+        case .story, .realLife:
+            return !mediaItems.isEmpty
+        }
+    }
+
     private func markAllVideoRendersDirty(reason: String) {
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
         if exportedVideoURL != nil || videoPreviewURL != nil {
             statusMessage = reason
         }
+    }
+
+    private func filteredVoices(from voices: [VoiceOption]) -> [VoiceOption] {
+        voices.filter { !hiddenVoiceIdentifiers.contains($0.id) }
+    }
+
+    private func saveHiddenVoiceIdentifiers() {
+        UserDefaults.standard.set(Array(hiddenVoiceIdentifiers), forKey: Self.hiddenVoiceIdentifiersKey)
+    }
+
+    private func reconcileSelectedVoice() {
+        if !availableVoices.contains(where: { $0.id == selectedVoiceIdentifier }) {
+            selectedVoiceIdentifier = availableVoices.first?.id ?? ""
+        } else {
+            selectedVoiceName = selectedVoiceDisplayName
+        }
+    }
+
+    private func selectLanguageCompatibleVoiceIfNeeded(for text: String) {
+        guard !availableVoices.isEmpty else { return }
+
+        let expectsCJKVoice = SpeechVoiceLibrary.containsCJKContent(in: text)
+        let selectedIsCompatible = availableVoices.contains {
+            $0.id == selectedVoiceIdentifier && Self.voiceOption($0, isCompatibleWithCJK: expectsCJKVoice)
+        }
+
+        if selectedIsCompatible {
+            return
+        }
+
+        if let matchingVisibleVoice = availableVoices.first(where: {
+            Self.voiceOption($0, isCompatibleWithCJK: expectsCJKVoice)
+        }) {
+            selectedVoiceIdentifier = matchingVisibleVoice.id
+            selectedVoiceName = matchingVisibleVoice.displayName
+        }
+    }
+
+    private func resolvedPlayableVoiceIdentifier() -> String {
+        if availableVoices.contains(where: { $0.id == selectedVoiceIdentifier }) {
+            return selectedVoiceIdentifier
+        }
+        if let firstVisibleVoice = availableVoices.first?.id {
+            return firstVisibleVoice
+        }
+        if let firstAvailableVoice = allAvailableVoices.first?.id {
+            return firstAvailableVoice
+        }
+        if let firstSystemVoice = SpeechVoiceLibrary.voiceOptions.first?.id {
+            return firstSystemVoice
+        }
+        if let firstFallback = SpeechVoiceLibrary.initialVoiceOptions.first?.id {
+            return firstFallback
+        }
+        return ""
+    }
+
+    private static func voiceOption(_ option: VoiceOption, isCompatibleWithCJK expectsCJKVoice: Bool) -> Bool {
+        if expectsCJKVoice {
+            return option.language.hasPrefix("zh") || option.language.hasPrefix("yue")
+        }
+        return option.language.hasPrefix("en")
+    }
+
+    private func resetSpeechSynthesizer() {
+        speechSynthesizer.delegate = nil
+        speechSynthesizer = AVSpeechSynthesizer()
+        speechSynthesizer.delegate = self
     }
 }
 
@@ -1240,6 +1489,7 @@ extension AppViewModel: AVSpeechSynthesizerDelegate {
     nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer, didStart utterance: AVSpeechUtterance) {
         Task { @MainActor in
             self.isSpeaking = true
+            self.statusMessage = "Script is playing with \(self.selectedVoiceDisplayName)."
         }
     }
 
@@ -1720,15 +1970,15 @@ enum SpeechVoiceLibrary {
                 )
             }
             .sorted { lhs, rhs in
-                let lhsNameRank = preferredNameRank(lhs.name)
-                let rhsNameRank = preferredNameRank(rhs.name)
-                if lhsNameRank != rhsNameRank {
-                    return lhsNameRank > rhsNameRank
-                }
                 let lhsLanguageRank = preferredLanguageRank(lhs.language)
                 let rhsLanguageRank = preferredLanguageRank(rhs.language)
                 if lhsLanguageRank != rhsLanguageRank {
                     return lhsLanguageRank > rhsLanguageRank
+                }
+                let lhsNameRank = preferredNameRank(lhs.name)
+                let rhsNameRank = preferredNameRank(rhs.name)
+                if lhsNameRank != rhsNameRank {
+                    return lhsNameRank > rhsNameRank
                 }
                 if lhs.sortRank != rhs.sortRank {
                     return lhs.sortRank > rhs.sortRank
@@ -1752,16 +2002,18 @@ enum SpeechVoiceLibrary {
             return 100
         case let code where code.hasPrefix("en-GB"):
             return 95
-        case let code where code.hasPrefix("yue-HK"):
-            return 90
         case let code where code.hasPrefix("zh-CN"):
-            return 85
+            return 90
         case let code where code.hasPrefix("zh-HK"):
-            return 80
+            return 85
         case let code where code.hasPrefix("zh"):
+            return 80
+        case let code where code.hasPrefix("yue-HK"):
             return 75
-        case let code where code.hasPrefix("en"):
+        case let code where code.hasPrefix("yue"):
             return 70
+        case let code where code.hasPrefix("en"):
+            return 65
         default:
             return 0
         }

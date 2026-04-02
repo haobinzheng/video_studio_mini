@@ -233,19 +233,6 @@ struct ContentView: View {
             }
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Import photos and videos in order, then review and shape the sequence of your story.")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.77, green: 0.28, blue: 0.12),
-                                Color(red: 0.48, green: 0.16, blue: 0.08)
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-
                 HStack(spacing: 8) {
                     Image(systemName: "text.bubble.fill")
                         .font(.system(size: 12, weight: .bold))
@@ -497,19 +484,6 @@ struct ContentView: View {
                 .font(.title2.weight(.semibold))
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Write your script, choose a voice, and preview the narration before you render the final video.")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.77, green: 0.28, blue: 0.12),
-                                Color(red: 0.48, green: 0.16, blue: 0.08)
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-
                 HStack(spacing: 10) {
                     ZStack {
                         Circle()
@@ -535,37 +509,81 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.white.opacity(0.58), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
 
+            Button {
+                viewModel.reloadAvailableVoices()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: "arrow.clockwise.circle.fill")
+                        .foregroundStyle(Color.blue.opacity(0.9))
+                    Text("Reload iPhone Voices")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                }
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .background(Color.white.opacity(0.88), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                .overlay {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .stroke(Color.blue.opacity(0.10), lineWidth: 1)
+                }
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.primary)
+
+            HStack(spacing: 8) {
+                Image(systemName: "waveform.badge.magnifyingglass")
+                    .font(.system(size: 12, weight: .bold))
+                Text(viewModel.voiceReloadFeedback)
+                    .font(.caption.weight(.semibold))
+            }
+            .foregroundStyle(Color.blue.opacity(0.9))
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(Color.white.opacity(0.72), in: Capsule())
+
             DisclosureGroup(isExpanded: $isVoiceListExpanded) {
                 ScrollView {
                     VStack(spacing: 8) {
                         ForEach(viewModel.availableVoices) { option in
-                            Button {
-                                viewModel.selectedVoiceIdentifier = option.id
-                                isVoiceListExpanded = false
-                                isNarrationFocused = false
-                            } label: {
-                                HStack {
-                                    VStack(alignment: .leading, spacing: 4) {
-                                        Text(option.name)
-                                            .font(.headline)
-                                            .foregroundStyle(.primary)
-                                        Text("\(option.qualityLabel) • \(option.languageLabel)\(option.isFallback ? " • Fallback" : "")")
-                                            .font(.caption)
-                                            .foregroundStyle(.secondary)
+                            HStack(spacing: 10) {
+                                Button {
+                                    viewModel.selectedVoiceIdentifier = option.id
+                                    isVoiceListExpanded = false
+                                    isNarrationFocused = false
+                                } label: {
+                                    HStack {
+                                        VStack(alignment: .leading, spacing: 4) {
+                                            Text(option.name)
+                                                .font(.headline)
+                                                .foregroundStyle(.primary)
+                                            Text("\(option.qualityLabel) • \(option.languageLabel)\(option.isFallback ? " • Fallback" : "")")
+                                                .font(.caption)
+                                                .foregroundStyle(.secondary)
+                                        }
+                                        Spacer()
+                                        if option.id == viewModel.selectedVoiceIdentifier {
+                                            Image(systemName: "checkmark.circle.fill")
+                                                .foregroundStyle(.orange)
+                                        }
                                     }
-                                    Spacer()
-                                    if option.id == viewModel.selectedVoiceIdentifier {
-                                        Image(systemName: "checkmark.circle.fill")
-                                            .foregroundStyle(.orange)
-                                    }
+                                    .padding(12)
+                                    .background(
+                                        Color.white.opacity(option.id == viewModel.selectedVoiceIdentifier ? 0.95 : 0.72),
+                                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                    )
                                 }
-                                .padding(12)
-                                .background(
-                                    Color.white.opacity(option.id == viewModel.selectedVoiceIdentifier ? 0.95 : 0.72),
-                                    in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                )
+                                .buttonStyle(.plain)
+
+                                Button {
+                                    viewModel.hideVoice(withId: option.id)
+                                } label: {
+                                    Image(systemName: "trash.circle.fill")
+                                        .font(.system(size: 20, weight: .semibold))
+                                        .foregroundStyle(viewModel.canHideVoices ? Color.red.opacity(0.88) : Color.gray.opacity(0.55))
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(!viewModel.canHideVoices)
                             }
-                            .buttonStyle(.plain)
                         }
                     }
                     .padding(.top, 8)
@@ -586,13 +604,6 @@ struct ContentView: View {
                 viewModel.loadAvailableVoicesIfNeeded()
             }
             .disabled(viewModel.availableVoices.isEmpty)
-
-            if let selectedVoice = viewModel.availableVoices.first(where: { $0.id == viewModel.selectedVoiceIdentifier }),
-               selectedVoice.isFallback {
-                Text("Premium Apple voices are not fully exposed here, so FluxCut is using the best available fallback voice.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
 
             HStack(spacing: 10) {
                 scriptMetaPill(
@@ -672,13 +683,13 @@ struct ContentView: View {
 
             HStack(spacing: 10) {
                 inlineScriptActionButton(
-                    title: viewModel.isSpeaking ? "Stop Voice" : "Play Voice",
+                    title: viewModel.isSpeaking ? "Stop Script" : "Play Script",
                     systemImage: viewModel.isSpeaking ? "stop.circle.fill" : "speaker.wave.2.fill"
                 ) {
                     viewModel.playNarration()
                 }
 
-                inlineScriptActionButton(title: "Sample", systemImage: "text.badge.plus") {
+                inlineScriptActionButton(title: "Introduction", systemImage: "text.badge.plus") {
                     viewModel.loadSampleNarration()
                 }
             }
@@ -729,9 +740,6 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Preview")
                         .font(.headline)
-                    Text("Optional: build a seekable preview to inspect subtitle timing before export.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
                 Spacer()
                 if viewModel.isPreparingNarrationPreview {
@@ -739,10 +747,6 @@ struct ContentView: View {
                         .tint(.purple)
                 }
             }
-
-            Text(viewModel.narrationPreviewSummary)
-                .font(.caption)
-                .foregroundStyle(.secondary)
 
             Button {
                 isNarrationFocused = false
@@ -753,9 +757,6 @@ struct ContentView: View {
                     Text(viewModel.isPreparingNarrationPreview ? "Building Preview..." : "Build Preview")
                         .fontWeight(.semibold)
                     Spacer()
-                    Text("Testing tool")
-                        .font(.caption)
-                        .foregroundStyle(.white.opacity(0.8))
                 }
                 .padding(.horizontal, 16)
                 .padding(.vertical, 14)
@@ -895,8 +896,11 @@ struct ContentView: View {
                     .font(.system(size: 15, weight: .semibold))
                 Text(title)
                     .font(.caption.weight(.semibold))
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
             }
             .frame(maxWidth: .infinity)
+            .frame(minHeight: 42)
             .padding(.vertical, 11)
         }
         .buttonStyle(.plain)
@@ -941,16 +945,14 @@ struct ContentView: View {
                     .foregroundStyle(.primary)
             }
 
-            Text("Pick `9:16` for vertical stories or `4:3` for a wider studio-style frame.")
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
-
             Picker("Aspect Ratio", selection: $viewModel.selectedAspectRatio) {
                 ForEach(VideoExporter.AspectRatio.allCases) { ratio in
                     Text(ratio.rawValue).tag(ratio)
                 }
             }
             .pickerStyle(.segmented)
+            .disabled(viewModel.selectedTimingMode == .video)
+            .opacity(viewModel.selectedTimingMode == .video ? 0.55 : 1)
         }
         .padding(14)
         .background(
@@ -981,6 +983,35 @@ struct ContentView: View {
             Picker("Final Quality", selection: $viewModel.selectedFinalExportQuality) {
                 ForEach(VideoExporter.FinalExportQuality.allCases) { quality in
                     Text(quality.rawValue).tag(quality)
+                }
+            }
+            .pickerStyle(.segmented)
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.green.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.green.opacity(0.25), lineWidth: 1)
+        )
+    }
+
+    private var videoTimingModeCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
+                Image(systemName: "timeline.selection")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Color.green.opacity(0.92))
+                Text("Video Mode")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.primary)
+            }
+
+            Picker("Video Mode", selection: $viewModel.selectedTimingMode) {
+                ForEach(VideoExporter.TimingMode.allCases) { mode in
+                    Text(mode.rawValue).tag(mode)
                 }
             }
             .pickerStyle(.segmented)
@@ -1051,11 +1082,8 @@ struct ContentView: View {
                                     .font(.system(size: 14, weight: .bold))
                             }
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Import From Files")
+                                Text("Import Audio")
                                     .font(.subheadline.weight(.semibold))
-                                Text("Audio or video")
-                                    .font(.caption2)
-                                    .foregroundStyle(.white.opacity(0.82))
                             }
                             Spacer()
                         }
@@ -1091,11 +1119,8 @@ struct ContentView: View {
                                     .font(.system(size: 14, weight: .bold))
                             }
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Use Video Soundtrack")
+                                Text("Import Video")
                                     .font(.subheadline.weight(.semibold))
-                                Text("Extract soundtrack")
-                                    .font(.caption2)
-                                    .foregroundStyle(.white.opacity(0.82))
                             }
                             Spacer()
                         }
@@ -1272,19 +1297,6 @@ struct ContentView: View {
                 .font(.title2.weight(.semibold))
 
             VStack(alignment: .leading, spacing: 10) {
-                Text("Choose the final format, start the render, and review your finished video in one place.")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.20, green: 0.56, blue: 0.28),
-                                Color(red: 0.08, green: 0.34, blue: 0.18)
-                            ],
-                            startPoint: .leading,
-                            endPoint: .trailing
-                        )
-                    )
-
                 HStack(spacing: 10) {
                     ZStack {
                         Circle()
@@ -1305,6 +1317,7 @@ struct ContentView: View {
                 }
 
                 videoAspectRatioCard
+                videoTimingModeCard
                 videoQualityCard
                 estimatedExportSpecCard
             }
@@ -1331,6 +1344,8 @@ struct ContentView: View {
                         .foregroundStyle(.secondary)
                     Slider(value: $viewModel.narrationVolume, in: 0...1)
                         .tint(.blue)
+                        .disabled(viewModel.selectedTimingMode == .video)
+                        .opacity(viewModel.selectedTimingMode == .video ? 0.45 : 1)
                 }
 
                 VStack(alignment: .leading, spacing: 6) {
@@ -1340,10 +1355,6 @@ struct ContentView: View {
                     Slider(value: $viewModel.musicVolume, in: 0...1)
                         .tint(.green)
                 }
-
-                Text("Adjust the final mix here, then use Preview Video to test the rendered balance.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
             .padding(14)
             .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))

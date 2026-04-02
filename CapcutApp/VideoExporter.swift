@@ -2,6 +2,14 @@ import AVFoundation
 import UIKit
 
 struct VideoExporter {
+    enum TimingMode: String, CaseIterable, Identifiable {
+        case video = "Video"
+        case story = "Story"
+        case realLife = "Real-Life"
+
+        var id: String { rawValue }
+    }
+
     enum AspectRatio: String, CaseIterable, Identifiable {
         case vertical = "9:16"
         case classic = "4:3"
@@ -137,6 +145,12 @@ struct VideoExporter {
         let clipCount: Int
     }
 
+    private struct StitchedVideoSegmentLayout {
+        let timeRange: CMTimeRange
+        let preferredTransform: CGAffineTransform
+        let naturalSize: CGSize
+    }
+
     private final class VideoFrameCache {
         private struct CachedFrame {
             let key: String
@@ -212,8 +226,13 @@ struct VideoExporter {
         mediaItems: [MediaItem],
         durationSeconds: Double,
         aspectRatio: AspectRatio,
-        finalQuality: FinalExportQuality
+        finalQuality: FinalExportQuality,
+        timingMode: TimingMode
     ) -> String {
+        if timingMode == .video {
+            return "Original video stitch \(approximateDurationLabel(for: durationSeconds))"
+        }
+
         let safeDuration = CMTime(seconds: max(durationSeconds, 1), preferredTimescale: 600)
         let timelineSegments = estimatedTimelineSegments(for: mediaItems, totalDuration: safeDuration)
         let pressure = videoPressure(for: timelineSegments)
@@ -221,7 +240,9 @@ struct VideoExporter {
             for: finalQuality.renderQuality,
             aspectRatio: aspectRatio,
             duration: safeDuration,
-            videoPressure: pressure
+            videoPressure: pressure,
+            timingMode: timingMode,
+            mediaItems: mediaItems
         )
         let width = Int(profile.renderSize.width.rounded())
         let height = Int(profile.renderSize.height.rounded())
@@ -237,6 +258,7 @@ struct VideoExporter {
         videoAudioVolume: Double,
         voiceIdentifier: String,
         aspectRatio: AspectRatio,
+        timingMode: TimingMode,
         renderQuality: RenderQuality = .finalStandard,
         externalCues: [ExternalCue] = [],
         externalNarrationAudioURL: URL? = nil,
@@ -251,18 +273,46 @@ struct VideoExporter {
         let slideshowURL = workspace.appendingPathComponent("slideshow.mov")
         let finalURL = workspace.appendingPathComponent(renderQuality.outputFileName)
 
-        progressHandler?(0.16, "Preparing narration and captions.")
-        let narrationTimeline = try await synthesizeNarrationIfNeeded(
-            text: narrationText,
-            voiceIdentifier: voiceIdentifier,
-            workspace: workspace,
-            externalCues: externalCues,
-            externalNarrationAudioURL: externalNarrationAudioURL
-        )
+        if timingMode == .video {
+            progressHandler?(0.18, "Stitching your original video clips.")
+            try await exportVideoStitch(
+                mediaItems: mediaItems,
+                backgroundMusicURL: backgroundMusicURL,
+                backgroundMusicVolume: backgroundMusicVolume,
+                videoAudioVolume: videoAudioVolume,
+                maximumDuration: renderQuality.maximumDuration,
+                outputURL: finalURL,
+                progressHandler: progressHandler
+            )
+            progressHandler?(1.0, "Finalizing exported video.")
+            return finalURL
+        }
+
         let minimumVisualDuration = minimumVisualDuration(for: mediaItems)
-        let totalDuration = narrationTimeline.duration > .zero
-            ? narrationTimeline.duration
-            : minimumVisualDuration
+        let shouldUseNarration = timingMode != .video
+        let narrationTimeline: NarrationTimeline
+        if shouldUseNarration {
+            progressHandler?(0.16, "Preparing narration and captions.")
+            narrationTimeline = try await synthesizeNarrationIfNeeded(
+                text: narrationText,
+                voiceIdentifier: voiceIdentifier,
+                workspace: workspace,
+                externalCues: externalCues,
+                externalNarrationAudioURL: externalNarrationAudioURL
+            )
+        } else {
+            narrationTimeline = NarrationTimeline(duration: .zero, captionSegments: [], utteranceAudioURLs: [])
+        }
+
+        let totalDuration: CMTime
+        switch timingMode {
+        case .video, .realLife:
+            totalDuration = minimumVisualDuration
+        case .story:
+            totalDuration = narrationTimeline.duration > .zero
+                ? narrationTimeline.duration
+                : minimumVisualDuration
+        }
         let resolvedDuration = renderQuality.maximumDuration.map { min(totalDuration, $0) } ?? totalDuration
         let timelineSegments = try await makeTimelineSegments(for: mediaItems, totalDuration: resolvedDuration)
         let videoPressure = videoPressure(for: timelineSegments)
@@ -270,13 +320,38 @@ struct VideoExporter {
             for: renderQuality,
             aspectRatio: aspectRatio,
             duration: resolvedDuration,
-            videoPressure: videoPressure
+            videoPressure: videoPressure,
+            timingMode: timingMode,
+            mediaItems: mediaItems
         )
-        let trimmedCaptionSegments = captionSegmentsTrimmed(to: resolvedDuration, segments: narrationTimeline.captionSegments)
+        let trimmedCaptionSegments = timingMode == .realLife
+            ? []
+            : captionSegmentsTrimmed(to: resolvedDuration, segments: narrationTimeline.captionSegments)
         let trimmedNarrationURLs = try await narrationURLsTrimmed(
             narrationTimeline.utteranceAudioURLs,
             maxDuration: resolvedDuration
         )
+
+        if timingMode == .realLife {
+            progressHandler?(0.24, "Building a real-life composition.")
+            try await exportRealLifeComposition(
+                timelineSegments: timelineSegments,
+                narrationURLs: trimmedNarrationURLs,
+                backgroundMusicURL: backgroundMusicURL,
+                backgroundMusicVolume: backgroundMusicVolume,
+                narrationVolume: narrationVolume,
+                videoAudioVolume: videoAudioVolume,
+                totalDuration: resolvedDuration,
+                renderSize: renderProfile.renderSize,
+                frameRate: renderProfile.frameRate,
+                workspace: workspace,
+                outputURL: finalURL,
+                progressHandler: progressHandler
+            )
+            progressHandler?(1.0, "Finalizing exported video.")
+            return finalURL
+        }
+
         progressHandler?(0.24, renderProfile.longFormOptimized ? "Optimizing a long-form render." : "Rendering video frames.")
 
         try await renderSlideshow(
@@ -713,6 +788,525 @@ struct VideoExporter {
         }
     }
 
+    private func exportVideoStitch(
+        mediaItems: [MediaItem],
+        backgroundMusicURL: URL?,
+        backgroundMusicVolume: Double,
+        videoAudioVolume: Double,
+        maximumDuration: CMTime?,
+        outputURL: URL,
+        progressHandler: ((Double, String) -> Void)? = nil
+    ) async throws {
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try FileManager.default.removeItem(at: outputURL)
+        }
+
+        let videoItems = mediaItems.compactMap { item -> (url: URL, duration: CMTime)? in
+            guard case let .video(url, duration) = item.kind else { return nil }
+            return (url, duration)
+        }
+
+        guard !videoItems.isEmpty else {
+            throw ExportError.noVideos
+        }
+
+        let composition = AVMutableComposition()
+        guard let compositionVideoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw ExportError.missingVideoTrack
+        }
+
+        var audioMixParameters: [AVMutableAudioMixInputParameters] = []
+        let resolvedVideoVolume = Float(min(max(videoAudioVolume, 0), 1))
+        let mayAttemptStrictPassthrough = backgroundMusicURL == nil && resolvedVideoVolume >= 0.999
+        var segmentLayouts: [StitchedVideoSegmentLayout] = []
+        let passthroughAudioTrack = mayAttemptStrictPassthrough
+            ? composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+            : nil
+        var cursor = CMTime.zero
+        var referenceTransform: CGAffineTransform?
+        var referenceNaturalSize: CGSize?
+        let cappedDuration = maximumDuration
+
+        for (index, item) in videoItems.enumerated() {
+            progressHandler?(
+                0.2 + (0.45 * (Double(index) / Double(max(videoItems.count, 1)))),
+                "Stitching video \(index + 1) of \(videoItems.count)."
+            )
+
+            if let cappedDuration, cursor >= cappedDuration {
+                break
+            }
+
+            let asset = AVURLAsset(url: item.url)
+            guard let sourceVideoTrack = try await asset.loadTracks(withMediaType: .video).first else {
+                throw ExportError.missingVideoTrack
+            }
+            let preferredTransform = try await sourceVideoTrack.load(.preferredTransform)
+            let naturalSize = try await sourceVideoTrack.load(.naturalSize)
+
+            let assetDuration = try await asset.load(.duration)
+            let baseClipDuration = min(item.duration, assetDuration)
+            let remainingDuration = cappedDuration.map { $0 - cursor } ?? baseClipDuration
+            let clipDuration = min(baseClipDuration, remainingDuration)
+            guard clipDuration > .zero else { continue }
+
+            try compositionVideoTrack.insertTimeRange(
+                CMTimeRange(start: .zero, duration: clipDuration),
+                of: sourceVideoTrack,
+                at: cursor
+            )
+            segmentLayouts.append(
+                StitchedVideoSegmentLayout(
+                    timeRange: CMTimeRange(start: cursor, duration: clipDuration),
+                    preferredTransform: preferredTransform,
+                    naturalSize: naturalSize
+                )
+            )
+
+            if referenceTransform == nil {
+                referenceTransform = preferredTransform
+                referenceNaturalSize = naturalSize
+            }
+
+            if let sourceAudioTrack = try await asset.loadTracks(withMediaType: .audio).first {
+                if mayAttemptStrictPassthrough, let passthroughAudioTrack {
+                    try passthroughAudioTrack.insertTimeRange(
+                        CMTimeRange(start: .zero, duration: clipDuration),
+                        of: sourceAudioTrack,
+                        at: cursor
+                    )
+                } else if resolvedVideoVolume > 0,
+                          let compositionAudioTrack = composition.addMutableTrack(
+                            withMediaType: .audio,
+                            preferredTrackID: kCMPersistentTrackID_Invalid
+                          ) {
+                    try compositionAudioTrack.insertTimeRange(
+                        CMTimeRange(start: .zero, duration: clipDuration),
+                        of: sourceAudioTrack,
+                        at: cursor
+                    )
+                    let clipAudioParameters = AVMutableAudioMixInputParameters(track: compositionAudioTrack)
+                    clipAudioParameters.setVolume(resolvedVideoVolume, at: cursor)
+                    audioMixParameters.append(clipAudioParameters)
+                }
+            }
+
+            cursor = cursor + clipDuration
+        }
+
+        let totalDuration = cursor
+        guard totalDuration > .zero else {
+            throw ExportError.noVideos
+        }
+
+        let canAttemptStrictPassthrough =
+            backgroundMusicURL == nil &&
+            resolvedVideoVolume >= 0.999 &&
+            segmentLayouts.allSatisfy {
+                guard let referenceTransform, let referenceNaturalSize else { return false }
+                return $0.preferredTransform == referenceTransform && $0.naturalSize == referenceNaturalSize
+            }
+
+        if let backgroundMusicURL {
+            progressHandler?(0.72, "Mixing background music into the stitched video.")
+            let musicAsset = AVURLAsset(url: backgroundMusicURL)
+            if let musicTrack = try await musicAsset.loadTracks(withMediaType: .audio).first,
+               let compositionMusicTrack = composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+               ) {
+                let musicDuration = try await musicAsset.load(.duration)
+                var musicCursor = CMTime.zero
+
+                while musicCursor < totalDuration {
+                    let remaining = totalDuration - musicCursor
+                    let segmentDuration = min(musicDuration, remaining)
+                    try compositionMusicTrack.insertTimeRange(
+                        CMTimeRange(start: .zero, duration: segmentDuration),
+                        of: musicTrack,
+                        at: musicCursor
+                    )
+                    musicCursor = musicCursor + segmentDuration
+                    if musicDuration == .zero { break }
+                }
+
+                let musicParameters = AVMutableAudioMixInputParameters(track: compositionMusicTrack)
+                let resolvedMusicVolume = Float(min(max(backgroundMusicVolume, 0), 1))
+                musicParameters.setVolume(resolvedMusicVolume, at: .zero)
+                let fadeStart = CMTimeMaximum(.zero, totalDuration - CMTime(seconds: 1.2, preferredTimescale: 600))
+                musicParameters.setVolumeRamp(
+                    fromStartVolume: resolvedMusicVolume,
+                    toEndVolume: 0.0,
+                    timeRange: CMTimeRange(start: fadeStart, duration: totalDuration - fadeStart)
+                )
+                audioMixParameters.append(musicParameters)
+            }
+        }
+
+        do {
+            try await exportStitchedComposition(
+                composition,
+                presetName: canAttemptStrictPassthrough ? AVAssetExportPresetPassthrough : AVAssetExportPresetHighestQuality,
+                outputURL: outputURL,
+                audioMixParameters: canAttemptStrictPassthrough ? [] : audioMixParameters,
+                videoComposition: canAttemptStrictPassthrough
+                    ? nil
+                    : makeVideoComposition(
+                        for: compositionVideoTrack,
+                        segmentLayouts: segmentLayouts,
+                        totalDuration: totalDuration
+                    ),
+                progressMessage: canAttemptStrictPassthrough
+                    ? "Exporting a passthrough video stitch."
+                    : "Exporting the stitched video.",
+                progressHandler: progressHandler
+            )
+        } catch {
+            guard canAttemptStrictPassthrough else {
+                throw error
+            }
+
+            progressHandler?(0.9, "Passthrough was not supported for these clips. Retrying with a high-quality stitch.")
+            try await exportStitchedComposition(
+                composition,
+                presetName: AVAssetExportPresetHighestQuality,
+                outputURL: outputURL,
+                audioMixParameters: [],
+                videoComposition: makeVideoComposition(
+                    for: compositionVideoTrack,
+                    segmentLayouts: segmentLayouts,
+                    totalDuration: totalDuration
+                ),
+                progressMessage: "Exporting the stitched video.",
+                progressHandler: progressHandler
+            )
+        }
+    }
+
+    private func exportRealLifeComposition(
+        timelineSegments: [TimelineSegment],
+        narrationURLs: [URL],
+        backgroundMusicURL: URL?,
+        backgroundMusicVolume: Double,
+        narrationVolume: Double,
+        videoAudioVolume: Double,
+        totalDuration: CMTime,
+        renderSize: CGSize,
+        frameRate: Int32,
+        workspace: URL,
+        outputURL: URL,
+        progressHandler: ((Double, String) -> Void)? = nil
+    ) async throws {
+        let composition = AVMutableComposition()
+        guard let compositionVideoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw ExportError.missingVideoTrack
+        }
+
+        var audioMixParameters: [AVMutableAudioMixInputParameters] = []
+        var segmentLayouts: [StitchedVideoSegmentLayout] = []
+        let resolvedVideoVolume = Float(min(max(videoAudioVolume, 0), 1))
+
+        for (index, segment) in timelineSegments.enumerated() {
+            let completion = Double(index) / Double(max(timelineSegments.count, 1))
+            progressHandler?(0.24 + (completion * 0.40), "Composing media \(index + 1) of \(timelineSegments.count).")
+
+            switch segment.mediaItem.kind {
+            case .photo:
+                let photoClipURL = workspace.appendingPathComponent("real-life-photo-\(index).mov")
+                try await renderPhotoSegmentClip(
+                    image: segment.mediaItem.previewImage,
+                    duration: segment.timeRange.duration,
+                    renderSize: renderSize,
+                    frameRate: frameRate,
+                    outputURL: photoClipURL
+                )
+
+                let photoAsset = AVURLAsset(url: photoClipURL)
+                guard let photoVideoTrack = try await photoAsset.loadTracks(withMediaType: .video).first else {
+                    throw ExportError.missingVideoTrack
+                }
+                let photoDuration = try await photoAsset.load(.duration)
+                let clipDuration = min(segment.timeRange.duration, photoDuration)
+                guard clipDuration > .zero else { continue }
+
+                try compositionVideoTrack.insertTimeRange(
+                    CMTimeRange(start: .zero, duration: clipDuration),
+                    of: photoVideoTrack,
+                    at: segment.timeRange.start
+                )
+                segmentLayouts.append(
+                    StitchedVideoSegmentLayout(
+                        timeRange: CMTimeRange(start: segment.timeRange.start, duration: clipDuration),
+                        preferredTransform: .identity,
+                        naturalSize: renderSize
+                    )
+                )
+
+            case let .video(url, _):
+                let asset = AVURLAsset(url: url)
+                guard let sourceVideoTrack = try await asset.loadTracks(withMediaType: .video).first else {
+                    throw ExportError.missingVideoTrack
+                }
+                let preferredTransform = try await sourceVideoTrack.load(.preferredTransform)
+                let naturalSize = try await sourceVideoTrack.load(.naturalSize)
+                let assetDuration = try await asset.load(.duration)
+                let clipDuration = min(segment.timeRange.duration, assetDuration)
+                guard clipDuration > .zero else { continue }
+
+                try compositionVideoTrack.insertTimeRange(
+                    CMTimeRange(start: .zero, duration: clipDuration),
+                    of: sourceVideoTrack,
+                    at: segment.timeRange.start
+                )
+                segmentLayouts.append(
+                    StitchedVideoSegmentLayout(
+                        timeRange: CMTimeRange(start: segment.timeRange.start, duration: clipDuration),
+                        preferredTransform: preferredTransform,
+                        naturalSize: naturalSize
+                    )
+                )
+
+                if resolvedVideoVolume > 0,
+                   let sourceAudioTrack = try await asset.loadTracks(withMediaType: .audio).first,
+                   let compositionAudioTrack = composition.addMutableTrack(
+                    withMediaType: .audio,
+                    preferredTrackID: kCMPersistentTrackID_Invalid
+                   ) {
+                    try compositionAudioTrack.insertTimeRange(
+                        CMTimeRange(start: .zero, duration: clipDuration),
+                        of: sourceAudioTrack,
+                        at: segment.timeRange.start
+                    )
+                    let clipAudioParameters = AVMutableAudioMixInputParameters(track: compositionAudioTrack)
+                    clipAudioParameters.setVolume(resolvedVideoVolume, at: segment.timeRange.start)
+                    audioMixParameters.append(clipAudioParameters)
+                }
+            }
+        }
+
+        if !narrationURLs.isEmpty,
+           let compositionNarrationTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            var narrationCursor = CMTime.zero
+
+            for narrationURL in narrationURLs {
+                let narrationAsset = AVURLAsset(url: narrationURL)
+                if let narrationTrack = try await narrationAsset.loadTracks(withMediaType: .audio).first {
+                    let narrationDuration = try await narrationAsset.load(.duration)
+                    try compositionNarrationTrack.insertTimeRange(
+                        CMTimeRange(start: .zero, duration: narrationDuration),
+                        of: narrationTrack,
+                        at: narrationCursor
+                    )
+                    narrationCursor = narrationCursor + narrationDuration
+                }
+            }
+
+            let narrationParameters = AVMutableAudioMixInputParameters(track: compositionNarrationTrack)
+            let resolvedNarrationVolume = Float(min(max(narrationVolume, 0), 1))
+            narrationParameters.setVolume(resolvedNarrationVolume, at: .zero)
+            audioMixParameters.append(narrationParameters)
+        }
+
+        if let backgroundMusicURL {
+            progressHandler?(0.72, "Mixing background music into the real-life video.")
+            let musicAsset = AVURLAsset(url: backgroundMusicURL)
+            if let musicTrack = try await musicAsset.loadTracks(withMediaType: .audio).first,
+               let compositionMusicTrack = composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+               ) {
+                let musicDuration = try await musicAsset.load(.duration)
+                var musicCursor = CMTime.zero
+
+                while musicCursor < totalDuration {
+                    let remaining = totalDuration - musicCursor
+                    let segmentDuration = min(musicDuration, remaining)
+                    try compositionMusicTrack.insertTimeRange(
+                        CMTimeRange(start: .zero, duration: segmentDuration),
+                        of: musicTrack,
+                        at: musicCursor
+                    )
+                    musicCursor = musicCursor + segmentDuration
+                    if musicDuration == .zero { break }
+                }
+
+                let musicParameters = AVMutableAudioMixInputParameters(track: compositionMusicTrack)
+                let resolvedMusicVolume = Float(min(max(backgroundMusicVolume, 0), 1))
+                musicParameters.setVolume(resolvedMusicVolume, at: .zero)
+                let fadeStart = CMTimeMaximum(.zero, totalDuration - CMTime(seconds: 1.2, preferredTimescale: 600))
+                musicParameters.setVolumeRamp(
+                    fromStartVolume: resolvedMusicVolume,
+                    toEndVolume: 0.0,
+                    timeRange: CMTimeRange(start: fadeStart, duration: totalDuration - fadeStart)
+                )
+                audioMixParameters.append(musicParameters)
+            }
+        }
+
+        try await exportStitchedComposition(
+            composition,
+            presetName: AVAssetExportPresetHighestQuality,
+            outputURL: outputURL,
+            audioMixParameters: audioMixParameters,
+            videoComposition: makeVideoComposition(
+                for: compositionVideoTrack,
+                segmentLayouts: segmentLayouts,
+                totalDuration: totalDuration,
+                targetRenderSize: renderSize
+            ),
+            progressMessage: "Exporting the real-life video.",
+            progressHandler: progressHandler
+        )
+    }
+
+    private func renderPhotoSegmentClip(
+        image: UIImage,
+        duration: CMTime,
+        renderSize: CGSize,
+        frameRate: Int32,
+        outputURL: URL
+    ) async throws {
+        let photoItem = MediaItem(previewImage: image, kind: .photo)
+        let timelineSegment = TimelineSegment(
+            mediaItem: photoItem,
+            timeRange: CMTimeRange(start: .zero, duration: duration)
+        )
+        try await renderSlideshow(
+            timelineSegments: [timelineSegment],
+            captionSegments: [],
+            totalDuration: duration,
+            renderSize: renderSize,
+            frameRate: frameRate,
+            videoSampleStride: 1,
+            progressHandler: nil,
+            outputURL: outputURL
+        )
+    }
+
+    private func exportStitchedComposition(
+        _ composition: AVMutableComposition,
+        presetName: String,
+        outputURL: URL,
+        audioMixParameters: [AVMutableAudioMixInputParameters],
+        videoComposition: AVMutableVideoComposition? = nil,
+        progressMessage: String,
+        progressHandler: ((Double, String) -> Void)? = nil
+    ) async throws {
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try FileManager.default.removeItem(at: outputURL)
+        }
+
+        guard let exportSession = AVAssetExportSession(asset: composition, presetName: presetName) else {
+            throw ExportError.exportSessionFailed
+        }
+
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .mov
+        exportSession.shouldOptimizeForNetworkUse = true
+
+        if !audioMixParameters.isEmpty {
+            let audioMix = AVMutableAudioMix()
+            audioMix.inputParameters = audioMixParameters
+            exportSession.audioMix = audioMix
+        }
+
+        if let videoComposition {
+            exportSession.videoComposition = videoComposition
+        }
+
+        progressHandler?(0.88, progressMessage)
+        await exportSession.export()
+
+        if let error = exportSession.error {
+            throw error
+        }
+
+        guard exportSession.status == .completed else {
+            throw ExportError.exportFailed
+        }
+    }
+
+    private func makeVideoComposition(
+        for compositionVideoTrack: AVMutableCompositionTrack,
+        segmentLayouts: [StitchedVideoSegmentLayout],
+        totalDuration: CMTime
+    ) -> AVMutableVideoComposition {
+        makeVideoComposition(
+            for: compositionVideoTrack,
+            segmentLayouts: segmentLayouts,
+            totalDuration: totalDuration,
+            targetRenderSize: nil
+        )
+    }
+
+    private func makeVideoComposition(
+        for compositionVideoTrack: AVMutableCompositionTrack,
+        segmentLayouts: [StitchedVideoSegmentLayout],
+        totalDuration: CMTime,
+        targetRenderSize: CGSize?
+    ) -> AVMutableVideoComposition {
+        let renderSize = segmentLayouts.reduce(CGSize.zero) { currentMax, layout in
+            let transformedBounds = CGRect(origin: .zero, size: layout.naturalSize)
+                .applying(layout.preferredTransform)
+                .standardized
+            return CGSize(
+                width: max(currentMax.width, transformedBounds.width),
+                height: max(currentMax.height, transformedBounds.height)
+            )
+        }
+
+        let chosenRenderSize = targetRenderSize ?? renderSize
+        let safeRenderSize = CGSize(
+            width: max(round(chosenRenderSize.width / 2) * 2, 2),
+            height: max(round(chosenRenderSize.height / 2) * 2, 2)
+        )
+
+        let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compositionVideoTrack)
+        for layout in segmentLayouts {
+            let fittedTransform = fittedTransform(
+                preferredTransform: layout.preferredTransform,
+                naturalSize: layout.naturalSize,
+                renderSize: safeRenderSize
+            )
+            layerInstruction.setTransform(fittedTransform, at: layout.timeRange.start)
+        }
+
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: totalDuration)
+        instruction.layerInstructions = [layerInstruction]
+
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.instructions = [instruction]
+        videoComposition.renderSize = safeRenderSize
+        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
+        return videoComposition
+    }
+
+    private func fittedTransform(
+        preferredTransform: CGAffineTransform,
+        naturalSize: CGSize,
+        renderSize: CGSize
+    ) -> CGAffineTransform {
+        let transformedBounds = CGRect(origin: .zero, size: naturalSize)
+            .applying(preferredTransform)
+            .standardized
+        let translationToOrigin = CGAffineTransform(
+            translationX: -transformedBounds.minX,
+            y: -transformedBounds.minY
+        )
+        let centeredTranslation = CGAffineTransform(
+            translationX: (renderSize.width - transformedBounds.width) / 2,
+            y: (renderSize.height - transformedBounds.height) / 2
+        )
+        return preferredTransform.concatenating(translationToOrigin).concatenating(centeredTranslation)
+    }
+
     private func makePixelBuffer(from image: UIImage, caption: String?, renderSize: CGSize) throws -> CVPixelBuffer {
         var pixelBuffer: CVPixelBuffer?
         let attributes = [
@@ -914,6 +1508,17 @@ struct VideoExporter {
         }.count
         let photoDuration = CMTime(seconds: max(Double(photoCount) * 1.6, photoCount > 0 ? 1.6 : 0), preferredTimescale: 600)
         return max(videoDuration + photoDuration, CMTime(seconds: 3, preferredTimescale: 600))
+    }
+
+    private func videoOnlyDuration(for mediaItems: [MediaItem]) -> CMTime {
+        mediaItems.reduce(CMTime.zero) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case let .video(_, duration):
+                return partial + duration
+            }
+        }
     }
 
     private func makeTimelineSegments(for mediaItems: [MediaItem], totalDuration: CMTime) async throws -> [TimelineSegment] {
@@ -1251,6 +1856,7 @@ struct VideoExporter {
 
     enum ExportError: LocalizedError {
         case noPhotos
+        case noVideos
         case videoWriterSetupFailed
         case pixelBufferCreationFailed
         case missingVideoTrack
@@ -1261,6 +1867,8 @@ struct VideoExporter {
             switch self {
             case .noPhotos:
                 return "Pick at least one photo before creating a video."
+            case .noVideos:
+                return "Import at least one video before using Video mode."
             case .videoWriterSetupFailed:
                 return "Video writer setup failed."
             case .pixelBufferCreationFailed:
@@ -1279,7 +1887,9 @@ struct VideoExporter {
         for quality: RenderQuality,
         aspectRatio: AspectRatio,
         duration: CMTime,
-        videoPressure: VideoPressure
+        videoPressure: VideoPressure,
+        timingMode: TimingMode,
+        mediaItems: [MediaItem]
     ) -> RenderProfile {
         let seconds = CMTimeGetSeconds(duration)
         let baseSize = quality.renderSize(for: aspectRatio)
@@ -1287,6 +1897,72 @@ struct VideoExporter {
         let hasHeavyVideoLoad =
             videoPressure.clipCount >= 3 &&
             (videoPressure.totalVideoSeconds > 600 || videoPressure.longestClipSeconds > 240)
+
+        if timingMode == .video {
+            return RenderProfile(
+                renderSize: preferredMediaDrivenRenderSize(for: mediaItems, aspectRatio: aspectRatio, minimumSize: baseSize),
+                frameRate: baseRate,
+                longFormOptimized: false,
+                videoSampleStride: hasHeavyVideoLoad || seconds > 900 ? 2 : 1
+            )
+        }
+
+        if timingMode == .realLife {
+            if !seconds.isFinite || seconds <= 180 {
+                return RenderProfile(renderSize: baseSize, frameRate: baseRate, longFormOptimized: false, videoSampleStride: 1)
+            }
+
+            switch quality {
+            case .preview:
+                return RenderProfile(renderSize: baseSize, frameRate: baseRate, longFormOptimized: false, videoSampleStride: 1)
+            case .finalStandard:
+                if hasHeavyVideoLoad || seconds > 900 {
+                    return RenderProfile(
+                        renderSize: aspectRatio == .vertical ? CGSize(width: 360, height: 640) : CGSize(width: 480, height: 360),
+                        frameRate: 10,
+                        longFormOptimized: true,
+                        videoSampleStride: 1
+                    )
+                }
+                if seconds > 420 {
+                    return RenderProfile(
+                        renderSize: aspectRatio == .vertical ? CGSize(width: 540, height: 960) : CGSize(width: 720, height: 540),
+                        frameRate: 10,
+                        longFormOptimized: true,
+                        videoSampleStride: 1
+                    )
+                }
+                return RenderProfile(
+                    renderSize: aspectRatio == .vertical ? CGSize(width: 540, height: 960) : CGSize(width: 720, height: 540),
+                    frameRate: baseRate,
+                    longFormOptimized: false,
+                    videoSampleStride: 1
+                )
+            case .finalHigh:
+                if hasHeavyVideoLoad || seconds > 900 {
+                    return RenderProfile(
+                        renderSize: aspectRatio == .vertical ? CGSize(width: 540, height: 960) : CGSize(width: 720, height: 540),
+                        frameRate: 12,
+                        longFormOptimized: true,
+                        videoSampleStride: 1
+                    )
+                }
+                if seconds > 420 {
+                    return RenderProfile(
+                        renderSize: aspectRatio == .vertical ? CGSize(width: 720, height: 1280) : CGSize(width: 960, height: 720),
+                        frameRate: 12,
+                        longFormOptimized: true,
+                        videoSampleStride: 1
+                    )
+                }
+                return RenderProfile(
+                    renderSize: aspectRatio == .vertical ? CGSize(width: 720, height: 1280) : CGSize(width: 960, height: 720),
+                    frameRate: baseRate,
+                    longFormOptimized: false,
+                    videoSampleStride: 1
+                )
+            }
+        }
 
         guard seconds.isFinite, seconds > 180 else {
             return RenderProfile(renderSize: baseSize, frameRate: baseRate, longFormOptimized: false, videoSampleStride: 1)
@@ -1342,6 +2018,32 @@ struct VideoExporter {
                 videoSampleStride: 2
             )
         }
+    }
+
+    private func preferredMediaDrivenRenderSize(
+        for mediaItems: [MediaItem],
+        aspectRatio: AspectRatio,
+        minimumSize: CGSize
+    ) -> CGSize {
+        let largestMediaSize = mediaItems.reduce(CGSize.zero) { currentMax, item in
+            let size = item.previewImage.size
+            guard size.width > 0, size.height > 0 else { return currentMax }
+            return CGSize(
+                width: max(currentMax.width, size.width),
+                height: max(currentMax.height, size.height)
+            )
+        }
+
+        guard largestMediaSize.width > 0, largestMediaSize.height > 0 else {
+            return minimumSize
+        }
+
+        let fitted = AVMakeRect(aspectRatio: aspectRatio == .vertical ? CGSize(width: 9, height: 16) : CGSize(width: 4, height: 3),
+                                insideRect: CGRect(origin: .zero, size: largestMediaSize)).size
+
+        let width = max(minimumSize.width, round(fitted.width / 2) * 2)
+        let height = max(minimumSize.height, round(fitted.height / 2) * 2)
+        return CGSize(width: width, height: height)
     }
 
     private func videoPressure(for timelineSegments: [TimelineSegment]) -> VideoPressure {
