@@ -588,10 +588,12 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     func buildVideo() {
+        statusMessage = "Starting \(selectedTimingMode.rawValue) final render."
         runVideoRender(renderQuality: selectedFinalExportQuality.renderQuality, successMessage: "Video created successfully. Preview or share it below.")
     }
 
     func buildVideoPreview() {
+        statusMessage = "Starting \(selectedTimingMode.rawValue) preview render."
         runVideoRender(renderQuality: .preview, successMessage: "Preview ready. Review the result below before creating the final video.")
     }
 
