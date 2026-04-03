@@ -334,9 +334,8 @@ struct VideoExporter {
 
         if timingMode == .realLife {
             progressHandler?(0.24, "Building a real-life composition.")
-            try await exportComposedTimeline(
+            try await exportRealLifeComposition(
                 timelineSegments: timelineSegments,
-                captionSegments: trimmedCaptionSegments,
                 narrationURLs: trimmedNarrationURLs,
                 backgroundMusicURL: backgroundMusicURL,
                 backgroundMusicVolume: backgroundMusicVolume,
@@ -347,7 +346,6 @@ struct VideoExporter {
                 frameRate: renderProfile.frameRate,
                 workspace: workspace,
                 outputURL: finalURL,
-                exportLabel: "real-life",
                 progressHandler: progressHandler
             )
             progressHandler?(1.0, "Finalizing exported video.")
@@ -988,9 +986,8 @@ struct VideoExporter {
         }
     }
 
-    private func exportComposedTimeline(
+    private func exportRealLifeComposition(
         timelineSegments: [TimelineSegment],
-        captionSegments: [CaptionSegment],
         narrationURLs: [URL],
         backgroundMusicURL: URL?,
         backgroundMusicVolume: Double,
@@ -1001,7 +998,6 @@ struct VideoExporter {
         frameRate: Int32,
         workspace: URL,
         outputURL: URL,
-        exportLabel: String,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws {
         let composition = AVMutableComposition()
@@ -1118,7 +1114,7 @@ struct VideoExporter {
         }
 
         if let backgroundMusicURL {
-            progressHandler?(0.72, "Mixing background music into the \(exportLabel) video.")
+            progressHandler?(0.72, "Mixing background music into the real-life video.")
             let musicAsset = AVURLAsset(url: backgroundMusicURL)
             if let musicTrack = try await musicAsset.loadTracks(withMediaType: .audio).first,
                let compositionMusicTrack = composition.addMutableTrack(
@@ -1153,23 +1149,18 @@ struct VideoExporter {
             }
         }
 
-        let videoComposition = makeVideoComposition(
-            for: compositionVideoTrack,
-            segmentLayouts: segmentLayouts,
-            totalDuration: totalDuration,
-            targetRenderSize: renderSize
-        )
-        if !captionSegments.isEmpty {
-            addCaptionOverlay(to: videoComposition, captionSegments: captionSegments, totalDuration: totalDuration)
-        }
-
         try await exportStitchedComposition(
             composition,
             presetName: AVAssetExportPresetHighestQuality,
             outputURL: outputURL,
             audioMixParameters: audioMixParameters,
-            videoComposition: videoComposition,
-            progressMessage: "Exporting the \(exportLabel) video.",
+            videoComposition: makeVideoComposition(
+                for: compositionVideoTrack,
+                segmentLayouts: segmentLayouts,
+                totalDuration: totalDuration,
+                targetRenderSize: renderSize
+            ),
+            progressMessage: "Exporting the real-life video.",
             progressHandler: progressHandler
         )
     }
@@ -1294,7 +1285,6 @@ struct VideoExporter {
         videoComposition.instructions = [instruction]
         videoComposition.renderSize = safeRenderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
-        videoComposition.renderScale = 2.0
         return videoComposition
     }
 
@@ -1315,112 +1305,6 @@ struct VideoExporter {
             y: (renderSize.height - transformedBounds.height) / 2
         )
         return preferredTransform.concatenating(translationToOrigin).concatenating(centeredTranslation)
-    }
-
-    private func addCaptionOverlay(
-        to videoComposition: AVMutableVideoComposition,
-        captionSegments: [CaptionSegment],
-        totalDuration: CMTime
-    ) {
-        guard !captionSegments.isEmpty else { return }
-
-        let renderSize = videoComposition.renderSize
-        let totalSeconds = max(CMTimeGetSeconds(totalDuration), 0.1)
-        let layerScale: CGFloat = 2.0
-
-        let parentLayer = CALayer()
-        parentLayer.frame = CGRect(origin: .zero, size: renderSize)
-        parentLayer.contentsScale = layerScale
-        parentLayer.rasterizationScale = layerScale
-
-        let videoLayer = CALayer()
-        videoLayer.frame = parentLayer.frame
-        videoLayer.contentsScale = layerScale
-        parentLayer.addSublayer(videoLayer)
-
-        let widthScale = max(min(renderSize.width / 720, 1.0), 0.5)
-        let maxTextWidth = renderSize.width - max(72, 120 * widthScale)
-        let maxTextHeight: CGFloat = max(140, 240 * widthScale)
-        let minimumFontSize: CGFloat = max(14, 20 * widthScale)
-        let baseFontSize: CGFloat = renderSize.width < renderSize.height ? max(18, 34 * widthScale) : max(16, 30 * widthScale)
-
-        for segment in captionSegments {
-            let paragraph = NSMutableParagraphStyle()
-            paragraph.alignment = .center
-            paragraph.lineBreakMode = .byWordWrapping
-
-            var fontSize = baseFontSize
-            var measuredText = CGRect.zero
-            var attributes: [NSAttributedString.Key: Any] = [:]
-
-            while fontSize >= minimumFontSize {
-                attributes = [
-                    .font: UIFont.systemFont(ofSize: fontSize, weight: .semibold),
-                    .foregroundColor: UIColor.white,
-                    .paragraphStyle: paragraph
-                ]
-
-                measuredText = (segment.text as NSString).boundingRect(
-                    with: CGSize(width: maxTextWidth, height: maxTextHeight),
-                    options: [.usesLineFragmentOrigin, .usesFontLeading],
-                    attributes: attributes,
-                    context: nil
-                ).integral
-
-                if measuredText.height <= maxTextHeight {
-                    break
-                }
-
-                fontSize -= 2
-            }
-
-            let horizontalPadding = max(12, 18 * widthScale)
-            let verticalPadding = max(8, 12 * widthScale)
-            let boxWidth = min(measuredText.width + horizontalPadding * 2, renderSize.width - 32)
-            let boxHeight = measuredText.height + verticalPadding * 2
-            let bottomInset = max(18, 28 * widthScale)
-            let frame = CGRect(
-                x: (renderSize.width - boxWidth) / 2,
-                y: bottomInset,
-                width: boxWidth,
-                height: boxHeight
-            )
-
-            let textLayer = CATextLayer()
-            textLayer.frame = frame
-            textLayer.backgroundColor = UIColor.black.withAlphaComponent(0.35).cgColor
-            textLayer.cornerRadius = max(10, 14 * widthScale)
-            textLayer.masksToBounds = true
-            textLayer.alignmentMode = .center
-            textLayer.isWrapped = true
-            textLayer.contentsScale = layerScale
-            textLayer.rasterizationScale = layerScale
-            textLayer.shouldRasterize = false
-            textLayer.truncationMode = .none
-            textLayer.opacity = 0
-            textLayer.string = NSAttributedString(string: segment.text, attributes: attributes)
-
-            let startSeconds = max(CMTimeGetSeconds(segment.timeRange.start), 0)
-            let endSeconds = max(CMTimeGetSeconds(segment.timeRange.end), startSeconds + 0.05)
-            let startFraction = NSNumber(value: startSeconds / totalSeconds)
-            let endFraction = NSNumber(value: min(endSeconds / totalSeconds, 0.999))
-
-            let opacityAnimation = CAKeyframeAnimation(keyPath: "opacity")
-            opacityAnimation.values = [0, 1, 1, 0]
-            opacityAnimation.keyTimes = [0, startFraction, endFraction, 1]
-            opacityAnimation.duration = totalSeconds
-            opacityAnimation.beginTime = AVCoreAnimationBeginTimeAtZero
-            opacityAnimation.isRemovedOnCompletion = false
-            opacityAnimation.fillMode = .forwards
-
-            textLayer.add(opacityAnimation, forKey: "captionOpacity")
-            parentLayer.addSublayer(textLayer)
-        }
-
-        videoComposition.animationTool = AVVideoCompositionCoreAnimationTool(
-            postProcessingAsVideoLayer: videoLayer,
-            in: parentLayer
-        )
     }
 
     private func makePixelBuffer(from image: UIImage, caption: String?, renderSize: CGSize) throws -> CVPixelBuffer {
@@ -2091,47 +1975,47 @@ struct VideoExporter {
             if hasHeavyVideoLoad || seconds > 900 {
                 return RenderProfile(
                     renderSize: aspectRatio == .vertical ? CGSize(width: 360, height: 640) : CGSize(width: 480, height: 360),
-                    frameRate: 12,
+                    frameRate: 8,
                     longFormOptimized: true,
-                    videoSampleStride: 1
+                    videoSampleStride: 2
                 )
             }
             if seconds > 420 {
                 return RenderProfile(
-                    renderSize: aspectRatio == .vertical ? CGSize(width: 540, height: 960) : CGSize(width: 720, height: 540),
-                    frameRate: 12,
+                    renderSize: aspectRatio == .vertical ? CGSize(width: 640, height: 1136) : CGSize(width: 854, height: 640),
+                    frameRate: 6,
                     longFormOptimized: true,
-                    videoSampleStride: 1
+                    videoSampleStride: 4
                 )
             }
             return RenderProfile(
-                renderSize: aspectRatio == .vertical ? CGSize(width: 540, height: 960) : CGSize(width: 720, height: 540),
-                frameRate: 12,
+                renderSize: baseSize,
+                frameRate: 8,
                 longFormOptimized: true,
-                videoSampleStride: 1
+                videoSampleStride: 3
             )
         case .finalHigh:
             if hasHeavyVideoLoad || seconds > 900 {
                 return RenderProfile(
-                    renderSize: aspectRatio == .vertical ? CGSize(width: 540, height: 960) : CGSize(width: 720, height: 540),
-                    frameRate: 15,
+                    renderSize: aspectRatio == .vertical ? CGSize(width: 360, height: 640) : CGSize(width: 480, height: 360),
+                    frameRate: 10,
                     longFormOptimized: true,
-                    videoSampleStride: 1
+                    videoSampleStride: 2
                 )
             }
             if seconds > 420 {
                 return RenderProfile(
                     renderSize: aspectRatio == .vertical ? CGSize(width: 720, height: 1280) : CGSize(width: 960, height: 720),
-                    frameRate: 15,
+                    frameRate: 8,
                     longFormOptimized: true,
-                    videoSampleStride: 1
+                    videoSampleStride: 3
                 )
             }
             return RenderProfile(
                 renderSize: aspectRatio == .vertical ? CGSize(width: 720, height: 1280) : CGSize(width: 960, height: 720),
-                frameRate: 15,
+                frameRate: 10,
                 longFormOptimized: true,
-                videoSampleStride: 1
+                videoSampleStride: 2
             )
         }
     }
