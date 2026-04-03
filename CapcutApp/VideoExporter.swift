@@ -54,7 +54,7 @@ struct VideoExporter {
         var maximumDuration: CMTime? {
             switch self {
             case .preview:
-                return CMTime(seconds: 8, preferredTimescale: 600)
+                return CMTime(seconds: 20, preferredTimescale: 600)
             case .finalStandard, .finalHigh:
                 return nil
             }
@@ -314,7 +314,10 @@ struct VideoExporter {
                 : minimumVisualDuration
         }
         let resolvedDuration = renderQuality.maximumDuration.map { min(totalDuration, $0) } ?? totalDuration
-        let timelineSegments = try await makeTimelineSegments(for: mediaItems, totalDuration: resolvedDuration)
+        let baseTimelineSegments = try await makeTimelineSegments(for: mediaItems, totalDuration: totalDuration)
+        let timelineSegments = timingMode == .story
+            ? timelineSegmentsTrimmed(to: resolvedDuration, segments: baseTimelineSegments)
+            : baseTimelineSegments
         let videoPressure = videoPressure(for: timelineSegments)
         let renderProfile = resolvedRenderProfile(
             for: renderQuality,
@@ -393,6 +396,25 @@ struct VideoExporter {
             trimmed.append(
                 CaptionSegment(
                     text: segment.text,
+                    timeRange: CMTimeRange(start: segment.timeRange.start, duration: duration)
+                )
+            )
+        }
+        return trimmed
+    }
+
+    private func timelineSegmentsTrimmed(to maxDuration: CMTime, segments: [TimelineSegment]) -> [TimelineSegment] {
+        guard maxDuration > .zero else { return [] }
+
+        var trimmed: [TimelineSegment] = []
+        for segment in segments {
+            if segment.timeRange.start >= maxDuration { break }
+            let end = min(segment.timeRange.end, maxDuration)
+            let duration = end - segment.timeRange.start
+            guard duration > .zero else { continue }
+            trimmed.append(
+                TimelineSegment(
+                    mediaItem: segment.mediaItem,
                     timeRange: CMTimeRange(start: segment.timeRange.start, duration: duration)
                 )
             )
@@ -1364,22 +1386,28 @@ struct VideoExporter {
     private func estimatedTimelineSegments(for mediaItems: [MediaItem], totalDuration: CMTime) -> [TimelineSegment] {
         guard !mediaItems.isEmpty, totalDuration > .zero else { return [] }
 
-        let videoItems = mediaItems.filter {
-            if case .video = $0.kind { return true }
-            return false
-        }
-        let photoItems = mediaItems.filter {
-            if case .photo = $0.kind { return true }
-            return false
+        let videoItems = mediaItems.filter { if case .video = $0.kind { return true }; return false }
+        let photoItems = mediaItems.filter { if case .photo = $0.kind { return true }; return false }
+        let hasVideos = !videoItems.isEmpty
+        let hasPhotos = !photoItems.isEmpty
+
+        let totalVideoDuration = videoItems.reduce(CMTime.zero) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case let .video(_, duration):
+                return partial + duration
+            }
         }
 
-        let usesMixedLooping = !videoItems.isEmpty
         let photoDuration: CMTime = {
-            guard !photoItems.isEmpty else { return .zero }
-            if usesMixedLooping {
-                return CMTime(seconds: 2.0, preferredTimescale: 600)
+            guard hasPhotos else { return .zero }
+            if !hasVideos {
+                return CMTimeMultiplyByFloat64(totalDuration, multiplier: 1.0 / Double(photoItems.count))
             }
-            return CMTimeMultiplyByFloat64(totalDuration, multiplier: 1.0 / Double(photoItems.count))
+            let remainingForPhotos = CMTimeMaximum(.zero, totalDuration - totalVideoDuration)
+            guard remainingForPhotos > .zero else { return .zero }
+            return CMTimeMultiplyByFloat64(remainingForPhotos, multiplier: 1.0 / Double(photoItems.count))
         }()
 
         var segments: [TimelineSegment] = []
@@ -1396,14 +1424,23 @@ struct VideoExporter {
                 duration = clipDuration
             }
 
-            guard duration > .zero else { break }
+            if duration <= .zero {
+                loopIndex += 1
+                if hasPhotos && hasVideos && loopIndex >= mediaItems.count {
+                    break
+                }
+                continue
+            }
             let remaining = totalDuration - cursor
             let clippedDuration = CMTimeMinimum(duration, remaining)
             segments.append(TimelineSegment(mediaItem: item, timeRange: CMTimeRange(start: cursor, duration: clippedDuration)))
             cursor = cursor + clippedDuration
             loopIndex += 1
 
-            if !usesMixedLooping && loopIndex >= mediaItems.count {
+            if hasPhotos && hasVideos && loopIndex >= mediaItems.count {
+                break
+            }
+            if !hasVideos && loopIndex >= mediaItems.count {
                 break
             }
         }
@@ -1522,21 +1559,27 @@ struct VideoExporter {
     }
 
     private func makeTimelineSegments(for mediaItems: [MediaItem], totalDuration: CMTime) async throws -> [TimelineSegment] {
-        let photoItems = mediaItems.filter {
-            if case .photo = $0.kind { return true }
-            return false
-        }
-        let videoItems = mediaItems.filter {
-            if case .video = $0.kind { return true }
-            return false
-        }
-        let usesMixedLooping = !videoItems.isEmpty
-        let perPhotoDuration: CMTime = {
-            guard !photoItems.isEmpty else { return CMTime(seconds: 0, preferredTimescale: 600) }
-            if usesMixedLooping {
-                return CMTime(seconds: 2.0, preferredTimescale: 600)
+        let photoItems = mediaItems.filter { if case .photo = $0.kind { return true }; return false }
+        let videoItems = mediaItems.filter { if case .video = $0.kind { return true }; return false }
+        let hasVideos = !videoItems.isEmpty
+        let hasPhotos = !photoItems.isEmpty
+        let totalVideoDuration = videoItems.reduce(CMTime.zero) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case let .video(_, duration):
+                return partial + duration
             }
-            return CMTimeMultiplyByFloat64(totalDuration, multiplier: 1.0 / Double(photoItems.count))
+        }
+
+        let perPhotoDuration: CMTime = {
+            guard hasPhotos else { return .zero }
+            if !hasVideos {
+                return CMTimeMultiplyByFloat64(totalDuration, multiplier: 1.0 / Double(photoItems.count))
+            }
+            let remainingForPhotos = CMTimeMaximum(.zero, totalDuration - totalVideoDuration)
+            guard remainingForPhotos > .zero else { return .zero }
+            return CMTimeMultiplyByFloat64(remainingForPhotos, multiplier: 1.0 / Double(photoItems.count))
         }()
 
         var cursor = CMTime.zero
@@ -1551,13 +1594,24 @@ struct VideoExporter {
             let intendedDuration: CMTime
             switch item.kind {
             case .photo:
-                intendedDuration = perPhotoDuration > .zero ? perPhotoDuration : CMTime(seconds: 2.0, preferredTimescale: 600)
+                intendedDuration = perPhotoDuration
             case let .video(_, videoDuration):
                 intendedDuration = videoDuration
             }
 
+            if intendedDuration <= .zero {
+                loopIndex += 1
+                if hasPhotos && hasVideos && loopIndex >= mediaItems.count {
+                    break
+                }
+                continue
+            }
+
             let duration = min(intendedDuration, remainingDuration)
-            guard duration > .zero else { break }
+            guard duration > .zero else {
+                loopIndex += 1
+                continue
+            }
             segments.append(
                 TimelineSegment(
                     mediaItem: item,
@@ -1567,7 +1621,10 @@ struct VideoExporter {
             cursor = cursor + duration
             loopIndex += 1
 
-            if !usesMixedLooping && loopIndex >= mediaItems.count {
+            if hasPhotos && hasVideos && loopIndex >= mediaItems.count {
+                break
+            }
+            if !hasVideos && loopIndex >= mediaItems.count {
                 break
             }
         }

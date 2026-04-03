@@ -1374,7 +1374,7 @@ struct ContentView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(viewModel.isLoadingMediaSelection ? "Loading Media..." : (viewModel.isPreparingVideoPreview ? "Building Preview..." : "Preview Video"))
                                 .font(.subheadline.weight(.bold))
-                            Text(viewModel.hasPendingPreviewChanges ? "Quick 8-second sample" : "Up to date")
+                            Text(viewModel.hasPendingPreviewChanges ? "Quick 20-second sample" : "Up to date")
                                 .font(.caption2.weight(.semibold))
                                 .foregroundStyle(.white.opacity(0.82))
                         }
