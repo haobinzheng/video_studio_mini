@@ -43,6 +43,16 @@ final class AppViewModel: NSObject, ObservableObject {
         var removedBytes: Int64 = 0
     }
 
+    struct StorageUsageSnapshot: Sendable {
+        var documentsBytes: Int64 = 0
+        var cachesBytes: Int64 = 0
+        var temporaryBytes: Int64 = 0
+
+        var totalBytes: Int64 {
+            documentsBytes + cachesBytes + temporaryBytes
+        }
+    }
+
     private final class ExportSessionBox: @unchecked Sendable {
         let session: AVAssetExportSession
 
@@ -88,6 +98,21 @@ final class AppViewModel: NSObject, ObservableObject {
         let description: String
         let fileName: String
         let fileExtension: String
+    }
+
+    struct MusicLibraryItem: Identifiable, Equatable {
+        enum Source: String {
+            case builtIn = "Built-In"
+            case imported = "Imported"
+            case extracted = "Extracted"
+        }
+
+        let id: String
+        let name: String
+        let duration: TimeInterval
+        let description: String?
+        let url: URL
+        let source: Source
     }
 
     @Published var mediaItems: [MediaItem] = []
@@ -153,7 +178,7 @@ final class AppViewModel: NSObject, ObservableObject {
         DemoTrackOption(id: "local_forecast", name: "Local Forecast", description: "Bright, grooving, feel-good energy", fileName: "local_forecast", fileExtension: "mp3")
     ]
     @Published var selectedDemoTrackID = "dream_culture"
-    @Published var selectedAspectRatio: VideoExporter.AspectRatio = .vertical {
+    @Published var selectedAspectRatio: VideoExporter.AspectRatio = .widescreen {
         didSet {
             if oldValue != selectedAspectRatio {
                 hasPendingPreviewChanges = true
@@ -252,6 +277,10 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var isClearingUnusedData = false
     @Published var isClearingCurrentProjectData = false
     @Published var storageCleanupFeedback = ""
+    @Published var isRefreshingStorageUsage = false
+    @Published var storageUsage = StorageUsageSnapshot()
+    @Published var isLoadingMusicLibrary = false
+    @Published var musicLibraryItems: [MusicLibraryItem] = []
 
     private let videoExporter = VideoExporter()
     private let narrationPreviewBuilder = NarrationPreviewBuilder()
@@ -567,6 +596,33 @@ final class AppViewModel: NSObject, ObservableObject {
         statusMessage = "Music cleared. Your video will export without background music."
     }
 
+    func refreshMusicLibrary() {
+        guard !isLoadingMusicLibrary else { return }
+
+        isLoadingMusicLibrary = true
+        Task {
+            let items = await Self.loadMusicLibraryItems(demoTracks: demoTracks)
+            musicLibraryItems = items
+            isLoadingMusicLibrary = false
+        }
+    }
+
+    func selectMusicLibraryItem(_ item: MusicLibraryItem) {
+        configureAudioSessionIfNeeded()
+
+        do {
+            stopMusicSilently()
+            importedMusicURL = item.url
+            importedMusicName = item.url.lastPathComponent
+            try prepareAudioPlayer(with: item.url)
+            hasPendingPreviewChanges = true
+            hasPendingFinalVideoChanges = true
+            statusMessage = "\(item.name) is ready to play."
+        } catch {
+            statusMessage = "Could not load that music item."
+        }
+    }
+
     private func saveNarrationDraft() {
         guard shouldPersistNarrationDraft else { return }
         UserDefaults.standard.set(narrationText, forKey: Self.savedNarrationDraftKey)
@@ -648,6 +704,7 @@ final class AppViewModel: NSObject, ObservableObject {
             statusMessage = result.removedItemCount == 0
                 ? "No unused data was found to remove."
                 : "Unused data and cache cleared."
+            refreshStorageUsage()
         }
     }
 
@@ -697,7 +754,29 @@ final class AppViewModel: NSObject, ObservableObject {
             statusMessage = result.removedItemCount == 0
                 ? "Current project data was already clear."
                 : "Current project data cleared."
+            refreshStorageUsage()
         }
+    }
+
+    func refreshStorageUsage() {
+        guard !isRefreshingStorageUsage else { return }
+
+        isRefreshingStorageUsage = true
+        Task {
+            let snapshot = await Task.detached(priority: .utility) {
+                Self.measureStorageUsage()
+            }.value
+
+            storageUsage = snapshot
+            isRefreshingStorageUsage = false
+        }
+    }
+
+    func formattedStorageSize(_ bytes: Int64) -> String {
+        let formatter = ByteCountFormatter()
+        formatter.allowedUnits = [.useKB, .useMB, .useGB]
+        formatter.countStyle = .file
+        return formatter.string(fromByteCount: bytes)
     }
 
     func moveMediaItem(withId sourceID: UUID, before targetID: UUID) {
@@ -1152,11 +1231,50 @@ final class AppViewModel: NSObject, ObservableObject {
         return Int64(values?.fileSize ?? 0)
     }
 
+    nonisolated private static func measureStorageUsage() -> StorageUsageSnapshot {
+        let fileManager = FileManager.default
+        let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        let temporary = fileManager.temporaryDirectory
+
+        return StorageUsageSnapshot(
+            documentsBytes: itemSize(at: documents),
+            cachesBytes: itemSize(at: caches),
+            temporaryBytes: itemSize(at: temporary)
+        )
+    }
+
     nonisolated private static func mergeCleanupResults(_ lhs: StorageCleanupResult, _ rhs: StorageCleanupResult) -> StorageCleanupResult {
         StorageCleanupResult(
             removedItemCount: lhs.removedItemCount + rhs.removedItemCount,
             removedBytes: lhs.removedBytes + rhs.removedBytes
         )
+    }
+
+    nonisolated private static func loadMusicLibraryItems(demoTracks: [DemoTrackOption]) async -> [MusicLibraryItem] {
+        var items: [MusicLibraryItem] = []
+
+        for track in demoTracks {
+            let bundledURL = Bundle.main.url(forResource: track.fileName, withExtension: track.fileExtension, subdirectory: "SampleMusic")
+                ?? Bundle.main.url(forResource: track.fileName, withExtension: track.fileExtension)
+
+            guard let bundledURL else { continue }
+            let duration = await audioDuration(for: bundledURL)
+            items.append(
+                MusicLibraryItem(
+                    id: "builtin-\(track.id)",
+                    name: track.name,
+                    duration: duration,
+                    description: track.description,
+                    url: bundledURL,
+                    source: .builtIn
+                )
+            )
+        }
+
+        return items.sorted { lhs, rhs in
+            lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        }
     }
 
     nonisolated private static func mediaVideoIfManagedCopyURL(for url: URL) -> URL? {
@@ -1169,6 +1287,15 @@ final class AppViewModel: NSObject, ObservableObject {
             return nil
         }
 
+        return url
+    }
+
+    nonisolated private static func importedAudioDocumentURL(_ url: URL) -> URL? {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        guard url.deletingLastPathComponent() == documents else { return nil }
+        guard !url.lastPathComponent.hasPrefix("picked-video-") else { return nil }
+        guard !url.lastPathComponent.hasPrefix("capcut-mini-") else { return nil }
+        guard importedMediaType(for: url) == .audio else { return nil }
         return url
     }
 
@@ -1406,7 +1533,7 @@ final class AppViewModel: NSObject, ObservableObject {
         case unknown
     }
 
-    private func importedMediaType(for url: URL) -> ImportedMediaType {
+    nonisolated private static func importedMediaType(for url: URL) -> ImportedMediaType {
         guard let contentType = UTType(filenameExtension: url.pathExtension) else {
             return .unknown
         }
@@ -1417,6 +1544,10 @@ final class AppViewModel: NSObject, ObservableObject {
             return .video
         }
         return .unknown
+    }
+
+    private func importedMediaType(for url: URL) -> ImportedMediaType {
+        Self.importedMediaType(for: url)
     }
 
     private func extractAudioTrackIfNeeded(from sourceURL: URL) async throws -> URL {
@@ -1517,6 +1648,41 @@ final class AppViewModel: NSObject, ObservableObject {
 
     var shareableMusicURL: URL? {
         importedMusicURL
+    }
+
+    func formattedMusicDuration(_ duration: TimeInterval) -> String {
+        guard duration.isFinite, duration > 0 else { return "--:--" }
+        let totalSeconds = Int(duration.rounded())
+        let minutes = totalSeconds / 60
+        let seconds = totalSeconds % 60
+        return String(format: "%d:%02d", minutes, seconds)
+    }
+
+    nonisolated private static func audioDuration(for url: URL) async -> TimeInterval {
+        let asset = AVURLAsset(url: url)
+        let duration = try? await asset.load(.duration)
+        return duration.map(CMTimeGetSeconds) ?? 0
+    }
+
+    nonisolated private static func displayMusicName(for url: URL) -> String {
+        let baseName = url.deletingPathExtension().lastPathComponent
+        let cleaned = baseName.replacingOccurrences(
+            of: "-[0-9A-Fa-f]{12}$",
+            with: "",
+            options: .regularExpression
+        )
+        return cleaned.isEmpty ? baseName : cleaned
+    }
+
+    nonisolated private static func sourceSortRank(_ source: MusicLibraryItem.Source) -> Int {
+        switch source {
+        case .builtIn:
+            return 0
+        case .imported:
+            return 1
+        case .extracted:
+            return 2
+        }
     }
 
     private func startNarrationPreviewTimer() {

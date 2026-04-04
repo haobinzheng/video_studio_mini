@@ -22,6 +22,7 @@ struct ContentView: View {
     @State private var renderPreviewPlayer = AVPlayer()
     @State private var scriptScrollProxy: ScrollViewProxy?
     @State private var isSettingsPresented = false
+    @State private var isMusicBrowserPresented = false
     @FocusState private var isNarrationFocused: Bool
 
     var body: some View {
@@ -55,6 +56,9 @@ struct ContentView: View {
             .navigationBarTitleDisplayMode(.inline)
             .sheet(isPresented: $isSettingsPresented) {
                 settingsSheet
+            }
+            .sheet(isPresented: $isMusicBrowserPresented) {
+                musicLibrarySheet
             }
             .fileImporter(
                 isPresented: $isMusicImporterPresented,
@@ -220,61 +224,230 @@ struct ContentView: View {
                 }
 
                 Section {
-                    Text("Clear old rendered videos, narration preview files, extracted cache, and stale imported media copies that are no longer part of the current project.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 4)
-
-                    if !viewModel.storageCleanupFeedback.isEmpty {
-                        Text(viewModel.storageCleanupFeedback)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.primary)
-                    }
-
-                    Button(role: .destructive) {
-                        viewModel.clearUnusedDataAndCache()
+                    NavigationLink {
+                        storageSettingsView
                     } label: {
-                        HStack {
-                            if viewModel.isClearingUnusedData {
-                                ProgressView()
-                                    .controlSize(.small)
+                        HStack(spacing: 12) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(Color.blue.opacity(0.12))
+                                    .frame(width: 34, height: 34)
+                                Image(systemName: "externaldrive.fill.badge.person.crop")
+                                    .font(.system(size: 15, weight: .bold))
+                                    .foregroundStyle(Color.blue.opacity(0.92))
                             }
-                            Text(viewModel.isClearingUnusedData ? "Clearing..." : "Clear Unused Data and Cache")
-                        }
-                    }
-                    .disabled(viewModel.isClearingUnusedData)
-                } header: {
-                    Text("Unused Data")
-                }
 
-                Section {
-                    Text("Remove the active project's copied media, selected music working file, current preview, current final video, and narration preview data.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Storage")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("Usage, unused data, and current project cleanup")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
                         .padding(.vertical, 4)
-
-                    Button(role: .destructive) {
-                        viewModel.clearCurrentProjectData()
-                    } label: {
-                        HStack {
-                            if viewModel.isClearingCurrentProjectData {
-                                ProgressView()
-                                    .controlSize(.small)
-                            }
-                            Text(viewModel.isClearingCurrentProjectData ? "Clearing..." : "Clear Current Project Data")
-                        }
                     }
-                    .disabled(viewModel.isClearingCurrentProjectData)
                 } header: {
-                    Text("Current Project")
+                    Text("Storage")
                 }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                viewModel.refreshStorageUsage()
+            }
             .toolbar {
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button("Done") {
                         isSettingsPresented = false
+                    }
+                }
+            }
+        }
+    }
+
+    private var storageSettingsView: some View {
+        List {
+            Section {
+                HStack {
+                    Text("Current Usage")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if viewModel.isRefreshingStorageUsage {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text(viewModel.formattedStorageSize(viewModel.storageUsage.totalBytes))
+                            .font(.headline.weight(.semibold))
+                    }
+                }
+
+                HStack {
+                    Text("Documents")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(viewModel.formattedStorageSize(viewModel.storageUsage.documentsBytes))
+                }
+
+                HStack {
+                    Text("Caches")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(viewModel.formattedStorageSize(viewModel.storageUsage.cachesBytes))
+                }
+
+                HStack {
+                    Text("Temporary")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(viewModel.formattedStorageSize(viewModel.storageUsage.temporaryBytes))
+                }
+
+                Button {
+                    viewModel.refreshStorageUsage()
+                } label: {
+                    HStack {
+                        if viewModel.isRefreshingStorageUsage {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(viewModel.isRefreshingStorageUsage ? "Refreshing..." : "Refresh Storage")
+                    }
+                }
+                .disabled(viewModel.isRefreshingStorageUsage)
+            } header: {
+                Text("Storage Usage")
+            }
+
+            Section {
+                Text("Clear old rendered videos, narration preview files, extracted cache, and stale imported media copies that are no longer part of the current project.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
+
+                Button(role: .destructive) {
+                    viewModel.clearUnusedDataAndCache()
+                } label: {
+                    HStack {
+                        if viewModel.isClearingUnusedData {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(viewModel.isClearingUnusedData ? "Clearing..." : "Clear Unused Data and Cache")
+                    }
+                }
+                .disabled(viewModel.isClearingUnusedData)
+            } header: {
+                Text("Unused Data")
+            }
+
+            Section {
+                Text("Remove the active project's copied media, selected music working file, current preview, current final video, and narration preview data.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
+
+                Button(role: .destructive) {
+                    viewModel.clearCurrentProjectData()
+                } label: {
+                    HStack {
+                        if viewModel.isClearingCurrentProjectData {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(viewModel.isClearingCurrentProjectData ? "Clearing..." : "Clear Current Project Data")
+                    }
+                }
+                .disabled(viewModel.isClearingCurrentProjectData)
+            } header: {
+                Text("Current Project")
+            }
+
+            if !viewModel.storageCleanupFeedback.isEmpty {
+                Section {
+                    Text(viewModel.storageCleanupFeedback)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                } header: {
+                    Text("Last Action")
+                }
+            }
+        }
+        .navigationTitle("Storage")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            viewModel.refreshStorageUsage()
+        }
+    }
+
+    private var musicLibrarySheet: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack {
+                        Text("\(viewModel.musicLibraryItems.count) built-in tracks")
+                            .font(.headline.weight(.semibold))
+                        Spacer()
+                        if viewModel.isLoadingMusicLibrary {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
+
+                    Button {
+                        viewModel.refreshMusicLibrary()
+                    } label: {
+                        HStack {
+                            if viewModel.isLoadingMusicLibrary {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                            Text(viewModel.isLoadingMusicLibrary ? "Refreshing..." : "Refresh Music Library")
+                        }
+                    }
+                    .disabled(viewModel.isLoadingMusicLibrary)
+                }
+
+                ForEach(viewModel.musicLibraryItems) { item in
+                    Button {
+                        viewModel.selectMusicLibraryItem(item)
+                        isMusicBrowserPresented = false
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                Text(item.name)
+                                    .font(.subheadline.weight(.semibold))
+                                    .foregroundStyle(.primary)
+                                    .lineLimit(1)
+
+                                Spacer(minLength: 8)
+
+                                Text(viewModel.formattedMusicDuration(item.duration))
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                            }
+
+                            if let description = item.description, !description.isEmpty {
+                                Text(description)
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(2)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .navigationTitle("Music Library")
+            .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                viewModel.refreshMusicLibrary()
+            }
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        isMusicBrowserPresented = false
                     }
                 }
             }
@@ -1231,25 +1404,69 @@ struct ContentView: View {
                 .font(.title2.weight(.semibold))
 
             VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 10) {
-                    ZStack {
-                        Circle()
-                            .fill(Color.blue.opacity(0.14))
-                            .frame(width: 30, height: 30)
-                        Image(systemName: "music.note")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundStyle(Color.blue.opacity(0.92))
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack(alignment: .center, spacing: 12) {
+                        ZStack {
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(
+                                    LinearGradient(
+                                        colors: [
+                                            Color(red: 0.20, green: 0.45, blue: 0.86),
+                                            Color(red: 0.12, green: 0.24, blue: 0.62)
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    )
+                                )
+                                .frame(width: 44, height: 44)
+
+                            Image(systemName: "music.note")
+                                .font(.system(size: 18, weight: .bold))
+                                .foregroundStyle(.white)
+                        }
+
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("Current Music")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(Color.white.opacity(0.82))
+                                .textCase(.uppercase)
+                                .tracking(0.6)
+
+                            Text(viewModel.importedMusicName)
+                                .font(.headline.weight(.semibold))
+                                .foregroundStyle(.white)
+                                .lineLimit(2)
+                                .truncationMode(.middle)
+                        }
+
+                        Spacer(minLength: 0)
                     }
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Current Track")
+
+                    HStack(spacing: 8) {
+                        Image(systemName: viewModel.hasSelectedMusic ? "waveform.circle.fill" : "sparkles")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(Color.white.opacity(0.88))
+                        Text(viewModel.hasSelectedMusic ? "Ready for soundtrack mixing" : "No music selected yet")
                             .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Text(viewModel.importedMusicName)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(2)
-                            .truncationMode(.middle)
+                            .foregroundStyle(Color.white.opacity(0.88))
                     }
+                }
+                .padding(14)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(
+                    LinearGradient(
+                        colors: [
+                            Color(red: 0.22, green: 0.49, blue: 0.86),
+                            Color(red: 0.12, green: 0.27, blue: 0.58)
+                        ],
+                        startPoint: .topLeading,
+                        endPoint: .bottomTrailing
+                    ),
+                    in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+                )
+                .overlay {
+                    RoundedRectangle(cornerRadius: 20, style: .continuous)
+                        .stroke(Color.white.opacity(0.14), lineWidth: 1)
                 }
 
                 VStack(spacing: 12) {
@@ -1289,6 +1506,42 @@ struct ContentView: View {
                     .disabled(viewModel.isImportingMusic)
                     .opacity(viewModel.isImportingMusic ? 0.55 : 1)
 
+                    Button {
+                        viewModel.refreshMusicLibrary()
+                        isMusicBrowserPresented = true
+                    } label: {
+                        HStack(spacing: 10) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(.white.opacity(0.18))
+                                    .frame(width: 30, height: 30)
+                                Image(systemName: "music.note.list")
+                                    .font(.system(size: 14, weight: .bold))
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Music Library")
+                                    .font(.subheadline.weight(.semibold))
+                            }
+                            Spacer()
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .background(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.23, green: 0.58, blue: 0.63),
+                                Color(red: 0.11, green: 0.35, blue: 0.39)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    )
+                    .disabled(viewModel.isImportingMusic)
+
                     PhotosPicker(
                         selection: $selectedMusicVideoItem,
                         matching: .videos
@@ -1302,7 +1555,7 @@ struct ContentView: View {
                                     .font(.system(size: 14, weight: .bold))
                             }
                             VStack(alignment: .leading, spacing: 2) {
-                                Text("Import Video")
+                                Text("Extract Soundtracks")
                                     .font(.subheadline.weight(.semibold))
                             }
                             Spacer()
@@ -1381,23 +1634,6 @@ struct ContentView: View {
             .padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.white.opacity(0.58), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Built-In Soundtracks")
-                    .font(.headline)
-                Picker("Demo Track", selection: $viewModel.selectedDemoTrackID) {
-                    ForEach(viewModel.demoTracks) { track in
-                        Text("\(track.name) • \(track.description)").tag(track.id)
-                    }
-                }
-                .pickerStyle(.menu)
-            }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .onChange(of: viewModel.selectedDemoTrackID) { _, _ in
-                viewModel.loadSelectedBundledMusic()
-            }
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Volume In Video")

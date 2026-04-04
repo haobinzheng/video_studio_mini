@@ -11,15 +11,15 @@ struct VideoExporter {
     }
 
     enum AspectRatio: String, CaseIterable, Identifiable {
-        case vertical = "9:16"
+        case widescreen = "16:9"
         case classic = "4:3"
 
         var id: String { rawValue }
 
         var renderSize: CGSize {
             switch self {
-            case .vertical:
-                return CGSize(width: 720, height: 1280)
+            case .widescreen:
+                return CGSize(width: 1280, height: 720)
             case .classic:
                 return CGSize(width: 960, height: 720)
             }
@@ -62,16 +62,16 @@ struct VideoExporter {
 
         func renderSize(for aspectRatio: AspectRatio) -> CGSize {
             switch (self, aspectRatio) {
-            case (.preview, .vertical):
-                return CGSize(width: 540, height: 960)
+            case (.preview, .widescreen):
+                return CGSize(width: 960, height: 540)
             case (.preview, .classic):
                 return CGSize(width: 720, height: 540)
-            case (.finalStandard, .vertical):
-                return CGSize(width: 720, height: 1280)
+            case (.finalStandard, .widescreen):
+                return CGSize(width: 1280, height: 720)
             case (.finalStandard, .classic):
                 return CGSize(width: 960, height: 720)
-            case (.finalHigh, .vertical):
-                return CGSize(width: 900, height: 1600)
+            case (.finalHigh, .widescreen):
+                return CGSize(width: 1600, height: 900)
             case (.finalHigh, .classic):
                 return CGSize(width: 1200, height: 900)
             }
@@ -2154,9 +2154,9 @@ struct VideoExporter {
                     case .preview:
                         return baseSize
                     case .finalStandard:
-                        return aspectRatio == .vertical ? CGSize(width: 1080, height: 1920) : CGSize(width: 1440, height: 1080)
+                        return aspectRatio == .widescreen ? CGSize(width: 1920, height: 1080) : CGSize(width: 1440, height: 1080)
                     case .finalHigh:
-                        return aspectRatio == .vertical ? CGSize(width: 1440, height: 2560) : CGSize(width: 1920, height: 1440)
+                        return aspectRatio == .widescreen ? CGSize(width: 2560, height: 1440) : CGSize(width: 1920, height: 1440)
                     }
                 }()
                 let maxLongEdge: CGFloat = {
@@ -2193,7 +2193,7 @@ struct VideoExporter {
             case .finalStandard:
                 if hasHeavyVideoLoad || seconds > 900 {
                     return RenderProfile(
-                        renderSize: aspectRatio == .vertical ? CGSize(width: 360, height: 640) : CGSize(width: 480, height: 360),
+                        renderSize: aspectRatio == .widescreen ? CGSize(width: 640, height: 360) : CGSize(width: 480, height: 360),
                         frameRate: 10,
                         longFormOptimized: true,
                         videoSampleStride: 1
@@ -2201,14 +2201,14 @@ struct VideoExporter {
                 }
                 if seconds > 420 {
                     return RenderProfile(
-                        renderSize: aspectRatio == .vertical ? CGSize(width: 540, height: 960) : CGSize(width: 720, height: 540),
+                        renderSize: aspectRatio == .widescreen ? CGSize(width: 960, height: 540) : CGSize(width: 720, height: 540),
                         frameRate: 10,
                         longFormOptimized: true,
                         videoSampleStride: 1
                     )
                 }
                 return RenderProfile(
-                    renderSize: aspectRatio == .vertical ? CGSize(width: 540, height: 960) : CGSize(width: 720, height: 540),
+                    renderSize: aspectRatio == .widescreen ? CGSize(width: 960, height: 540) : CGSize(width: 720, height: 540),
                     frameRate: baseRate,
                     longFormOptimized: false,
                     videoSampleStride: 1
@@ -2216,7 +2216,7 @@ struct VideoExporter {
             case .finalHigh:
                 if hasHeavyVideoLoad || seconds > 900 {
                     return RenderProfile(
-                        renderSize: aspectRatio == .vertical ? CGSize(width: 540, height: 960) : CGSize(width: 720, height: 540),
+                        renderSize: aspectRatio == .widescreen ? CGSize(width: 960, height: 540) : CGSize(width: 720, height: 540),
                         frameRate: 12,
                         longFormOptimized: true,
                         videoSampleStride: 1
@@ -2224,14 +2224,14 @@ struct VideoExporter {
                 }
                 if seconds > 420 {
                     return RenderProfile(
-                        renderSize: aspectRatio == .vertical ? CGSize(width: 720, height: 1280) : CGSize(width: 960, height: 720),
+                        renderSize: aspectRatio == .widescreen ? CGSize(width: 1280, height: 720) : CGSize(width: 960, height: 720),
                         frameRate: 12,
                         longFormOptimized: true,
                         videoSampleStride: 1
                     )
                 }
                 return RenderProfile(
-                    renderSize: aspectRatio == .vertical ? CGSize(width: 720, height: 1280) : CGSize(width: 960, height: 720),
+                    renderSize: aspectRatio == .widescreen ? CGSize(width: 1280, height: 720) : CGSize(width: 960, height: 720),
                     frameRate: baseRate,
                     longFormOptimized: false,
                     videoSampleStride: 1
@@ -2249,7 +2249,7 @@ struct VideoExporter {
         case .finalStandard:
             if hasHeavyVideoLoad || seconds > 900 {
                 return RenderProfile(
-                    renderSize: aspectRatio == .vertical ? CGSize(width: 360, height: 640) : CGSize(width: 480, height: 360),
+                    renderSize: aspectRatio == .widescreen ? CGSize(width: 640, height: 360) : CGSize(width: 480, height: 360),
                     frameRate: 8,
                     longFormOptimized: true,
                     videoSampleStride: 2
@@ -2257,7 +2257,7 @@ struct VideoExporter {
             }
             if seconds > 420 {
                 return RenderProfile(
-                    renderSize: aspectRatio == .vertical ? CGSize(width: 640, height: 1136) : CGSize(width: 854, height: 640),
+                    renderSize: aspectRatio == .widescreen ? CGSize(width: 1136, height: 640) : CGSize(width: 854, height: 640),
                     frameRate: 6,
                     longFormOptimized: true,
                     videoSampleStride: 4
@@ -2272,7 +2272,7 @@ struct VideoExporter {
         case .finalHigh:
             if hasHeavyVideoLoad || seconds > 900 {
                 return RenderProfile(
-                    renderSize: aspectRatio == .vertical ? CGSize(width: 360, height: 640) : CGSize(width: 480, height: 360),
+                    renderSize: aspectRatio == .widescreen ? CGSize(width: 640, height: 360) : CGSize(width: 480, height: 360),
                     frameRate: 10,
                     longFormOptimized: true,
                     videoSampleStride: 2
@@ -2280,14 +2280,14 @@ struct VideoExporter {
             }
             if seconds > 420 {
                 return RenderProfile(
-                    renderSize: aspectRatio == .vertical ? CGSize(width: 720, height: 1280) : CGSize(width: 960, height: 720),
+                    renderSize: aspectRatio == .widescreen ? CGSize(width: 1280, height: 720) : CGSize(width: 960, height: 720),
                     frameRate: 8,
                     longFormOptimized: true,
                     videoSampleStride: 3
                 )
             }
             return RenderProfile(
-                renderSize: aspectRatio == .vertical ? CGSize(width: 720, height: 1280) : CGSize(width: 960, height: 720),
+                renderSize: aspectRatio == .widescreen ? CGSize(width: 1280, height: 720) : CGSize(width: 960, height: 720),
                 frameRate: 10,
                 longFormOptimized: true,
                 videoSampleStride: 2
@@ -2314,7 +2314,7 @@ struct VideoExporter {
             return minimumSize
         }
 
-        let fitted = AVMakeRect(aspectRatio: aspectRatio == .vertical ? CGSize(width: 9, height: 16) : CGSize(width: 4, height: 3),
+        let fitted = AVMakeRect(aspectRatio: aspectRatio == .widescreen ? CGSize(width: 16, height: 9) : CGSize(width: 4, height: 3),
                                 insideRect: CGRect(origin: .zero, size: largestMediaSize)).size
 
         let resolvedFitted: CGSize = {
