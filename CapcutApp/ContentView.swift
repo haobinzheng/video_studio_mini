@@ -21,6 +21,7 @@ struct ContentView: View {
     @State private var draggedMediaItem: AppViewModel.MediaItem?
     @State private var renderPreviewPlayer = AVPlayer()
     @State private var scriptScrollProxy: ScrollViewProxy?
+    @State private var isSettingsPresented = false
     @FocusState private var isNarrationFocused: Bool
 
     var body: some View {
@@ -52,6 +53,9 @@ struct ContentView: View {
             .background(appBackground)
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
+            .sheet(isPresented: $isSettingsPresented) {
+                settingsSheet
+            }
             .fileImporter(
                 isPresented: $isMusicImporterPresented,
                 allowedContentTypes: [.audio, .mpeg4Audio, .mp3, .wav, .movie, .video, .mpeg4Movie, .quickTimeMovie]
@@ -136,41 +140,161 @@ struct ContentView: View {
     }
 
     private var brandHeader: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.94, green: 0.46, blue: 0.22),
-                                Color(red: 0.79, green: 0.23, blue: 0.10)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 56, height: 56)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 12) {
+                HStack(spacing: 12) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 20, style: .continuous)
+                            .fill(
+                                LinearGradient(
+                                    colors: [
+                                        Color(red: 0.94, green: 0.46, blue: 0.22),
+                                        Color(red: 0.79, green: 0.23, blue: 0.10)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                )
+                            )
+                            .frame(width: 48, height: 48)
 
-                Image(systemName: "film.stack.fill")
-                    .font(.system(size: 24, weight: .bold))
-                    .foregroundStyle(.white)
+                        Image(systemName: "film.stack.fill")
+                            .font(.system(size: 20, weight: .bold))
+                            .foregroundStyle(.white)
+                    }
+
+                    Text("FluxCut Studio")
+                        .font(.title3.weight(.bold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                }
+
+                Spacer(minLength: 8)
+
+                Button {
+                    isNarrationFocused = false
+                    isSettingsPresented = true
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 32, height: 32)
+                        .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Settings")
             }
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text("FluxCut Studio")
-                    .font(.title2.weight(.bold))
-                    .foregroundStyle(.primary)
-                Text("Script. Media. Music. All in Flow.")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
+            Text("Script. Media. Music. All in Flow.")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.white.opacity(0.58), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+
+    private var settingsSheet: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack {
+                        Text("App")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("FluxCut Studio")
+                    }
+                    HStack {
+                        Text("Version")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(appVersionLabel)
+                    }
+                    Text("Manage voices, media, music, and exports from one place. Clear unused data here whenever storage grows too much.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
+                } header: {
+                    Text("About")
+                }
+
+                Section {
+                    Text("Clear old rendered videos, narration preview files, extracted cache, and stale imported media copies that are no longer part of the current project.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
+
+                    if !viewModel.storageCleanupFeedback.isEmpty {
+                        Text(viewModel.storageCleanupFeedback)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                    }
+
+                    Button(role: .destructive) {
+                        viewModel.clearUnusedDataAndCache()
+                    } label: {
+                        HStack {
+                            if viewModel.isClearingUnusedData {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                            Text(viewModel.isClearingUnusedData ? "Clearing..." : "Clear Unused Data and Cache")
+                        }
+                    }
+                    .disabled(viewModel.isClearingUnusedData)
+                } header: {
+                    Text("Unused Data")
+                }
+
+                Section {
+                    Text("Remove the active project's copied media, selected music working file, current preview, current final video, and narration preview data.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
+
+                    Button(role: .destructive) {
+                        viewModel.clearCurrentProjectData()
+                    } label: {
+                        HStack {
+                            if viewModel.isClearingCurrentProjectData {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                            Text(viewModel.isClearingCurrentProjectData ? "Clearing..." : "Clear Current Project Data")
+                        }
+                    }
+                    .disabled(viewModel.isClearingCurrentProjectData)
+                } header: {
+                    Text("Current Project")
+                }
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        isSettingsPresented = false
+                    }
+                }
+            }
+        }
+    }
+
+    private var appVersionLabel: String {
+        let shortVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let buildNumber = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+
+        switch (shortVersion, buildNumber) {
+        case let (.some(version), .some(build)):
+            return "\(version) (\(build))"
+        case let (.some(version), .none):
+            return version
+        case let (.none, .some(build)):
+            return build
+        default:
+            return "1.0"
+        }
     }
 
     @ViewBuilder

@@ -38,6 +38,19 @@ final class AppViewModel: NSObject, ObservableObject {
     private static let savedNarrationDraftKey = "fluxcut.savedNarrationDraft"
     private static let hiddenVoiceIdentifiersKey = "fluxcut.hiddenVoiceIdentifiers"
 
+    private struct StorageCleanupResult: Sendable {
+        var removedItemCount: Int = 0
+        var removedBytes: Int64 = 0
+    }
+
+    private final class ExportSessionBox: @unchecked Sendable {
+        let session: AVAssetExportSession
+
+        init(_ session: AVAssetExportSession) {
+            self.session = session
+        }
+    }
+
     struct MediaItem: Identifiable, Equatable {
         enum Kind: Equatable {
             case photo
@@ -206,6 +219,9 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var hasPendingPreviewChanges = true
     @Published var hasPendingFinalVideoChanges = true
     @Published var voiceReloadFeedback = ""
+    @Published var isClearingUnusedData = false
+    @Published var isClearingCurrentProjectData = false
+    @Published var storageCleanupFeedback = ""
 
     private let videoExporter = VideoExporter()
     private let narrationPreviewBuilder = NarrationPreviewBuilder()
@@ -577,6 +593,83 @@ final class AppViewModel: NSObject, ObservableObject {
         statusMessage = "Media cleared. Import a new set whenever you're ready."
     }
 
+    func clearUnusedDataAndCache() {
+        guard !isClearingUnusedData else { return }
+
+        let keepURLs = currentProtectedStorageURLs()
+        clearNarrationPreviewState(resetCaption: true)
+        isClearingUnusedData = true
+        storageCleanupFeedback = "Clearing unused data and cache..."
+        statusMessage = "Clearing unused data and cache."
+
+        Task {
+            let result = await Task.detached(priority: .utility) {
+                Self.performStorageCleanup(keeping: keepURLs)
+            }.value
+
+            isClearingUnusedData = false
+            let formatter = ByteCountFormatter()
+            formatter.allowedUnits = [.useKB, .useMB, .useGB]
+            formatter.countStyle = .file
+            let sizeLabel = formatter.string(fromByteCount: result.removedBytes)
+            storageCleanupFeedback = result.removedItemCount == 0
+                ? "No unused data was found."
+                : "Removed \(result.removedItemCount) cached item(s) • \(sizeLabel)"
+            statusMessage = result.removedItemCount == 0
+                ? "No unused data was found to remove."
+                : "Unused data and cache cleared."
+        }
+    }
+
+    func clearCurrentProjectData() {
+        guard !isClearingCurrentProjectData else { return }
+
+        let currentMediaItems = mediaItems
+        let currentMusicURL = importedMusicURL?.standardizedFileURL
+        let currentExportURL = exportedVideoURL?.standardizedFileURL
+        let currentPreviewURL = videoPreviewURL?.standardizedFileURL
+
+        stopMusicSilently()
+        clearNarrationPreviewState(resetCaption: true)
+        mediaItems = []
+        selectedPhotoItems = []
+        currentSlideIndex = 0
+        importedMusicURL = nil
+        importedMusicName = "No music selected"
+        audioPlayer = nil
+        exportedVideoURL = nil
+        videoPreviewURL = nil
+        exportProgress = 0
+        hasPendingPreviewChanges = true
+        hasPendingFinalVideoChanges = true
+        isClearingCurrentProjectData = true
+        storageCleanupFeedback = "Clearing current project data..."
+        statusMessage = "Clearing current project data."
+
+        Task {
+            let result = await Task.detached(priority: .utility) {
+                Self.performCurrentProjectCleanup(
+                    mediaItems: currentMediaItems,
+                    musicURL: currentMusicURL,
+                    exportedVideoURL: currentExportURL,
+                    previewVideoURL: currentPreviewURL
+                )
+            }.value
+
+            isClearingCurrentProjectData = false
+            let formatter = ByteCountFormatter()
+            formatter.allowedUnits = [.useKB, .useMB, .useGB]
+            formatter.countStyle = .file
+            let sizeLabel = formatter.string(fromByteCount: result.removedBytes)
+            storageCleanupFeedback = result.removedItemCount == 0
+                ? "Current project data was already clear."
+                : "Removed \(result.removedItemCount) current project item(s) • \(sizeLabel)"
+            statusMessage = result.removedItemCount == 0
+                ? "Current project data was already clear."
+                : "Current project data cleared."
+        }
+    }
+
     func moveMediaItem(withId sourceID: UUID, before targetID: UUID) {
         guard sourceID != targetID,
               let sourceIndex = mediaItems.firstIndex(where: { $0.id == sourceID }),
@@ -852,9 +945,9 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     private func cleanupStaleMediaVideoCopies(from previousItems: [MediaItem], keeping currentItems: [MediaItem]) {
-        let activeURLs = Set(currentItems.compactMap(mediaVideoURLIfManagedCopy(for:)))
+        let activeURLs = Set(currentItems.compactMap({ self.mediaVideoURLIfManagedCopy(for: $0) }))
 
-        for url in previousItems.compactMap(mediaVideoURLIfManagedCopy(for:)) where !activeURLs.contains(url) {
+        for url in previousItems.compactMap({ self.mediaVideoURLIfManagedCopy(for: $0) }) where !activeURLs.contains(url) {
             try? FileManager.default.removeItem(at: url)
         }
     }
@@ -876,14 +969,190 @@ final class AppViewModel: NSObject, ObservableObject {
         return url
     }
 
+    private func currentProtectedStorageURLs() -> Set<URL> {
+        var urls = Set(mediaItems.compactMap({ self.mediaVideoURLIfManagedCopy(for: $0) }).map { $0.standardizedFileURL })
+
+        if let exportedVideoURL {
+            urls.insert(exportedVideoURL.standardizedFileURL)
+        }
+        if let videoPreviewURL {
+            urls.insert(videoPreviewURL.standardizedFileURL)
+        }
+        if let importedMusicURL {
+            urls.insert(importedMusicURL.standardizedFileURL)
+        }
+
+        return urls
+    }
+
+    nonisolated private static func performStorageCleanup(keeping protectedURLs: Set<URL>) -> StorageCleanupResult {
+        let fileManager = FileManager.default
+        let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let standardizedProtected = Set(protectedURLs.map { $0.standardizedFileURL })
+        var result = StorageCleanupResult()
+
+        let renderedVideosFolder = documents.appendingPathComponent("RenderedVideos", isDirectory: true)
+        result = mergeCleanupResults(
+            result,
+            cleanupDirectoryContents(at: renderedVideosFolder, keeping: standardizedProtected)
+        )
+
+        let narrationPreviewFolder = documents.appendingPathComponent("NarrationPreview", isDirectory: true)
+        result = mergeCleanupResults(
+            result,
+            cleanupDirectoryContents(at: narrationPreviewFolder, keeping: [])
+        )
+
+        let sharedAudioFolder = documents.appendingPathComponent("SharedAudio", isDirectory: true)
+        result = mergeCleanupResults(
+            result,
+            cleanupDirectoryContents(at: sharedAudioFolder, keeping: standardizedProtected)
+        )
+
+        if let documentContents = try? fileManager.contentsOfDirectory(
+            at: documents,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) {
+            for url in documentContents {
+                let standardizedURL = url.standardizedFileURL
+                guard !standardizedProtected.contains(standardizedURL) else { continue }
+                result = mergeCleanupResults(result, removeItem(at: standardizedURL))
+            }
+        }
+
+        let caches = fileManager.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        result = mergeCleanupResults(
+            result,
+            cleanupDirectoryContents(at: caches, keeping: [])
+        )
+
+        result = mergeCleanupResults(
+            result,
+            cleanupDirectoryContents(at: fileManager.temporaryDirectory, keeping: [])
+        )
+
+        return result
+    }
+
+    nonisolated private static func performCurrentProjectCleanup(
+        mediaItems: [MediaItem],
+        musicURL: URL?,
+        exportedVideoURL: URL?,
+        previewVideoURL: URL?
+    ) -> StorageCleanupResult {
+        var result = StorageCleanupResult()
+
+        for url in mediaItems.compactMap({ Self.mediaVideoIfManagedCopyURL(for: $0) as URL? }) {
+            result = mergeCleanupResults(result, removeItem(at: url.standardizedFileURL))
+        }
+        if let musicURL {
+            result = mergeCleanupResults(result, removeItem(at: musicURL.standardizedFileURL))
+        }
+        if let exportedVideoURL {
+            result = mergeCleanupResults(result, removeItem(at: exportedVideoURL.standardizedFileURL))
+        }
+        if let previewVideoURL {
+            result = mergeCleanupResults(result, removeItem(at: previewVideoURL.standardizedFileURL))
+        }
+
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        result = mergeCleanupResults(result, cleanupDirectoryContents(at: documents, keeping: []))
+        let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
+        result = mergeCleanupResults(result, cleanupDirectoryContents(at: caches, keeping: []))
+        result = mergeCleanupResults(result, cleanupDirectoryContents(at: FileManager.default.temporaryDirectory, keeping: []))
+
+        return result
+    }
+
+    nonisolated private static func cleanupDirectoryContents(at directoryURL: URL, keeping protectedURLs: Set<URL>) -> StorageCleanupResult {
+        let fileManager = FileManager.default
+        guard let contents = try? fileManager.contentsOfDirectory(
+            at: directoryURL,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            return StorageCleanupResult()
+        }
+
+        var result = StorageCleanupResult()
+        for url in contents {
+            let standardizedURL = url.standardizedFileURL
+            guard !protectedURLs.contains(standardizedURL) else { continue }
+            result = mergeCleanupResults(result, removeItem(at: standardizedURL))
+        }
+        return result
+    }
+
+    nonisolated private static func removeItem(at url: URL) -> StorageCleanupResult {
+        let size = itemSize(at: url)
+        do {
+            try FileManager.default.removeItem(at: url)
+            return StorageCleanupResult(removedItemCount: 1, removedBytes: size)
+        } catch {
+            return StorageCleanupResult()
+        }
+    }
+
+    nonisolated private static func itemSize(at url: URL) -> Int64 {
+        let fileManager = FileManager.default
+        if let values = try? url.resourceValues(forKeys: [.isDirectoryKey]), values.isDirectory == true {
+            let enumerator = fileManager.enumerator(
+                at: url,
+                includingPropertiesForKeys: [.fileSizeKey, .isRegularFileKey],
+                options: [.skipsHiddenFiles]
+            )
+            var total: Int64 = 0
+            while let child = enumerator?.nextObject() as? URL {
+                let values = try? child.resourceValues(forKeys: [.isRegularFileKey, .fileSizeKey])
+                if values?.isRegularFile == true {
+                    total += Int64(values?.fileSize ?? 0)
+                }
+            }
+            return total
+        }
+
+        let values = try? url.resourceValues(forKeys: [.fileSizeKey])
+        return Int64(values?.fileSize ?? 0)
+    }
+
+    nonisolated private static func mergeCleanupResults(_ lhs: StorageCleanupResult, _ rhs: StorageCleanupResult) -> StorageCleanupResult {
+        StorageCleanupResult(
+            removedItemCount: lhs.removedItemCount + rhs.removedItemCount,
+            removedBytes: lhs.removedBytes + rhs.removedBytes
+        )
+    }
+
+    nonisolated private static func mediaVideoIfManagedCopyURL(for url: URL) -> URL? {
+        guard url.lastPathComponent.hasPrefix("picked-video-") else {
+            return nil
+        }
+
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        guard url.deletingLastPathComponent() == documents else {
+            return nil
+        }
+
+        return url
+    }
+
+    nonisolated private static func mediaVideoIfManagedCopyURL(for item: MediaItem) -> URL? {
+        guard case let .video(url, _) = item.kind else {
+            return nil
+        }
+        return Self.mediaVideoIfManagedCopyURL(for: url)
+    }
+
     private func importedVideoURL(from item: PhotosPickerItem) async -> URL? {
         if let pickedMovie = try? await item.loadTransferable(type: PickedMovie.self),
            let copiedURL = try? copyImportedFileToDocuments(pickedMovie.url) {
+            cleanupTemporaryImportSourceIfNeeded(pickedMovie.url)
             return copiedURL
         }
 
         if let pickedURL = try? await item.loadTransferable(type: URL.self),
            let copiedURL = try? copyImportedFileToDocuments(pickedURL) {
+            cleanupTemporaryImportSourceIfNeeded(pickedURL)
             return copiedURL
         }
 
@@ -901,6 +1170,19 @@ final class AppViewModel: NSObject, ObservableObject {
             return destination
         } catch {
             return nil
+        }
+    }
+
+    private func cleanupTemporaryImportSourceIfNeeded(_ url: URL) {
+        guard url.isFileURL else { return }
+
+        let temporaryPath = FileManager.default.temporaryDirectory.path
+        let parentURL = url.deletingLastPathComponent()
+
+        if parentURL.path.hasPrefix(temporaryPath) {
+            try? FileManager.default.removeItem(at: parentURL)
+        } else if url.path.hasPrefix(temporaryPath) {
+            try? FileManager.default.removeItem(at: url)
         }
     }
 
@@ -1135,13 +1417,14 @@ final class AppViewModel: NSObject, ObservableObject {
         exportSession.outputFileType = .m4a
         exportSession.shouldOptimizeForNetworkUse = false
 
+        let exportSessionBox = ExportSessionBox(exportSession)
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-            exportSession.exportAsynchronously {
-                switch exportSession.status {
+            exportSessionBox.session.exportAsynchronously {
+                switch exportSessionBox.session.status {
                 case .completed:
                     continuation.resume()
                 case .failed:
-                    continuation.resume(throwing: exportSession.error ?? NSError(
+                    continuation.resume(throwing: exportSessionBox.session.error ?? NSError(
                         domain: "FluxCutMusicImport",
                         code: 4,
                         userInfo: [NSLocalizedDescriptionKey: "Audio extraction from that video failed."]
