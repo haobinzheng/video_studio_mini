@@ -168,6 +168,18 @@ final class AppViewModel: NSObject, ObservableObject {
             }
         }
     }
+    @Published var includesFinalCaptions = true {
+        didSet {
+            if oldValue != includesFinalCaptions {
+                hasPendingFinalVideoChanges = true
+                exportedVideoURL = nil
+                exportProgress = 0
+                statusMessage = includesFinalCaptions
+                    ? "Captions will be included in the final export."
+                    : "Final export will be created without captions."
+            }
+        }
+    }
     @Published var musicVolume: Double = 0.6 {
         didSet {
             audioPlayer?.volume = Float(musicVolume)
@@ -646,11 +658,12 @@ final class AppViewModel: NSObject, ObservableObject {
         let exporter = videoExporter
         let aspectRatio = selectedAspectRatio
         let timingMode = selectedTimingMode
+        let includeCaptions = renderQuality == .preview ? false : includesFinalCaptions
 
         Task {
             do {
                 let shouldPrepareNarration = timingMode != .video && !narrationText.isEmpty
-                let requiresFullNarrationPreview = renderQuality != .preview && timingMode == .story
+                let requiresFullNarrationPreview = renderQuality != .preview && timingMode != .video
                 if shouldPrepareNarration, needsPreviewRefresh(
                     for: narrationText,
                     voiceIdentifier: voiceIdentifier,
@@ -660,7 +673,7 @@ final class AppViewModel: NSObject, ObservableObject {
                     try await prepareNarrationPreview(
                         text: narrationText,
                         voiceIdentifier: voiceIdentifier,
-                        maximumDuration: renderQuality == .preview ? 180 : nil,
+                        maximumDuration: requiresFullNarrationPreview ? nil : (renderQuality == .preview ? 180 : nil),
                         startedMessage: renderQuality == .preview
                             ? "Preparing narration and captions for the quick preview."
                             : "Preparing narration and captions for video export.",
@@ -688,6 +701,7 @@ final class AppViewModel: NSObject, ObservableObject {
                         voiceIdentifier: voiceIdentifier,
                         aspectRatio: aspectRatio,
                         timingMode: timingMode,
+                        includeCaptions: includeCaptions,
                         renderQuality: renderQuality,
                         externalCues: previewCues,
                         externalNarrationAudioURL: previewAudioURL,
@@ -1363,6 +1377,10 @@ final class AppViewModel: NSObject, ObservableObject {
             case .video:
                 return partial
             }
+        }
+
+        if totalVideoSeconds == 0, photoCount > 0 {
+            return 300
         }
 
         let photoSeconds = max(Double(photoCount) * 1.6, photoCount > 0 ? 1.6 : 0)
