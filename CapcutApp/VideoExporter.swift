@@ -338,7 +338,9 @@ struct VideoExporter {
             maxDuration: resolvedDuration
         )
 
-        if timingMode == .realLife {
+        let shouldUseSmoothStoryExport = timingMode == .story && !includeCaptions && renderQuality != .preview
+
+        if timingMode == .realLife || shouldUseSmoothStoryExport {
             progressHandler?(0.24, "Building a real-life composition.")
             try await exportRealLifeComposition(
                 timelineSegments: timelineSegments,
@@ -1024,6 +1026,9 @@ struct VideoExporter {
         var audioMixParameters: [AVMutableAudioMixInputParameters] = []
         var segmentLayouts: [StitchedVideoSegmentLayout] = []
         let resolvedVideoVolume = Float(min(max(videoAudioVolume, 0), 1))
+        let compositionVideoAudioTrack = resolvedVideoVolume > 0
+            ? composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+            : nil
 
         for (index, segment) in timelineSegments.enumerated() {
             let completion = Double(index) / Double(max(timelineSegments.count, 1))
@@ -1087,20 +1092,20 @@ struct VideoExporter {
 
                 if resolvedVideoVolume > 0,
                    let sourceAudioTrack = try await asset.loadTracks(withMediaType: .audio).first,
-                   let compositionAudioTrack = composition.addMutableTrack(
-                    withMediaType: .audio,
-                    preferredTrackID: kCMPersistentTrackID_Invalid
-                   ) {
-                    try compositionAudioTrack.insertTimeRange(
+                   let compositionVideoAudioTrack {
+                    try compositionVideoAudioTrack.insertTimeRange(
                         CMTimeRange(start: .zero, duration: clipDuration),
                         of: sourceAudioTrack,
                         at: segment.timeRange.start
                     )
-                    let clipAudioParameters = AVMutableAudioMixInputParameters(track: compositionAudioTrack)
-                    clipAudioParameters.setVolume(resolvedVideoVolume, at: segment.timeRange.start)
-                    audioMixParameters.append(clipAudioParameters)
                 }
             }
+        }
+
+        if let compositionVideoAudioTrack, resolvedVideoVolume > 0 {
+            let clipAudioParameters = AVMutableAudioMixInputParameters(track: compositionVideoAudioTrack)
+            clipAudioParameters.setVolume(resolvedVideoVolume, at: .zero)
+            audioMixParameters.append(clipAudioParameters)
         }
 
         if !narrationURLs.isEmpty,
