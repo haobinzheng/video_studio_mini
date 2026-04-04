@@ -567,9 +567,11 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     func clearMediaSelection() {
+        let previousMediaItems = mediaItems
         selectedPhotoItems = []
         mediaItems = []
         currentSlideIndex = 0
+        cleanupStaleMediaVideoCopies(from: previousMediaItems, keeping: [])
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
         statusMessage = "Media cleared. Import a new set whenever you're ready."
@@ -809,9 +811,12 @@ final class AppViewModel: NSObject, ObservableObject {
             isLoadingMediaSelection = false
         }
 
+        let previousMediaItems = mediaItems
+
         guard !pickerItems.isEmpty else {
             mediaItems = []
             currentSlideIndex = 0
+            cleanupStaleMediaVideoCopies(from: previousMediaItems, keeping: [])
             statusMessage = "Media cleared. Pick new photos or videos to continue."
             return
         }
@@ -838,11 +843,37 @@ final class AppViewModel: NSObject, ObservableObject {
 
         mediaItems = loadedMedia
         currentSlideIndex = 0
+        cleanupStaleMediaVideoCopies(from: previousMediaItems, keeping: loadedMedia)
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
         statusMessage = loadedMedia.isEmpty
             ? "No valid photos or videos were selected."
             : "\(loadedMedia.count) media item(s) ready for your project."
+    }
+
+    private func cleanupStaleMediaVideoCopies(from previousItems: [MediaItem], keeping currentItems: [MediaItem]) {
+        let activeURLs = Set(currentItems.compactMap(mediaVideoURLIfManagedCopy(for:)))
+
+        for url in previousItems.compactMap(mediaVideoURLIfManagedCopy(for:)) where !activeURLs.contains(url) {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
+    private func mediaVideoURLIfManagedCopy(for item: MediaItem) -> URL? {
+        guard case let .video(url, _) = item.kind else {
+            return nil
+        }
+
+        guard url.lastPathComponent.hasPrefix("picked-video-") else {
+            return nil
+        }
+
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        guard url.deletingLastPathComponent() == documents else {
+            return nil
+        }
+
+        return url
     }
 
     private func importedVideoURL(from item: PhotosPickerItem) async -> URL? {
@@ -975,6 +1006,15 @@ final class AppViewModel: NSObject, ObservableObject {
             didConfigureAudioSession = true
         } catch {
             statusMessage = "Audio session setup failed."
+        }
+    }
+
+    func prepareVideoPlaybackAudioSession() {
+        configureAudioSessionIfNeeded()
+        do {
+            try AVAudioSession.sharedInstance().setActive(true)
+        } catch {
+            statusMessage = "Video playback audio could not start."
         }
     }
 

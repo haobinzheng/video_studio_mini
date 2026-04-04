@@ -711,7 +711,10 @@ struct VideoExporter {
         var audioMixParameters: [AVMutableAudioMixInputParameters] = []
 
         let resolvedVideoVolume = Float(min(max(videoAudioVolume, 0), 1))
-        if resolvedVideoVolume > 0 {
+        let compositionVideoAudioTrack = resolvedVideoVolume > 0
+            ? composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+            : nil
+        if resolvedVideoVolume > 0, let compositionVideoAudioTrack {
             for segment in timelineSegments {
                 guard case let .video(url, _) = segment.mediaItem.kind else { continue }
 
@@ -719,26 +722,21 @@ struct VideoExporter {
                 guard let clipAudioTrack = try await clipAsset.loadTracks(withMediaType: .audio).first else {
                     continue
                 }
-                guard let compositionClipAudioTrack = composition.addMutableTrack(
-                    withMediaType: .audio,
-                    preferredTrackID: kCMPersistentTrackID_Invalid
-                ) else {
-                    continue
-                }
 
                 let clipDuration = try await clipAsset.load(.duration)
                 let segmentDuration = min(segment.timeRange.duration, clipDuration)
                 guard segmentDuration > .zero else { continue }
 
-                try compositionClipAudioTrack.insertTimeRange(
+                try compositionVideoAudioTrack.insertTimeRange(
                     CMTimeRange(start: .zero, duration: segmentDuration),
                     of: clipAudioTrack,
                     at: segment.timeRange.start
                 )
-                let clipAudioParameters = AVMutableAudioMixInputParameters(track: compositionClipAudioTrack)
-                clipAudioParameters.setVolume(resolvedVideoVolume, at: .zero)
-                audioMixParameters.append(clipAudioParameters)
             }
+
+            let clipAudioParameters = AVMutableAudioMixInputParameters(track: compositionVideoAudioTrack)
+            clipAudioParameters.setVolume(resolvedVideoVolume, at: .zero)
+            audioMixParameters.append(clipAudioParameters)
         }
 
         if !narrationURLs.isEmpty,
@@ -845,14 +843,12 @@ struct VideoExporter {
 
         var audioMixParameters: [AVMutableAudioMixInputParameters] = []
         let resolvedVideoVolume = Float(min(max(videoAudioVolume, 0), 1))
-        let mayAttemptStrictPassthrough = backgroundMusicURL == nil && resolvedVideoVolume >= 0.999
+        let mayAttemptStrictPassthrough = false
         var segmentLayouts: [StitchedVideoSegmentLayout] = []
         let passthroughAudioTrack = mayAttemptStrictPassthrough
             ? composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
             : nil
         var cursor = CMTime.zero
-        var referenceTransform: CGAffineTransform?
-        var referenceNaturalSize: CGSize?
         let cappedDuration = maximumDuration
 
         for (index, item) in videoItems.enumerated() {
@@ -891,11 +887,6 @@ struct VideoExporter {
                 )
             )
 
-            if referenceTransform == nil {
-                referenceTransform = preferredTransform
-                referenceNaturalSize = naturalSize
-            }
-
             if let sourceAudioTrack = try await asset.loadTracks(withMediaType: .audio).first {
                 if mayAttemptStrictPassthrough, let passthroughAudioTrack {
                     try passthroughAudioTrack.insertTimeRange(
@@ -927,13 +918,8 @@ struct VideoExporter {
             throw ExportError.noVideos
         }
 
-        let canAttemptStrictPassthrough =
-            backgroundMusicURL == nil &&
-            resolvedVideoVolume >= 0.999 &&
-            segmentLayouts.allSatisfy {
-                guard let referenceTransform, let referenceNaturalSize else { return false }
-                return $0.preferredTransform == referenceTransform && $0.naturalSize == referenceNaturalSize
-            }
+        let horizontalRenderSize = preferredHorizontalRenderSize(for: segmentLayouts)
+        let canAttemptStrictPassthrough = false
 
         if let backgroundMusicURL {
             progressHandler?(0.72, "Mixing background music into the stitched video.")
@@ -982,7 +968,8 @@ struct VideoExporter {
                     : makeVideoComposition(
                         for: compositionVideoTrack,
                         segmentLayouts: segmentLayouts,
-                        totalDuration: totalDuration
+                        totalDuration: totalDuration,
+                        targetRenderSize: horizontalRenderSize
                     ),
                 progressMessage: canAttemptStrictPassthrough
                     ? "Exporting a passthrough video stitch."
@@ -999,11 +986,12 @@ struct VideoExporter {
                 composition,
                 presetName: AVAssetExportPresetHighestQuality,
                 outputURL: outputURL,
-                audioMixParameters: [],
+                audioMixParameters: audioMixParameters,
                 videoComposition: makeVideoComposition(
                     for: compositionVideoTrack,
                     segmentLayouts: segmentLayouts,
-                    totalDuration: totalDuration
+                    totalDuration: totalDuration,
+                    targetRenderSize: horizontalRenderSize
                 ),
                 progressMessage: "Exporting the stitched video.",
                 progressHandler: progressHandler
@@ -1313,6 +1301,22 @@ struct VideoExporter {
         return videoComposition
     }
 
+    private func preferredHorizontalRenderSize(for segmentLayouts: [StitchedVideoSegmentLayout]) -> CGSize {
+        let measuredSize = segmentLayouts.reduce(CGSize.zero) { currentMax, layout in
+            let transformedBounds = CGRect(origin: .zero, size: layout.naturalSize)
+                .applying(layout.preferredTransform)
+                .standardized
+            return CGSize(
+                width: max(currentMax.width, transformedBounds.width),
+                height: max(currentMax.height, transformedBounds.height)
+            )
+        }
+
+        let maxEdge = max(measuredSize.width, measuredSize.height, 2)
+        let minEdge = max(min(measuredSize.width, measuredSize.height), 2)
+        return CGSize(width: maxEdge, height: minEdge)
+    }
+
     private func fittedTransform(
         preferredTransform: CGAffineTransform,
         naturalSize: CGSize,
@@ -1321,15 +1325,24 @@ struct VideoExporter {
         let transformedBounds = CGRect(origin: .zero, size: naturalSize)
             .applying(preferredTransform)
             .standardized
+        let safeWidth = max(transformedBounds.width, 1)
+        let safeHeight = max(transformedBounds.height, 1)
+        let scale = min(renderSize.width / safeWidth, renderSize.height / safeHeight)
+        let scaledWidth = safeWidth * scale
+        let scaledHeight = safeHeight * scale
         let translationToOrigin = CGAffineTransform(
             translationX: -transformedBounds.minX,
             y: -transformedBounds.minY
         )
+        let scaleTransform = CGAffineTransform(scaleX: scale, y: scale)
         let centeredTranslation = CGAffineTransform(
-            translationX: (renderSize.width - transformedBounds.width) / 2,
-            y: (renderSize.height - transformedBounds.height) / 2
+            translationX: (renderSize.width - scaledWidth) / 2,
+            y: (renderSize.height - scaledHeight) / 2
         )
-        return preferredTransform.concatenating(translationToOrigin).concatenating(centeredTranslation)
+        return preferredTransform
+            .concatenating(translationToOrigin)
+            .concatenating(scaleTransform)
+            .concatenating(centeredTranslation)
     }
 
     private func makePixelBuffer(from image: UIImage, caption: String?, renderSize: CGSize) throws -> CVPixelBuffer {

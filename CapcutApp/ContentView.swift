@@ -1647,8 +1647,11 @@ struct ContentView: View {
             return
         }
 
+        viewModel.prepareVideoPlaybackAudioSession()
         renderPreviewPlayer.allowsExternalPlayback = true
         renderPreviewPlayer.usesExternalPlaybackWhileExternalScreenIsActive = true
+        renderPreviewPlayer.isMuted = false
+        renderPreviewPlayer.volume = 1.0
         renderPreviewPlayer.replaceCurrentItem(with: AVPlayerItem(url: url))
     }
 }
