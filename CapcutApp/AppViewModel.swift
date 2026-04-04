@@ -181,6 +181,36 @@ final class AppViewModel: NSObject, ObservableObject {
             }
         }
     }
+    @Published var selectedVideoModeFrameRate: VideoExporter.VideoModeFrameRate = .fps30 {
+        didSet {
+            if oldValue != selectedVideoModeFrameRate {
+                hasPendingFinalVideoChanges = true
+                exportedVideoURL = nil
+                exportProgress = 0
+                statusMessage = "Video mode frame rate updated to \(selectedVideoModeFrameRate.displayName). Build a new final render to use it."
+            }
+        }
+    }
+    @Published var selectedVideoModeResolution: VideoExporter.VideoModeResolution = .p1080 {
+        didSet {
+            if oldValue != selectedVideoModeResolution {
+                hasPendingFinalVideoChanges = true
+                exportedVideoURL = nil
+                exportProgress = 0
+                statusMessage = "Video mode resolution updated to \(selectedVideoModeResolution.rawValue). Build a new final render to use it."
+            }
+        }
+    }
+    @Published var selectedVideoModeQuality: VideoExporter.VideoModeQuality = .high {
+        didSet {
+            if oldValue != selectedVideoModeQuality {
+                hasPendingFinalVideoChanges = true
+                exportedVideoURL = nil
+                exportProgress = 0
+                statusMessage = "Video mode export quality updated to \(selectedVideoModeQuality.rawValue). Build a new final render to use it."
+            }
+        }
+    }
     @Published var includesFinalCaptions = true {
         didSet {
             if oldValue != includesFinalCaptions {
@@ -754,6 +784,11 @@ final class AppViewModel: NSObject, ObservableObject {
         let aspectRatio = selectedAspectRatio
         let timingMode = selectedTimingMode
         let includeCaptions = renderQuality == .preview ? false : includesFinalCaptions
+        let videoModeSettings = VideoExporter.VideoModeExportSettings(
+            frameRate: selectedVideoModeFrameRate,
+            resolution: selectedVideoModeResolution,
+            quality: selectedVideoModeQuality
+        )
 
         Task {
             do {
@@ -798,6 +833,7 @@ final class AppViewModel: NSObject, ObservableObject {
                         timingMode: timingMode,
                         includeCaptions: includeCaptions,
                         renderQuality: renderQuality,
+                        videoModeSettings: timingMode == .video ? videoModeSettings : nil,
                         externalCues: previewCues,
                         externalNarrationAudioURL: previewAudioURL,
                         progressHandler: { progress, message in
@@ -1562,6 +1598,11 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     var estimatedExportSpecLine: String {
+        let videoModeSettings = VideoExporter.VideoModeExportSettings(
+            frameRate: selectedVideoModeFrameRate,
+            resolution: selectedVideoModeResolution,
+            quality: selectedVideoModeQuality
+        )
         let exporterMediaItems = mediaItems.map { item in
             let kind: VideoExporter.MediaItem.Kind
             switch item.kind {
@@ -1584,7 +1625,8 @@ final class AppViewModel: NSObject, ObservableObject {
             durationSeconds: estimatedDurationSecondsForSelectedMode,
             aspectRatio: selectedAspectRatio,
             finalQuality: selectedFinalExportQuality,
-            timingMode: selectedTimingMode
+            timingMode: selectedTimingMode,
+            videoModeSettings: selectedTimingMode == .video ? videoModeSettings : nil
         )
     }
 

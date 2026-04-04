@@ -94,6 +94,73 @@ struct VideoExporter {
         }
     }
 
+    enum VideoModeFrameRate: String, CaseIterable, Identifiable {
+        case fps24 = "24"
+        case fps30 = "30"
+        case fps60 = "60"
+
+        var id: String { rawValue }
+
+        var value: Int32 {
+            switch self {
+            case .fps24:
+                return 24
+            case .fps30:
+                return 30
+            case .fps60:
+                return 60
+            }
+        }
+
+        var displayName: String {
+            "\(rawValue) fps"
+        }
+    }
+
+    enum VideoModeResolution: String, CaseIterable, Identifiable {
+        case p720 = "720p"
+        case p1080 = "1080p"
+        case p4k = "4K"
+
+        var id: String { rawValue }
+
+        var renderSize: CGSize {
+            switch self {
+            case .p720:
+                return CGSize(width: 1280, height: 720)
+            case .p1080:
+                return CGSize(width: 1920, height: 1080)
+            case .p4k:
+                return CGSize(width: 3840, height: 2160)
+            }
+        }
+    }
+
+    enum VideoModeQuality: String, CaseIterable, Identifiable {
+        case low = "Low"
+        case medium = "Medium"
+        case high = "High"
+
+        var id: String { rawValue }
+
+        var exportPresetName: String {
+            switch self {
+            case .low:
+                return AVAssetExportPresetLowQuality
+            case .medium:
+                return AVAssetExportPresetMediumQuality
+            case .high:
+                return AVAssetExportPresetHighestQuality
+            }
+        }
+    }
+
+    struct VideoModeExportSettings {
+        let frameRate: VideoModeFrameRate
+        let resolution: VideoModeResolution
+        let quality: VideoModeQuality
+    }
+
     struct MediaItem {
         enum Kind {
             case photo
@@ -227,9 +294,13 @@ struct VideoExporter {
         durationSeconds: Double,
         aspectRatio: AspectRatio,
         finalQuality: FinalExportQuality,
-        timingMode: TimingMode
+        timingMode: TimingMode,
+        videoModeSettings: VideoModeExportSettings? = nil
     ) -> String {
         if timingMode == .video {
+            if let videoModeSettings {
+                return "\(videoModeSettings.resolution.rawValue) • \(videoModeSettings.frameRate.displayName) • \(videoModeSettings.quality.rawValue) • \(approximateDurationLabel(for: durationSeconds))"
+            }
             return "Original video stitch \(approximateDurationLabel(for: durationSeconds))"
         }
 
@@ -261,6 +332,7 @@ struct VideoExporter {
         timingMode: TimingMode,
         includeCaptions: Bool = true,
         renderQuality: RenderQuality = .finalStandard,
+        videoModeSettings: VideoModeExportSettings? = nil,
         externalCues: [ExternalCue] = [],
         externalNarrationAudioURL: URL? = nil,
         progressHandler: ((Double, String) -> Void)? = nil
@@ -282,6 +354,7 @@ struct VideoExporter {
                 backgroundMusicVolume: backgroundMusicVolume,
                 videoAudioVolume: videoAudioVolume,
                 maximumDuration: renderQuality.maximumDuration,
+                videoModeSettings: renderQuality == .preview ? nil : videoModeSettings,
                 outputURL: finalURL,
                 progressHandler: progressHandler
             )
@@ -819,6 +892,7 @@ struct VideoExporter {
         backgroundMusicVolume: Double,
         videoAudioVolume: Double,
         maximumDuration: CMTime?,
+        videoModeSettings: VideoModeExportSettings?,
         outputURL: URL,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws {
@@ -920,8 +994,13 @@ struct VideoExporter {
             throw ExportError.noVideos
         }
 
-        let horizontalRenderSize = preferredHorizontalRenderSize(for: segmentLayouts)
+        let videoModeRenderSize = preferredVideoModeRenderSize(
+            for: segmentLayouts,
+            requestedResolution: videoModeSettings?.resolution.renderSize
+        )
         let canAttemptStrictPassthrough = false
+        let frameRate = videoModeSettings?.frameRate.value ?? 30
+        let presetName = videoModeSettings?.quality.exportPresetName ?? AVAssetExportPresetHighestQuality
 
         if let backgroundMusicURL {
             progressHandler?(0.72, "Mixing background music into the stitched video.")
@@ -962,7 +1041,7 @@ struct VideoExporter {
         do {
             try await exportStitchedComposition(
                 composition,
-                presetName: canAttemptStrictPassthrough ? AVAssetExportPresetPassthrough : AVAssetExportPresetHighestQuality,
+                presetName: canAttemptStrictPassthrough ? AVAssetExportPresetPassthrough : presetName,
                 outputURL: outputURL,
                 audioMixParameters: canAttemptStrictPassthrough ? [] : audioMixParameters,
                 videoComposition: canAttemptStrictPassthrough
@@ -971,7 +1050,9 @@ struct VideoExporter {
                         for: compositionVideoTrack,
                         segmentLayouts: segmentLayouts,
                         totalDuration: totalDuration,
-                        targetRenderSize: horizontalRenderSize
+                        targetRenderSize: videoModeRenderSize,
+                        frameRate: frameRate,
+                        preserveSourceScale: true
                     ),
                 progressMessage: canAttemptStrictPassthrough
                     ? "Exporting a passthrough video stitch."
@@ -986,14 +1067,16 @@ struct VideoExporter {
             progressHandler?(0.9, "Passthrough was not supported for these clips. Retrying with a high-quality stitch.")
             try await exportStitchedComposition(
                 composition,
-                presetName: AVAssetExportPresetHighestQuality,
+                presetName: presetName,
                 outputURL: outputURL,
                 audioMixParameters: audioMixParameters,
                 videoComposition: makeVideoComposition(
                     for: compositionVideoTrack,
                     segmentLayouts: segmentLayouts,
                     totalDuration: totalDuration,
-                    targetRenderSize: horizontalRenderSize
+                    targetRenderSize: videoModeRenderSize,
+                    frameRate: frameRate,
+                    preserveSourceScale: true
                 ),
                 progressMessage: "Exporting the stitched video.",
                 progressHandler: progressHandler
@@ -1176,7 +1259,9 @@ struct VideoExporter {
                 for: compositionVideoTrack,
                 segmentLayouts: segmentLayouts,
                 totalDuration: totalDuration,
-                targetRenderSize: renderSize
+                targetRenderSize: renderSize,
+                frameRate: frameRate,
+                preserveSourceScale: false
             ),
             progressMessage: "Exporting the real-life video.",
             progressHandler: progressHandler
@@ -1259,7 +1344,9 @@ struct VideoExporter {
             for: compositionVideoTrack,
             segmentLayouts: segmentLayouts,
             totalDuration: totalDuration,
-            targetRenderSize: nil
+            targetRenderSize: nil,
+            frameRate: 30,
+            preserveSourceScale: false
         )
     }
 
@@ -1267,7 +1354,9 @@ struct VideoExporter {
         for compositionVideoTrack: AVMutableCompositionTrack,
         segmentLayouts: [StitchedVideoSegmentLayout],
         totalDuration: CMTime,
-        targetRenderSize: CGSize?
+        targetRenderSize: CGSize?,
+        frameRate: Int32,
+        preserveSourceScale: Bool
     ) -> AVMutableVideoComposition {
         let renderSize = segmentLayouts.reduce(CGSize.zero) { currentMax, layout in
             let transformedBounds = CGRect(origin: .zero, size: layout.naturalSize)
@@ -1290,7 +1379,8 @@ struct VideoExporter {
             let fittedTransform = fittedTransform(
                 preferredTransform: layout.preferredTransform,
                 naturalSize: layout.naturalSize,
-                renderSize: safeRenderSize
+                renderSize: safeRenderSize,
+                preserveSourceScale: preserveSourceScale
             )
             layerInstruction.setTransform(fittedTransform, at: layout.timeRange.start)
         }
@@ -1302,37 +1392,54 @@ struct VideoExporter {
         let videoComposition = AVMutableVideoComposition()
         videoComposition.instructions = [instruction]
         videoComposition.renderSize = safeRenderSize
-        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
+        videoComposition.frameDuration = CMTime(value: 1, timescale: frameRate)
         return videoComposition
     }
 
-    private func preferredHorizontalRenderSize(for segmentLayouts: [StitchedVideoSegmentLayout]) -> CGSize {
+    private func preferredVideoModeRenderSize(
+        for segmentLayouts: [StitchedVideoSegmentLayout],
+        requestedResolution: CGSize?
+    ) -> CGSize {
         let measuredSize = segmentLayouts.reduce(CGSize.zero) { currentMax, layout in
-            let transformedBounds = CGRect(origin: .zero, size: layout.naturalSize)
-                .applying(layout.preferredTransform)
-                .standardized
+            let transformedSize = transformedVideoSize(for: layout)
             return CGSize(
-                width: max(currentMax.width, transformedBounds.width),
-                height: max(currentMax.height, transformedBounds.height)
+                width: max(currentMax.width, transformedSize.width),
+                height: max(currentMax.height, transformedSize.height)
             )
         }
 
-        let maxEdge = max(measuredSize.width, measuredSize.height, 2)
-        let minEdge = max(min(measuredSize.width, measuredSize.height), 2)
-        return CGSize(width: maxEdge, height: minEdge)
+        let defaultBase = CGSize(
+            width: max(max(measuredSize.width, measuredSize.height), 2),
+            height: max(min(measuredSize.width, measuredSize.height), 2)
+        )
+        var baseSize = requestedResolution ?? defaultBase
+        let dominantOrientation = dominantVideoOrientation(for: segmentLayouts)
+
+        switch dominantOrientation {
+        case .vertical where baseSize.width > baseSize.height:
+            baseSize = CGSize(width: baseSize.height, height: baseSize.width)
+        case .horizontal where baseSize.height > baseSize.width:
+            baseSize = CGSize(width: baseSize.height, height: baseSize.width)
+        default:
+            break
+        }
+
+        return baseSize
     }
 
     private func fittedTransform(
         preferredTransform: CGAffineTransform,
         naturalSize: CGSize,
-        renderSize: CGSize
+        renderSize: CGSize,
+        preserveSourceScale: Bool
     ) -> CGAffineTransform {
         let transformedBounds = CGRect(origin: .zero, size: naturalSize)
             .applying(preferredTransform)
             .standardized
         let safeWidth = max(transformedBounds.width, 1)
         let safeHeight = max(transformedBounds.height, 1)
-        let scale = min(renderSize.width / safeWidth, renderSize.height / safeHeight)
+        let fitScale = min(renderSize.width / safeWidth, renderSize.height / safeHeight)
+        let scale = preserveSourceScale ? min(fitScale, 1) : fitScale
         let scaledWidth = safeWidth * scale
         let scaledHeight = safeHeight * scale
         let translationToOrigin = CGAffineTransform(
@@ -1348,6 +1455,35 @@ struct VideoExporter {
             .concatenating(translationToOrigin)
             .concatenating(scaleTransform)
             .concatenating(centeredTranslation)
+    }
+
+    private enum VideoOrientation {
+        case vertical
+        case horizontal
+    }
+
+    private func dominantVideoOrientation(for segmentLayouts: [StitchedVideoSegmentLayout]) -> VideoOrientation {
+        var verticalSeconds: Double = 0
+        var horizontalSeconds: Double = 0
+
+        for layout in segmentLayouts {
+            let size = transformedVideoSize(for: layout)
+            let seconds = CMTimeGetSeconds(layout.timeRange.duration)
+            if size.height > size.width {
+                verticalSeconds += seconds
+            } else {
+                horizontalSeconds += seconds
+            }
+        }
+
+        return verticalSeconds > horizontalSeconds ? .vertical : .horizontal
+    }
+
+    private func transformedVideoSize(for layout: StitchedVideoSegmentLayout) -> CGSize {
+        let transformedBounds = CGRect(origin: .zero, size: layout.naturalSize)
+            .applying(layout.preferredTransform)
+            .standardized
+        return CGSize(width: transformedBounds.width, height: transformedBounds.height)
     }
 
     private func makePixelBuffer(from image: UIImage, caption: String?, renderSize: CGSize) throws -> CVPixelBuffer {

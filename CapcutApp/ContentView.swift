@@ -1152,6 +1152,64 @@ struct ContentView: View {
         )
     }
 
+    private var videoModeExportCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Color.green.opacity(0.92))
+                Text("Video Mode Export")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.primary)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Frame Rate")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Picker("Frame Rate", selection: $viewModel.selectedVideoModeFrameRate) {
+                    ForEach(VideoExporter.VideoModeFrameRate.allCases) { option in
+                        Text(option.displayName).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Resolution")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Picker("Resolution", selection: $viewModel.selectedVideoModeResolution) {
+                    ForEach(VideoExporter.VideoModeResolution.allCases) { option in
+                        Text(option.rawValue).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Quality")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Picker("Quality", selection: $viewModel.selectedVideoModeQuality) {
+                    ForEach(VideoExporter.VideoModeQuality.allCases) { option in
+                        Text(option.rawValue).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.green.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.green.opacity(0.25), lineWidth: 1)
+        )
+    }
+
     private var estimatedExportSpecCard: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Estimated Export Spec")
@@ -1443,7 +1501,12 @@ struct ContentView: View {
 
                 videoAspectRatioCard
                 videoTimingModeCard
-                videoQualityCard
+                if viewModel.selectedTimingMode == .video {
+                    videoModeExportCard
+                }
+                if viewModel.selectedTimingMode != .video {
+                    videoQualityCard
+                }
                 estimatedExportSpecCard
             }
             .padding(.horizontal, 14)
