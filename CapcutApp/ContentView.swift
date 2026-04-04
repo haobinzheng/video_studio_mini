@@ -74,6 +74,7 @@ struct ContentView: View {
             .onChange(of: selectedStep) { oldStep, newStep in
                 if oldStep == .narration && newStep != .narration {
                     viewModel.stopLiveNarrationSilently()
+                    viewModel.stopNarrationPreview()
                 }
                 if oldStep == .music && newStep != .music {
                     viewModel.stopMusicSilently()
@@ -159,7 +160,7 @@ struct ContentView: View {
                 Text("FluxCut Studio")
                     .font(.title2.weight(.bold))
                     .foregroundStyle(.primary)
-                Text("Script, media, music, and video in one fast studio flow.")
+                Text("Script. Media. Music. All in Flow.")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(.secondary)
             }
@@ -1330,6 +1331,20 @@ struct ContentView: View {
                 Text("Final Mix")
                     .font(.headline)
 
+                Toggle(isOn: $viewModel.includesFinalCaptions) {
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("Include Captions")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Text(viewModel.includesFinalCaptions ? "Captions on for final video" : "Final video without captions")
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.primary.opacity(0.72))
+                    }
+                }
+                .toggleStyle(.switch)
+                .disabled(viewModel.selectedTimingMode != .story)
+                .opacity(viewModel.selectedTimingMode == .story ? 1 : 0.45)
+
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Original Video Sound")
                         .font(.caption.weight(.semibold))
@@ -1374,7 +1389,8 @@ struct ContentView: View {
                         VStack(alignment: .leading, spacing: 2) {
                             Text(viewModel.isLoadingMediaSelection ? "Loading Media..." : (viewModel.isPreparingVideoPreview ? "Building Preview..." : "Preview Video"))
                                 .font(.subheadline.weight(.bold))
-                            Text(viewModel.hasPendingPreviewChanges ? "Quick 8-second sample" : "Up to date")
+                                .lineLimit(1)
+                            Text(viewModel.hasPendingPreviewChanges ? "Preview Sample" : "Up to date")
                                 .font(.caption2.weight(.semibold))
                                 .foregroundStyle(.white.opacity(0.82))
                         }
@@ -1535,9 +1551,19 @@ struct ContentView: View {
 
             if let displayedVideoURL = viewModel.exportedVideoURL ?? viewModel.videoPreviewURL {
                 VStack(alignment: .leading, spacing: 10) {
-                    VideoPlayer(player: renderPreviewPlayer)
-                        .frame(height: 320)
-                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    ZStack(alignment: .topLeading) {
+                        VideoPlayer(player: renderPreviewPlayer)
+                            .frame(height: 320)
+                            .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+
+                        Text(viewModel.exportedVideoURL != nil ? "Final Video" : "Preview Sample")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(Color.black.opacity(0.68), in: Capsule())
+                            .padding(12)
+                    }
 
                     HStack(spacing: 10) {
                         Text("AirPlay")
@@ -1551,7 +1577,7 @@ struct ContentView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(viewModel.exportedVideoURL != nil ? "Final Video" : "Preview Render")
+                        Text(viewModel.exportedVideoURL != nil ? "Final Video" : "Preview Video")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         if let fileSize = formattedFileSize(for: displayedVideoURL) {

@@ -54,7 +54,7 @@ struct VideoExporter {
         var maximumDuration: CMTime? {
             switch self {
             case .preview:
-                return CMTime(seconds: 8, preferredTimescale: 600)
+                return CMTime(seconds: 20, preferredTimescale: 600)
             case .finalStandard, .finalHigh:
                 return nil
             }
@@ -259,6 +259,7 @@ struct VideoExporter {
         voiceIdentifier: String,
         aspectRatio: AspectRatio,
         timingMode: TimingMode,
+        includeCaptions: Bool = true,
         renderQuality: RenderQuality = .finalStandard,
         externalCues: [ExternalCue] = [],
         externalNarrationAudioURL: URL? = nil,
@@ -306,15 +307,20 @@ struct VideoExporter {
 
         let totalDuration: CMTime
         switch timingMode {
-        case .video, .realLife:
+        case .video:
             totalDuration = minimumVisualDuration
+        case .realLife:
+            totalDuration = realLifeVisualDuration(for: mediaItems)
         case .story:
             totalDuration = narrationTimeline.duration > .zero
                 ? narrationTimeline.duration
                 : minimumVisualDuration
         }
         let resolvedDuration = renderQuality.maximumDuration.map { min(totalDuration, $0) } ?? totalDuration
-        let timelineSegments = try await makeTimelineSegments(for: mediaItems, totalDuration: resolvedDuration)
+        let baseTimelineSegments = try await makeTimelineSegments(for: mediaItems, totalDuration: totalDuration)
+        let timelineSegments = resolvedDuration < totalDuration
+            ? timelineSegmentsTrimmed(to: resolvedDuration, segments: baseTimelineSegments)
+            : baseTimelineSegments
         let videoPressure = videoPressure(for: timelineSegments)
         let renderProfile = resolvedRenderProfile(
             for: renderQuality,
@@ -324,7 +330,7 @@ struct VideoExporter {
             timingMode: timingMode,
             mediaItems: mediaItems
         )
-        let trimmedCaptionSegments = timingMode == .realLife
+        let trimmedCaptionSegments = timingMode == .realLife || !includeCaptions
             ? []
             : captionSegmentsTrimmed(to: resolvedDuration, segments: narrationTimeline.captionSegments)
         let trimmedNarrationURLs = try await narrationURLsTrimmed(
@@ -393,6 +399,25 @@ struct VideoExporter {
             trimmed.append(
                 CaptionSegment(
                     text: segment.text,
+                    timeRange: CMTimeRange(start: segment.timeRange.start, duration: duration)
+                )
+            )
+        }
+        return trimmed
+    }
+
+    private func timelineSegmentsTrimmed(to maxDuration: CMTime, segments: [TimelineSegment]) -> [TimelineSegment] {
+        guard maxDuration > .zero else { return [] }
+
+        var trimmed: [TimelineSegment] = []
+        for segment in segments {
+            if segment.timeRange.start >= maxDuration { break }
+            let end = min(segment.timeRange.end, maxDuration)
+            let duration = end - segment.timeRange.start
+            guard duration > .zero else { continue }
+            trimmed.append(
+                TimelineSegment(
+                    mediaItem: segment.mediaItem,
                     timeRange: CMTimeRange(start: segment.timeRange.start, duration: duration)
                 )
             )
@@ -1364,22 +1389,28 @@ struct VideoExporter {
     private func estimatedTimelineSegments(for mediaItems: [MediaItem], totalDuration: CMTime) -> [TimelineSegment] {
         guard !mediaItems.isEmpty, totalDuration > .zero else { return [] }
 
-        let videoItems = mediaItems.filter {
-            if case .video = $0.kind { return true }
-            return false
-        }
-        let photoItems = mediaItems.filter {
-            if case .photo = $0.kind { return true }
-            return false
+        let videoItems = mediaItems.filter { if case .video = $0.kind { return true }; return false }
+        let photoItems = mediaItems.filter { if case .photo = $0.kind { return true }; return false }
+        let hasVideos = !videoItems.isEmpty
+        let hasPhotos = !photoItems.isEmpty
+
+        let totalVideoDuration = videoItems.reduce(CMTime.zero) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case let .video(_, duration):
+                return partial + duration
+            }
         }
 
-        let usesMixedLooping = !videoItems.isEmpty
         let photoDuration: CMTime = {
-            guard !photoItems.isEmpty else { return .zero }
-            if usesMixedLooping {
-                return CMTime(seconds: 2.0, preferredTimescale: 600)
+            guard hasPhotos else { return .zero }
+            if !hasVideos {
+                return CMTimeMultiplyByFloat64(totalDuration, multiplier: 1.0 / Double(photoItems.count))
             }
-            return CMTimeMultiplyByFloat64(totalDuration, multiplier: 1.0 / Double(photoItems.count))
+            let remainingForPhotos = CMTimeMaximum(.zero, totalDuration - totalVideoDuration)
+            guard remainingForPhotos > .zero else { return .zero }
+            return CMTimeMultiplyByFloat64(remainingForPhotos, multiplier: 1.0 / Double(photoItems.count))
         }()
 
         var segments: [TimelineSegment] = []
@@ -1396,14 +1427,23 @@ struct VideoExporter {
                 duration = clipDuration
             }
 
-            guard duration > .zero else { break }
+            if duration <= .zero {
+                loopIndex += 1
+                if hasPhotos && hasVideos && loopIndex >= mediaItems.count {
+                    break
+                }
+                continue
+            }
             let remaining = totalDuration - cursor
             let clippedDuration = CMTimeMinimum(duration, remaining)
             segments.append(TimelineSegment(mediaItem: item, timeRange: CMTimeRange(start: cursor, duration: clippedDuration)))
             cursor = cursor + clippedDuration
             loopIndex += 1
 
-            if !usesMixedLooping && loopIndex >= mediaItems.count {
+            if hasPhotos && hasVideos && loopIndex >= mediaItems.count {
+                break
+            }
+            if !hasVideos && loopIndex >= mediaItems.count {
                 break
             }
         }
@@ -1510,6 +1550,23 @@ struct VideoExporter {
         return max(videoDuration + photoDuration, CMTime(seconds: 3, preferredTimescale: 600))
     }
 
+    private func realLifeVisualDuration(for mediaItems: [MediaItem]) -> CMTime {
+        let hasVideo = mediaItems.contains {
+            if case .video = $0.kind { return true }
+            return false
+        }
+        let photoCount = mediaItems.filter {
+            if case .photo = $0.kind { return true }
+            return false
+        }.count
+
+        if !hasVideo && photoCount > 0 {
+            return CMTime(seconds: 300, preferredTimescale: 600)
+        }
+
+        return minimumVisualDuration(for: mediaItems)
+    }
+
     private func videoOnlyDuration(for mediaItems: [MediaItem]) -> CMTime {
         mediaItems.reduce(CMTime.zero) { partial, item in
             switch item.kind {
@@ -1522,21 +1579,27 @@ struct VideoExporter {
     }
 
     private func makeTimelineSegments(for mediaItems: [MediaItem], totalDuration: CMTime) async throws -> [TimelineSegment] {
-        let photoItems = mediaItems.filter {
-            if case .photo = $0.kind { return true }
-            return false
-        }
-        let videoItems = mediaItems.filter {
-            if case .video = $0.kind { return true }
-            return false
-        }
-        let usesMixedLooping = !videoItems.isEmpty
-        let perPhotoDuration: CMTime = {
-            guard !photoItems.isEmpty else { return CMTime(seconds: 0, preferredTimescale: 600) }
-            if usesMixedLooping {
-                return CMTime(seconds: 2.0, preferredTimescale: 600)
+        let photoItems = mediaItems.filter { if case .photo = $0.kind { return true }; return false }
+        let videoItems = mediaItems.filter { if case .video = $0.kind { return true }; return false }
+        let hasVideos = !videoItems.isEmpty
+        let hasPhotos = !photoItems.isEmpty
+        let totalVideoDuration = videoItems.reduce(CMTime.zero) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case let .video(_, duration):
+                return partial + duration
             }
-            return CMTimeMultiplyByFloat64(totalDuration, multiplier: 1.0 / Double(photoItems.count))
+        }
+
+        let perPhotoDuration: CMTime = {
+            guard hasPhotos else { return .zero }
+            if !hasVideos {
+                return CMTimeMultiplyByFloat64(totalDuration, multiplier: 1.0 / Double(photoItems.count))
+            }
+            let remainingForPhotos = CMTimeMaximum(.zero, totalDuration - totalVideoDuration)
+            guard remainingForPhotos > .zero else { return .zero }
+            return CMTimeMultiplyByFloat64(remainingForPhotos, multiplier: 1.0 / Double(photoItems.count))
         }()
 
         var cursor = CMTime.zero
@@ -1551,13 +1614,24 @@ struct VideoExporter {
             let intendedDuration: CMTime
             switch item.kind {
             case .photo:
-                intendedDuration = perPhotoDuration > .zero ? perPhotoDuration : CMTime(seconds: 2.0, preferredTimescale: 600)
+                intendedDuration = perPhotoDuration
             case let .video(_, videoDuration):
                 intendedDuration = videoDuration
             }
 
+            if intendedDuration <= .zero {
+                loopIndex += 1
+                if hasPhotos && hasVideos && loopIndex >= mediaItems.count {
+                    break
+                }
+                continue
+            }
+
             let duration = min(intendedDuration, remainingDuration)
-            guard duration > .zero else { break }
+            guard duration > .zero else {
+                loopIndex += 1
+                continue
+            }
             segments.append(
                 TimelineSegment(
                     mediaItem: item,
@@ -1567,7 +1641,10 @@ struct VideoExporter {
             cursor = cursor + duration
             loopIndex += 1
 
-            if !usesMixedLooping && loopIndex >= mediaItems.count {
+            if hasPhotos && hasVideos && loopIndex >= mediaItems.count {
+                break
+            }
+            if !hasVideos && loopIndex >= mediaItems.count {
                 break
             }
         }
@@ -1908,6 +1985,45 @@ struct VideoExporter {
         }
 
         if timingMode == .realLife {
+            let isPhotoOnlyRealLife = mediaItems.allSatisfy {
+                if case .photo = $0.kind { return true }
+                return false
+            }
+            if isPhotoOnlyRealLife {
+                let photoMinimumSize: CGSize = {
+                    switch quality {
+                    case .preview:
+                        return baseSize
+                    case .finalStandard:
+                        return aspectRatio == .vertical ? CGSize(width: 1080, height: 1920) : CGSize(width: 1440, height: 1080)
+                    case .finalHigh:
+                        return aspectRatio == .vertical ? CGSize(width: 1440, height: 2560) : CGSize(width: 1920, height: 1440)
+                    }
+                }()
+                let maxLongEdge: CGFloat = {
+                    switch quality {
+                    case .preview:
+                        return 1280
+                    case .finalStandard:
+                        return 1920
+                    case .finalHigh:
+                        return 2560
+                    }
+                }()
+
+                return RenderProfile(
+                    renderSize: preferredMediaDrivenRenderSize(
+                        for: mediaItems,
+                        aspectRatio: aspectRatio,
+                        minimumSize: photoMinimumSize,
+                        maximumLongEdge: maxLongEdge
+                    ),
+                    frameRate: baseRate,
+                    longFormOptimized: false,
+                    videoSampleStride: 1
+                )
+            }
+
             if !seconds.isFinite || seconds <= 180 {
                 return RenderProfile(renderSize: baseSize, frameRate: baseRate, longFormOptimized: false, videoSampleStride: 1)
             }
@@ -2023,7 +2139,8 @@ struct VideoExporter {
     private func preferredMediaDrivenRenderSize(
         for mediaItems: [MediaItem],
         aspectRatio: AspectRatio,
-        minimumSize: CGSize
+        minimumSize: CGSize,
+        maximumLongEdge: CGFloat? = nil
     ) -> CGSize {
         let largestMediaSize = mediaItems.reduce(CGSize.zero) { currentMax, item in
             let size = item.previewImage.size
@@ -2041,8 +2158,16 @@ struct VideoExporter {
         let fitted = AVMakeRect(aspectRatio: aspectRatio == .vertical ? CGSize(width: 9, height: 16) : CGSize(width: 4, height: 3),
                                 insideRect: CGRect(origin: .zero, size: largestMediaSize)).size
 
-        let width = max(minimumSize.width, round(fitted.width / 2) * 2)
-        let height = max(minimumSize.height, round(fitted.height / 2) * 2)
+        let resolvedFitted: CGSize = {
+            guard let maximumLongEdge else { return fitted }
+            let longEdge = max(fitted.width, fitted.height)
+            guard longEdge > maximumLongEdge, longEdge > 0 else { return fitted }
+            let scale = maximumLongEdge / longEdge
+            return CGSize(width: fitted.width * scale, height: fitted.height * scale)
+        }()
+
+        let width = max(minimumSize.width, round(resolvedFitted.width / 2) * 2)
+        let height = max(minimumSize.height, round(resolvedFitted.height / 2) * 2)
         return CGSize(width: width, height: height)
     }
 
