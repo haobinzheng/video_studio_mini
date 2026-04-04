@@ -1250,6 +1250,11 @@ struct VideoExporter {
             }
         }
 
+        let realLifeRenderSize = preferredVideoModeRenderSize(
+            for: segmentLayouts,
+            requestedResolution: renderSize
+        )
+
         try await exportStitchedComposition(
             composition,
             presetName: AVAssetExportPresetHighestQuality,
@@ -1259,9 +1264,9 @@ struct VideoExporter {
                 for: compositionVideoTrack,
                 segmentLayouts: segmentLayouts,
                 totalDuration: totalDuration,
-                targetRenderSize: renderSize,
+                targetRenderSize: realLifeRenderSize,
                 frameRate: frameRate,
-                preserveSourceScale: false
+                preserveSourceScale: true
             ),
             progressMessage: "Exporting the real-life video.",
             progressHandler: progressHandler
