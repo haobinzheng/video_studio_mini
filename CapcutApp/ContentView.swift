@@ -23,6 +23,7 @@ struct ContentView: View {
     @State private var scriptScrollProxy: ScrollViewProxy?
     @State private var isSettingsPresented = false
     @State private var isMusicBrowserPresented = false
+    @State private var isRenderPlayerExpanded = false
     @FocusState private var isNarrationFocused: Bool
 
     var body: some View {
@@ -60,6 +61,9 @@ struct ContentView: View {
             .sheet(isPresented: $isMusicBrowserPresented) {
                 musicLibrarySheet
             }
+            .fullScreenCover(isPresented: $isRenderPlayerExpanded) {
+                expandedRenderPlayerView
+            }
             .fileImporter(
                 isPresented: $isMusicImporterPresented,
                 allowedContentTypes: [.audio, .mpeg4Audio, .mp3, .wav, .movie, .video, .mpeg4Movie, .quickTimeMovie]
@@ -88,8 +92,7 @@ struct ContentView: View {
                     viewModel.stopMusicSilently()
                 }
                 if oldStep == .video && newStep != .video {
-                    renderPreviewPlayer.pause()
-                    renderPreviewPlayer.seek(to: .zero)
+                    deactivateRenderPlaybackForNewRender()
                 }
             }
             .onChange(of: viewModel.videoPreviewURL) { _, newValue in
@@ -97,6 +100,16 @@ struct ContentView: View {
             }
             .onChange(of: viewModel.exportedVideoURL) { _, newValue in
                 updateRenderPreviewPlayer(for: newValue ?? viewModel.videoPreviewURL)
+            }
+            .onChange(of: viewModel.isPreparingVideoPreview) { _, isPreparing in
+                if isPreparing {
+                    deactivateRenderPlaybackForNewRender()
+                }
+            }
+            .onChange(of: viewModel.isExportingVideo) { _, isExporting in
+                if isExporting {
+                    deactivateRenderPlaybackForNewRender()
+                }
             }
         }
     }
@@ -147,26 +160,9 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .top, spacing: 12) {
                 HStack(spacing: 12) {
-                    ZStack {
-                        RoundedRectangle(cornerRadius: 20, style: .continuous)
-                            .fill(
-                                LinearGradient(
-                                    colors: [
-                                        Color(red: 0.94, green: 0.46, blue: 0.22),
-                                        Color(red: 0.79, green: 0.23, blue: 0.10)
-                                    ],
-                                    startPoint: .topLeading,
-                                    endPoint: .bottomTrailing
-                                )
-                            )
-                            .frame(width: 48, height: 48)
+                    FluxCutLogoMark(size: 48)
 
-                        Image(systemName: "film.stack.fill")
-                            .font(.system(size: 20, weight: .bold))
-                            .foregroundStyle(.white)
-                    }
-
-                    Text("FluxCut Studio")
+                    Text("FluxCut")
                         .font(.title3.weight(.bold))
                         .foregroundStyle(.primary)
                         .lineLimit(1)
@@ -207,7 +203,7 @@ struct ContentView: View {
                         Text("App")
                             .foregroundStyle(.secondary)
                         Spacer()
-                        Text("FluxCut Studio")
+                        Text("FluxCut")
                     }
                     HStack {
                         Text("Version")
@@ -454,6 +450,47 @@ struct ContentView: View {
         }
     }
 
+    private var expandedRenderPlayerView: some View {
+        ZStack {
+            Color.black.opacity(0.96)
+                .ignoresSafeArea()
+
+            FullscreenPlayerContainer(player: renderPreviewPlayer)
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(viewModel.exportedVideoURL != nil ? "Final Video" : "Preview Sample")
+                            .font(.headline.weight(.bold))
+                            .foregroundStyle(.white)
+                        Text("Fullscreen playback")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.72))
+                    }
+
+                    Spacer()
+
+                    Button {
+                        dismissExpandedRenderPlayer()
+                    } label: {
+                        Image(systemName: "arrow.down.right.and.arrow.up.left")
+                            .font(.system(size: 15, weight: .bold))
+                            .padding(12)
+                            .background(Color.white.opacity(0.14), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 24)
+
+                Spacer()
+            }
+        }
+        .interactiveDismissDisabled(viewModel.isExportingVideo || viewModel.isPreparingVideoPreview)
+    }
+
     private var appVersionLabel: String {
         let shortVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
         let buildNumber = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
@@ -627,11 +664,6 @@ struct ContentView: View {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .fill(Color.white.opacity(0.65))
                     .frame(maxHeight: .infinity)
-                    .overlay {
-                        Text("Your selected media will appear here.")
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
-                    }
             } else {
                 VStack(spacing: 14) {
                     TabView(selection: $viewModel.currentSlideIndex) {
@@ -1799,6 +1831,7 @@ struct ContentView: View {
 
             VStack(spacing: 12) {
                 Button {
+                    deactivateRenderPlaybackForNewRender()
                     viewModel.buildVideoPreview()
                 } label: {
                     HStack(spacing: 10) {
@@ -1839,7 +1872,7 @@ struct ContentView: View {
                 .disabled(!viewModel.canStartVideoPreviewRender)
 
                 Button {
-                    renderPreviewPlayer.pause()
+                    deactivateRenderPlaybackForNewRender()
                     viewModel.buildVideo()
                 } label: {
                     HStack(spacing: 10) {
@@ -1972,7 +2005,7 @@ struct ContentView: View {
                 .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
 
-            if let displayedVideoURL = viewModel.exportedVideoURL ?? viewModel.videoPreviewURL {
+            if let displayedVideoURL = activeRenderedVideoURL {
                 VStack(alignment: .leading, spacing: 10) {
                     ZStack(alignment: .topLeading) {
                         VideoPlayer(player: renderPreviewPlayer)
@@ -1986,6 +2019,26 @@ struct ContentView: View {
                             .padding(.vertical, 8)
                             .background(Color.black.opacity(0.68), in: Capsule())
                             .padding(12)
+
+                        VStack {
+                            HStack {
+                                Spacer()
+
+                                Button {
+                                    isRenderPlayerExpanded = true
+                                } label: {
+                                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                        .font(.system(size: 14, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .padding(10)
+                                        .background(Color.black.opacity(0.68), in: Capsule())
+                                }
+                                .buttonStyle(.plain)
+                                .padding(12)
+                            }
+
+                            Spacer()
+                        }
                     }
 
                     HStack(spacing: 10) {
@@ -2063,6 +2116,14 @@ struct ContentView: View {
         return formatter.string(fromByteCount: Int64(fileSize))
     }
 
+    private var activeRenderedVideoURL: URL? {
+        guard !viewModel.isExportingVideo, !viewModel.isPreparingVideoPreview else {
+            return nil
+        }
+
+        return viewModel.exportedVideoURL ?? viewModel.videoPreviewURL
+    }
+
     private func updateRenderPreviewPlayer(for url: URL?) {
         renderPreviewPlayer.pause()
         guard let url else {
@@ -2076,6 +2137,17 @@ struct ContentView: View {
         renderPreviewPlayer.isMuted = false
         renderPreviewPlayer.volume = 1.0
         renderPreviewPlayer.replaceCurrentItem(with: AVPlayerItem(url: url))
+    }
+
+    private func dismissExpandedRenderPlayer() {
+        isRenderPlayerExpanded = false
+    }
+
+    private func deactivateRenderPlaybackForNewRender() {
+        isRenderPlayerExpanded = false
+        renderPreviewPlayer.pause()
+        renderPreviewPlayer.seek(to: .zero)
+        renderPreviewPlayer.replaceCurrentItem(with: nil)
     }
 }
 
@@ -2096,6 +2168,27 @@ private struct MediaReorderDropDelegate: DropDelegate {
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
         DropProposal(operation: .move)
+    }
+}
+
+private struct FullscreenPlayerContainer: UIViewControllerRepresentable {
+    let player: AVPlayer
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.player = player
+        controller.showsPlaybackControls = true
+        controller.entersFullScreenWhenPlaybackBegins = false
+        controller.exitsFullScreenWhenPlaybackEnds = false
+        controller.videoGravity = .resizeAspect
+        controller.view.backgroundColor = .black
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        controller.player = player
+        controller.videoGravity = .resizeAspect
+        controller.view.backgroundColor = .black
     }
 }
 
