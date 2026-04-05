@@ -81,7 +81,9 @@ final class AppViewModel: NSObject, ObservableObject {
         let id: String
         let name: String
         let language: String
+        let languageGroup: String
         let languageLabel: String
+        let regionLabel: String
         let qualityLabel: String
         let sortRank: Int
         let isFallback: Bool
@@ -90,6 +92,12 @@ final class AppViewModel: NSObject, ObservableObject {
             let fallbackSuffix = isFallback ? " • Fallback" : ""
             return "\(name) • \(qualityLabel) • \(languageLabel)\(fallbackSuffix)"
         }
+    }
+
+    struct VoiceLanguageOption: Identifiable, Equatable {
+        let id: String
+        let label: String
+        let voiceCount: Int
     }
 
     struct DemoTrackOption: Identifiable {
@@ -161,8 +169,18 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var exportedVideoURL: URL?
     @Published var videoPreviewURL: URL?
     @Published var availableVoices: [VoiceOption] = []
+    @Published var selectedVoiceLanguage = "" {
+        didSet {
+            guard oldValue != selectedVoiceLanguage else { return }
+            selectBestVoiceForSelectedLanguage()
+        }
+    }
     @Published var selectedVoiceIdentifier = "" {
         didSet {
+            if let matchingVoice = availableVoices.first(where: { $0.id == selectedVoiceIdentifier }),
+               selectedVoiceLanguage != matchingVoice.languageGroup {
+                selectedVoiceLanguage = matchingVoice.languageGroup
+            }
             selectedVoiceName = selectedVoiceDisplayName
             if oldValue != selectedVoiceIdentifier {
                 stopLiveNarrationPlayback(reason: "Voice updated. Tap Play Script to hear the new selection.")
@@ -319,9 +337,10 @@ final class AppViewModel: NSObject, ObservableObject {
             availableVoices = allAvailableVoices
         }
         voiceReloadFeedback = availableVoices.isEmpty
-            ? "No iPhone voices loaded yet"
-            : "\(availableVoices.count) iPhone voices ready"
+            ? "No enhanced or premium voices loaded yet"
+            : "\(availableVoices.count) high-quality Apple voices ready"
         if let firstVoice = availableVoices.first {
+            selectedVoiceLanguage = firstVoice.languageGroup
             selectedVoiceIdentifier = firstVoice.id
             selectedVoiceName = firstVoice.displayName
         }
@@ -963,30 +982,26 @@ final class AppViewModel: NSObject, ObservableObject {
         if !loadedVoices.isEmpty {
             objectWillChange.send()
             allAvailableVoices = loadedVoices
-            availableVoices = filteredVoices(from: allAvailableVoices)
-            if availableVoices.isEmpty {
-                availableVoices = allAvailableVoices
-            }
-            reconcileSelectedVoice()
-            voiceReloadFeedback = "\(availableVoices.count) iPhone voices loaded"
+            applyVoiceFiltersAndSelection()
+            voiceReloadFeedback = "\(availableVoices.count) high-quality Apple voices loaded"
             statusMessage = "Voice list refreshed."
         } else {
             let restoredFallbackVoices = SpeechVoiceLibrary.voiceOptions
             if !restoredFallbackVoices.isEmpty {
                 objectWillChange.send()
                 allAvailableVoices = restoredFallbackVoices
-                availableVoices = filteredVoices(from: allAvailableVoices)
-                if availableVoices.isEmpty {
-                    availableVoices = allAvailableVoices
-                }
-                reconcileSelectedVoice()
-                voiceReloadFeedback = "\(availableVoices.count) iPhone voices loaded"
+                applyVoiceFiltersAndSelection()
+                voiceReloadFeedback = "\(availableVoices.count) high-quality Apple voices loaded"
                 statusMessage = "Voice list refreshed."
             } else {
-                voiceReloadFeedback = "No iPhone voices found"
-                statusMessage = "No Apple voices were available from the speech framework on this device."
+                voiceReloadFeedback = "No enhanced or premium Apple voices found"
+                statusMessage = "No enhanced or premium Apple voices were available from the speech framework on this device."
             }
         }
+    }
+
+    func selectVoiceLanguage(_ languageID: String) {
+        selectedVoiceLanguage = languageID
     }
 
     func hideVoice(withId voiceID: String) {
@@ -999,17 +1014,15 @@ final class AppViewModel: NSObject, ObservableObject {
         resetSpeechSynthesizer()
         hiddenVoiceIdentifiers.insert(voiceID)
         saveHiddenVoiceIdentifiers()
-        availableVoices = filteredVoices(from: allAvailableVoices)
+        applyVoiceFiltersAndSelection()
 
         if availableVoices.isEmpty {
             hiddenVoiceIdentifiers.remove(voiceID)
             saveHiddenVoiceIdentifiers()
-            availableVoices = filteredVoices(from: allAvailableVoices)
+            applyVoiceFiltersAndSelection()
         }
-
-        reconcileSelectedVoice()
         invalidateNarrationPreviewIfNeeded()
-        voiceReloadFeedback = "\(availableVoices.count) iPhone voices shown"
+        voiceReloadFeedback = "\(availableVoices.count) high-quality Apple voices shown"
         statusMessage = "Voice removed from this list. Tap Reload iPhone Voices to bring everything back."
     }
 
@@ -1739,6 +1752,28 @@ final class AppViewModel: NSObject, ObservableObject {
         availableVoices.first(where: { $0.id == selectedVoiceIdentifier })?.displayName ?? "No Apple voice selected yet."
     }
 
+    var availableVoiceLanguages: [VoiceLanguageOption] {
+        let grouped = Dictionary(grouping: availableVoices, by: \.languageGroup)
+        return grouped.compactMap { group, voices in
+            guard let label = voices.first?.languageLabel else { return nil }
+            return VoiceLanguageOption(id: group, label: label, voiceCount: voices.count)
+        }
+        .sorted { lhs, rhs in
+            SpeechVoiceLibrary.preferredLanguageRank(lhs.id) > SpeechVoiceLibrary.preferredLanguageRank(rhs.id)
+        }
+    }
+
+    var voicesForSelectedLanguage: [VoiceOption] {
+        let matchingVoices = availableVoices.filter { $0.languageGroup == selectedVoiceLanguage }
+        return matchingVoices.isEmpty ? availableVoices : matchingVoices
+    }
+
+    var selectedVoiceLanguageLabel: String {
+        availableVoiceLanguages.first(where: { $0.id == selectedVoiceLanguage })?.label
+            ?? voicesForSelectedLanguage.first?.languageLabel
+            ?? "No high-quality language available"
+    }
+
     var canHideVoices: Bool {
         availableVoices.count > 1
     }
@@ -1848,7 +1883,6 @@ final class AppViewModel: NSObject, ObservableObject {
             && !isExportingVideo
             && !isPreparingVideoPreview
             && !isPreparingNarrationPreview
-            && hasPendingPreviewChanges
     }
 
     var canStartFinalVideoRender: Bool {
@@ -1971,11 +2005,46 @@ final class AppViewModel: NSObject, ObservableObject {
         UserDefaults.standard.set(Array(hiddenVoiceIdentifiers), forKey: Self.hiddenVoiceIdentifiersKey)
     }
 
+    private func applyVoiceFiltersAndSelection() {
+        availableVoices = filteredVoices(from: allAvailableVoices)
+        if availableVoices.isEmpty {
+            availableVoices = allAvailableVoices
+        }
+        reconcileSelectedVoiceLanguage()
+        reconcileSelectedVoice()
+    }
+
     private func reconcileSelectedVoice() {
-        if !availableVoices.contains(where: { $0.id == selectedVoiceIdentifier }) {
-            selectedVoiceIdentifier = availableVoices.first?.id ?? ""
+        let matchingVoices = voicesForSelectedLanguage
+        if !matchingVoices.contains(where: { $0.id == selectedVoiceIdentifier }) {
+            selectedVoiceIdentifier = matchingVoices.first?.id ?? availableVoices.first?.id ?? ""
         } else {
             selectedVoiceName = selectedVoiceDisplayName
+        }
+    }
+
+    private func reconcileSelectedVoiceLanguage() {
+        let availableLanguages = availableVoiceLanguages
+        if availableLanguages.contains(where: { $0.id == selectedVoiceLanguage }) {
+            return
+        }
+        selectedVoiceLanguage = availableLanguages.first?.id ?? ""
+    }
+
+    private func selectBestVoiceForSelectedLanguage() {
+        let matchingVoices = availableVoices.filter { $0.languageGroup == selectedVoiceLanguage }
+        guard let bestVoice = matchingVoices.first else {
+            if !availableVoices.isEmpty {
+                reconcileSelectedVoiceLanguage()
+                reconcileSelectedVoice()
+            }
+            return
+        }
+
+        if selectedVoiceIdentifier != bestVoice.id {
+            selectedVoiceIdentifier = bestVoice.id
+        } else {
+            selectedVoiceName = bestVoice.displayName
         }
     }
 
@@ -1994,6 +2063,7 @@ final class AppViewModel: NSObject, ObservableObject {
         if let matchingVisibleVoice = availableVoices.first(where: {
             Self.voiceOption($0, isCompatibleWithCJK: expectsCJKVoice)
         }) {
+            selectedVoiceLanguage = matchingVisibleVoice.languageGroup
             selectedVoiceIdentifier = matchingVisibleVoice.id
             selectedVoiceName = matchingVisibleVoice.displayName
         }
@@ -2080,7 +2150,6 @@ private extension UIImage {
 }
 
 enum SpeechVoiceLibrary {
-    private static let supportedPrefixes = ["en", "zh", "yue"]
     private static let noveltyVoiceKeywords = [
         "bad news",
         "good news",
@@ -2100,17 +2169,12 @@ enum SpeechVoiceLibrary {
         if !preferred.isEmpty {
             return preferred
         }
-        let fallback = fallbackVoices
-        if !fallback.isEmpty {
-            return fallback
-        }
-        return staticFallbackVoices
+        return fallbackVoices
     }
 
     static var preferredEnhancedPremiumVoices: [AppViewModel.VoiceOption] {
         mapVoices(
             AVSpeechSynthesisVoice.speechVoices().filter {
-                isSupportedLanguage($0.language) &&
                 !isNoveltyVoice($0) &&
                 qualityRank(qualityLabel(for: $0)) >= 2
             },
@@ -2123,7 +2187,7 @@ enum SpeechVoiceLibrary {
         if !preferred.isEmpty {
             return preferred
         }
-        return staticFallbackVoices
+        return fallbackVoices
     }
 
     static func voice(for identifier: String) -> AVSpeechSynthesisVoice? {
@@ -2181,7 +2245,6 @@ enum SpeechVoiceLibrary {
         }
 
         let preferredVoices = AVSpeechSynthesisVoice.speechVoices().filter {
-            isSupportedLanguage($0.language) &&
             !isNoveltyVoice($0) &&
             qualityRank(qualityLabel(for: $0)) >= 2
         }
@@ -2197,7 +2260,7 @@ enum SpeechVoiceLibrary {
         }
 
         let fallbackVoices = AVSpeechSynthesisVoice.speechVoices().filter {
-            isSupportedLanguage($0.language) && !isNoveltyVoice($0)
+            !isNoveltyVoice($0) && qualityRank(qualityLabel(for: $0)) >= 2
         }
         if !fallbackVoices.isEmpty {
             return fallbackVoices.sorted {
@@ -2215,8 +2278,7 @@ enum SpeechVoiceLibrary {
             }.first
         }
 
-        let firstFallbackIdentifier = staticFallbackVoices.first?.id ?? "en-US"
-        return AVSpeechSynthesisVoice(language: firstFallbackIdentifier)
+        return AVSpeechSynthesisVoice.speechVoices().first(where: { !isNoveltyVoice($0) && qualityRank(qualityLabel(for: $0)) >= 2 })
     }
 
     private static func resolvedVoice(for text: String, preferredIdentifier: String) -> AVSpeechSynthesisVoice? {
@@ -2228,8 +2290,8 @@ enum SpeechVoiceLibrary {
         }
 
         let candidateVoices = AVSpeechSynthesisVoice.speechVoices().filter {
-            isSupportedLanguage($0.language) &&
             !isNoveltyVoice($0) &&
+            qualityRank(qualityLabel(for: $0)) >= 2 &&
             isVoice($0, compatibleWithCJK: expectsCJKVoice)
         }
 
@@ -2374,7 +2436,11 @@ enum SpeechVoiceLibrary {
 
     private static func isVoice(_ voice: AVSpeechSynthesisVoice, compatibleWithCJK expectsCJKVoice: Bool) -> Bool {
         if expectsCJKVoice {
-            return voice.language.hasPrefix("zh") || voice.language.hasPrefix("yue")
+            return voice.language.hasPrefix("zh")
+                || voice.language.hasPrefix("yue")
+                || voice.language.hasPrefix("ja")
+                || voice.language.hasPrefix("ko")
+                || voice.language.hasPrefix("wuu")
         }
 
         return voice.language.hasPrefix("en")
@@ -2433,6 +2499,12 @@ enum SpeechVoiceLibrary {
     }
 
     private static func languageLabel(for code: String) -> String {
+        if code.hasPrefix("wuu") {
+            return "Shanghainese"
+        }
+        if code.hasPrefix("ja") {
+            return "Japanese"
+        }
         if code.hasPrefix("yue") {
             return "Cantonese"
         }
@@ -2447,6 +2519,16 @@ enum SpeechVoiceLibrary {
         }
         if code.hasPrefix("en") {
             return "English"
+        }
+        let locale = Locale(identifier: code)
+        return locale.localizedString(forLanguageCode: locale.language.languageCode?.identifier ?? code) ?? code
+    }
+
+    private static func regionLabel(for code: String) -> String {
+        let locale = Locale(identifier: code)
+        if let regionCode = locale.region?.identifier,
+           let regionName = Locale.current.localizedString(forRegionCode: regionCode) {
+            return regionName
         }
         return code
     }
@@ -2473,42 +2555,10 @@ enum SpeechVoiceLibrary {
     private static var fallbackVoices: [AppViewModel.VoiceOption] {
         mapVoices(
             AVSpeechSynthesisVoice.speechVoices().filter {
-                isSupportedLanguage($0.language) && !isNoveltyVoice($0)
+                !isNoveltyVoice($0) && qualityRank(qualityLabel(for: $0)) >= 2
             },
             isFallback: true
         )
-    }
-
-    private static var staticFallbackVoices: [AppViewModel.VoiceOption] {
-        [
-            AppViewModel.VoiceOption(
-                id: "en-US",
-                name: "English (US)",
-                language: "en-US",
-                languageLabel: "English",
-                qualityLabel: "Default",
-                sortRank: 1,
-                isFallback: true
-            ),
-            AppViewModel.VoiceOption(
-                id: "yue-HK",
-                name: "Cantonese (Hong Kong)",
-                language: "yue-HK",
-                languageLabel: "Cantonese",
-                qualityLabel: "Default",
-                sortRank: 1,
-                isFallback: true
-            ),
-            AppViewModel.VoiceOption(
-                id: "zh-CN",
-                name: "Mandarin (Simplified)",
-                language: "zh-CN",
-                languageLabel: "Mandarin",
-                qualityLabel: "Default",
-                sortRank: 1,
-                isFallback: true
-            )
-        ]
     }
 
     private static func mapVoices(_ voices: [AVSpeechSynthesisVoice], isFallback: Bool) -> [AppViewModel.VoiceOption] {
@@ -2518,7 +2568,9 @@ enum SpeechVoiceLibrary {
                     id: voice.identifier,
                     name: voice.name,
                     language: voice.language,
+                    languageGroup: languageGroup(for: voice.language),
                     languageLabel: languageLabel(for: voice.language),
+                    regionLabel: regionLabel(for: voice.language),
                     qualityLabel: qualityLabel(for: voice),
                     sortRank: qualityRank(qualityLabel(for: voice)),
                     isFallback: isFallback
@@ -2542,21 +2594,21 @@ enum SpeechVoiceLibrary {
             }
     }
 
-    private static func isSupportedLanguage(_ language: String) -> Bool {
-        supportedPrefixes.contains { language.hasPrefix($0) }
-    }
-
     private static func isNoveltyVoice(_ voice: AVSpeechSynthesisVoice) -> Bool {
         let lowered = voice.name.lowercased()
         return noveltyVoiceKeywords.contains { lowered.contains($0) }
     }
 
-    private static func preferredLanguageRank(_ language: String) -> Int {
+    static func preferredLanguageRank(_ language: String) -> Int {
         switch language {
         case let code where code.hasPrefix("en-US"):
             return 100
         case let code where code.hasPrefix("en-GB"):
             return 95
+        case let code where code.hasPrefix("ja"):
+            return 92
+        case let code where code.hasPrefix("wuu"):
+            return 91
         case let code where code.hasPrefix("zh-CN"):
             return 90
         case let code where code.hasPrefix("zh-HK"):
@@ -2572,6 +2624,15 @@ enum SpeechVoiceLibrary {
         default:
             return 0
         }
+    }
+
+    private static func languageGroup(for code: String) -> String {
+        if code.hasPrefix("wuu") { return "wuu" }
+        if code.hasPrefix("yue") { return "yue" }
+        if code.hasPrefix("zh") { return "zh" }
+        if code.hasPrefix("ja") { return "ja" }
+        if code.hasPrefix("en") { return "en" }
+        return Locale(identifier: code).language.languageCode?.identifier ?? code
     }
 
     private static func preferredLanguageVoices() -> [AVSpeechSynthesisVoice] {

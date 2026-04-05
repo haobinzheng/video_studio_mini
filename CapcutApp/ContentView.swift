@@ -17,13 +17,13 @@ struct ContentView: View {
     @State private var isMusicImporterPresented = false
     @State private var selectedMusicVideoItem: PhotosPickerItem?
     @State private var selectedStep: StudioStep = .narration
-    @State private var isVoiceListExpanded = false
     @State private var draggedMediaItem: AppViewModel.MediaItem?
     @State private var renderPreviewPlayer = AVPlayer()
     @State private var scriptScrollProxy: ScrollViewProxy?
     @State private var isSettingsPresented = false
     @State private var isMusicBrowserPresented = false
     @State private var isRenderPlayerExpanded = false
+    @State private var voicePendingHide: AppViewModel.VoiceOption?
     @FocusState private var isNarrationFocused: Bool
 
     var body: some View {
@@ -63,6 +63,16 @@ struct ContentView: View {
             }
             .fullScreenCover(isPresented: $isRenderPlayerExpanded) {
                 expandedRenderPlayerView
+            }
+            .alert(item: $voicePendingHide) { voice in
+                Alert(
+                    title: Text("Hide Voice?"),
+                    message: Text("\(voice.name) will be removed from the narration voice list. Reload iPhone Voices will bring it back."),
+                    primaryButton: .destructive(Text("Hide")) {
+                        viewModel.hideVoice(withId: voice.id)
+                    },
+                    secondaryButton: .cancel()
+                )
             }
             .fileImporter(
                 isPresented: $isMusicImporterPresented,
@@ -824,7 +834,7 @@ struct ContentView: View {
                             .foregroundStyle(Color.orange.opacity(0.92))
                     }
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("Voice")
+                        Text("Narration Voice")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         Text(viewModel.selectedVoiceName)
@@ -871,64 +881,104 @@ struct ContentView: View {
             .padding(.vertical, 7)
             .background(Color.white.opacity(0.72), in: Capsule())
 
-            DisclosureGroup(isExpanded: $isVoiceListExpanded) {
-                ScrollView {
-                    VStack(spacing: 8) {
-                        ForEach(viewModel.availableVoices) { option in
-                            HStack(spacing: 10) {
-                                Button {
-                                    viewModel.selectedVoiceIdentifier = option.id
-                                    isVoiceListExpanded = false
-                                    isNarrationFocused = false
-                                } label: {
-                                    HStack {
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            Text(option.name)
-                                                .font(.headline)
-                                                .foregroundStyle(.primary)
-                                            Text("\(option.qualityLabel) • \(option.languageLabel)\(option.isFallback ? " • Fallback" : "")")
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                        Spacer()
-                                        if option.id == viewModel.selectedVoiceIdentifier {
-                                            Image(systemName: "checkmark.circle.fill")
-                                                .foregroundStyle(.orange)
-                                        }
-                                    }
-                                    .padding(12)
-                                    .background(
-                                        Color.white.opacity(option.id == viewModel.selectedVoiceIdentifier ? 0.95 : 0.72),
-                                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    )
-                                }
-                                .buttonStyle(.plain)
-
-                                Button {
-                                    viewModel.hideVoice(withId: option.id)
-                                } label: {
-                                    Image(systemName: "trash.circle.fill")
-                                        .font(.system(size: 20, weight: .semibold))
-                                        .foregroundStyle(viewModel.canHideVoices ? Color.red.opacity(0.88) : Color.gray.opacity(0.55))
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(!viewModel.canHideVoices)
-                            }
-                        }
-                    }
-                    .padding(.top, 8)
-                }
-                .frame(maxHeight: 180)
-            } label: {
-                HStack {
-                    Text("Selected voice")
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Text("Language")
                         .font(.subheadline.weight(.semibold))
                     Spacer()
-                    Text(viewModel.selectedVoiceName)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    Menu {
+                        ForEach(viewModel.availableVoiceLanguages) { language in
+                            Button {
+                                viewModel.selectVoiceLanguage(language.id)
+                                isNarrationFocused = false
+                            } label: {
+                                if language.id == viewModel.selectedVoiceLanguage {
+                                    Label("\(language.label) (\(language.voiceCount))", systemImage: "checkmark")
+                                } else {
+                                    Text("\(language.label) (\(language.voiceCount))")
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(viewModel.selectedVoiceLanguageLabel)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(Color.white.opacity(0.82), in: Capsule())
+                    }
+                    .disabled(viewModel.availableVoiceLanguages.isEmpty)
                 }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Voice")
+                        .font(.subheadline.weight(.semibold))
+                    ScrollView {
+                        VStack(spacing: 8) {
+                            ForEach(viewModel.voicesForSelectedLanguage) { option in
+                                HStack(spacing: 10) {
+                                    Button {
+                                        viewModel.selectedVoiceIdentifier = option.id
+                                        isNarrationFocused = false
+                                    } label: {
+                                        HStack(spacing: 12) {
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                Text(option.name)
+                                                    .font(.headline)
+                                                    .foregroundStyle(.primary)
+                                                HStack(spacing: 6) {
+                                                    Text(option.qualityLabel)
+                                                        .font(.caption.weight(.semibold))
+                                                    if option.regionLabel != option.languageLabel {
+                                                        Text(option.regionLabel)
+                                                            .font(.caption)
+                                                    }
+                                                }
+                                                .foregroundStyle(.secondary)
+                                            }
+                                            Spacer()
+                                            if option.id == viewModel.selectedVoiceIdentifier {
+                                                Image(systemName: "checkmark.circle.fill")
+                                                    .foregroundStyle(.orange)
+                                            }
+                                        }
+                                        .padding(12)
+                                        .background(
+                                            Color.white.opacity(option.id == viewModel.selectedVoiceIdentifier ? 0.95 : 0.72),
+                                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    Menu {
+                                        Button(role: .destructive) {
+                                            voicePendingHide = option
+                                        } label: {
+                                            Label("Hide Voice", systemImage: "eye.slash")
+                                        }
+                                    } label: {
+                                        Image(systemName: "ellipsis.circle")
+                                            .font(.system(size: 20, weight: .semibold))
+                                            .foregroundStyle(Color.secondary.opacity(0.85))
+                                            .padding(4)
+                                    }
+                                    .disabled(!viewModel.canHideVoices)
+                                }
+                            }
+                        }
+                        .padding(.top, 2)
+                    }
+                    .frame(maxHeight: 180)
+                }
+
+                Text("Use the more button to hide a voice. Reload iPhone Voices brings hidden voices back.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
             .onAppear {
                 viewModel.loadAvailableVoicesIfNeeded()
