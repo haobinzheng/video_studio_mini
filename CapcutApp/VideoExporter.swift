@@ -5,7 +5,7 @@ struct VideoExporter {
     enum TimingMode: String, CaseIterable, Identifiable {
         case video = "Video"
         case story = "Story"
-        case realLife = "Real-Life"
+        case realLife = "Slideshow"
 
         var id: String { rawValue }
     }
@@ -218,6 +218,12 @@ struct VideoExporter {
         let naturalSize: CGSize
     }
 
+    private struct EffectiveSlideshowExportSettings {
+        let frameRate: Int32
+        let renderSize: CGSize
+        let presetName: String
+    }
+
     private final class VideoFrameCache {
         private struct CachedFrame {
             let key: String
@@ -295,6 +301,7 @@ struct VideoExporter {
         aspectRatio: AspectRatio,
         finalQuality: FinalExportQuality,
         timingMode: TimingMode,
+        includeCaptions: Bool = true,
         videoModeSettings: VideoModeExportSettings? = nil
     ) -> String {
         if timingMode == .video {
@@ -305,7 +312,11 @@ struct VideoExporter {
         }
 
         let safeDuration = CMTime(seconds: max(durationSeconds, 1), preferredTimescale: 600)
-        let timelineSegments = estimatedTimelineSegments(for: mediaItems, totalDuration: safeDuration)
+        let timelineSegments = estimatedTimelineSegments(
+            for: mediaItems,
+            totalDuration: safeDuration,
+            timingMode: timingMode
+        )
         let pressure = videoPressure(for: timelineSegments)
         let profile = resolvedRenderProfile(
             for: finalQuality.renderQuality,
@@ -313,7 +324,8 @@ struct VideoExporter {
             duration: safeDuration,
             videoPressure: pressure,
             timingMode: timingMode,
-            mediaItems: mediaItems
+            mediaItems: mediaItems,
+            includeCaptions: includeCaptions
         )
         let width = Int(profile.renderSize.width.rounded())
         let height = Int(profile.renderSize.height.rounded())
@@ -383,14 +395,21 @@ struct VideoExporter {
         case .video:
             totalDuration = minimumVisualDuration
         case .realLife:
-            totalDuration = realLifeVisualDuration(for: mediaItems)
+            totalDuration = realLifeDuration(
+                for: mediaItems,
+                narrationDuration: narrationTimeline.duration
+            )
         case .story:
             totalDuration = narrationTimeline.duration > .zero
                 ? narrationTimeline.duration
                 : minimumVisualDuration
         }
         let resolvedDuration = renderQuality.maximumDuration.map { min(totalDuration, $0) } ?? totalDuration
-        let baseTimelineSegments = try await makeTimelineSegments(for: mediaItems, totalDuration: totalDuration)
+        let baseTimelineSegments = try await makeTimelineSegments(
+            for: mediaItems,
+            totalDuration: totalDuration,
+            timingMode: timingMode
+        )
         let timelineSegments = resolvedDuration < totalDuration
             ? timelineSegmentsTrimmed(to: resolvedDuration, segments: baseTimelineSegments)
             : baseTimelineSegments
@@ -401,7 +420,9 @@ struct VideoExporter {
             duration: resolvedDuration,
             videoPressure: videoPressure,
             timingMode: timingMode,
-            mediaItems: mediaItems
+            mediaItems: mediaItems,
+            includeCaptions: includeCaptions,
+            videoModeSettings: videoModeSettings
         )
         let trimmedCaptionSegments = timingMode == .realLife || !includeCaptions
             ? []
@@ -415,6 +436,13 @@ struct VideoExporter {
 
         if timingMode == .realLife || shouldUseSmoothStoryExport {
             progressHandler?(0.24, "Building a real-life composition.")
+            let effectiveSlideshowSettings = effectiveSlideshowExportSettings(
+                requestedSettings: renderQuality == .preview ? nil : videoModeSettings,
+                mediaItems: mediaItems,
+                narrationDuration: narrationTimeline.duration,
+                fallbackRenderSize: renderProfile.renderSize,
+                fallbackFrameRate: renderProfile.frameRate
+            )
             try await exportRealLifeComposition(
                 timelineSegments: timelineSegments,
                 narrationURLs: trimmedNarrationURLs,
@@ -425,6 +453,7 @@ struct VideoExporter {
                 totalDuration: resolvedDuration,
                 renderSize: renderProfile.renderSize,
                 frameRate: renderProfile.frameRate,
+                exportPresetName: effectiveSlideshowSettings.presetName,
                 workspace: workspace,
                 outputURL: finalURL,
                 progressHandler: progressHandler
@@ -1094,6 +1123,7 @@ struct VideoExporter {
         totalDuration: CMTime,
         renderSize: CGSize,
         frameRate: Int32,
+        exportPresetName: String,
         workspace: URL,
         outputURL: URL,
         progressHandler: ((Double, String) -> Void)? = nil
@@ -1257,7 +1287,7 @@ struct VideoExporter {
 
         try await exportStitchedComposition(
             composition,
-            presetName: AVAssetExportPresetHighestQuality,
+            presetName: exportPresetName,
             outputURL: outputURL,
             audioMixParameters: audioMixParameters,
             videoComposition: makeVideoComposition(
@@ -1545,8 +1575,16 @@ struct VideoExporter {
         return pixelBuffer
     }
 
-    private func estimatedTimelineSegments(for mediaItems: [MediaItem], totalDuration: CMTime) -> [TimelineSegment] {
+    private func estimatedTimelineSegments(
+        for mediaItems: [MediaItem],
+        totalDuration: CMTime,
+        timingMode: TimingMode
+    ) -> [TimelineSegment] {
         guard !mediaItems.isEmpty, totalDuration > .zero else { return [] }
+
+        if timingMode == .realLife {
+            return realLifeTimelineSegments(for: mediaItems, totalDuration: totalDuration)
+        }
 
         let videoItems = mediaItems.filter { if case .video = $0.kind { return true }; return false }
         let photoItems = mediaItems.filter { if case .photo = $0.kind { return true }; return false }
@@ -1710,20 +1748,28 @@ struct VideoExporter {
     }
 
     private func realLifeVisualDuration(for mediaItems: [MediaItem]) -> CMTime {
-        let hasVideo = mediaItems.contains {
-            if case .video = $0.kind { return true }
-            return false
-        }
         let photoCount = mediaItems.filter {
             if case .photo = $0.kind { return true }
             return false
         }.count
+        let hasVideo = mediaItems.contains {
+            if case .video = $0.kind { return true }
+            return false
+        }
 
         if !hasVideo && photoCount > 0 {
-            return CMTime(seconds: 300, preferredTimescale: 600)
+            return CMTime(seconds: max(Double(photoCount) * 3.0, 3.0), preferredTimescale: 600)
         }
 
         return minimumVisualDuration(for: mediaItems)
+    }
+
+    private func realLifeDuration(for mediaItems: [MediaItem], narrationDuration: CMTime) -> CMTime {
+        let visualDuration = realLifeVisualDuration(for: mediaItems)
+        guard narrationDuration > .zero else {
+            return visualDuration
+        }
+        return max(visualDuration, narrationDuration)
     }
 
     private func videoOnlyDuration(for mediaItems: [MediaItem]) -> CMTime {
@@ -1737,7 +1783,15 @@ struct VideoExporter {
         }
     }
 
-    private func makeTimelineSegments(for mediaItems: [MediaItem], totalDuration: CMTime) async throws -> [TimelineSegment] {
+    private func makeTimelineSegments(
+        for mediaItems: [MediaItem],
+        totalDuration: CMTime,
+        timingMode: TimingMode
+    ) async throws -> [TimelineSegment] {
+        if timingMode == .realLife {
+            return realLifeTimelineSegments(for: mediaItems, totalDuration: totalDuration)
+        }
+
         let photoItems = mediaItems.filter { if case .photo = $0.kind { return true }; return false }
         let videoItems = mediaItems.filter { if case .video = $0.kind { return true }; return false }
         let hasVideos = !videoItems.isEmpty
@@ -1804,6 +1858,73 @@ struct VideoExporter {
                 break
             }
             if !hasVideos && loopIndex >= mediaItems.count {
+                break
+            }
+        }
+
+        return segments
+    }
+
+    private func realLifeTimelineSegments(for mediaItems: [MediaItem], totalDuration: CMTime) -> [TimelineSegment] {
+        guard !mediaItems.isEmpty, totalDuration > .zero else { return [] }
+
+        let hasVideos = mediaItems.contains {
+            if case .video = $0.kind { return true }
+            return false
+        }
+        let photoItems = mediaItems.filter {
+            if case .photo = $0.kind { return true }
+            return false
+        }
+        let photoCount = photoItems.count
+        let hasPhotos = photoCount > 0
+        let baseVisualDuration = realLifeVisualDuration(for: mediaItems)
+        let shouldLoop = totalDuration > baseVisualDuration
+        let allPhotos = !hasVideos && hasPhotos
+        let perPhotoDuration: CMTime = {
+            guard hasPhotos else { return .zero }
+            if allPhotos {
+                return CMTime(seconds: 3.0, preferredTimescale: 600)
+            }
+            return CMTime(seconds: 1.6, preferredTimescale: 600)
+        }()
+
+        var segments: [TimelineSegment] = []
+        var cursor = CMTime.zero
+        var loopIndex = 0
+
+        while cursor < totalDuration {
+            let item = mediaItems[loopIndex % mediaItems.count]
+            let intendedDuration: CMTime
+            switch item.kind {
+            case .photo:
+                intendedDuration = perPhotoDuration
+            case let .video(_, videoDuration):
+                intendedDuration = videoDuration
+            }
+
+            guard intendedDuration > .zero else {
+                loopIndex += 1
+                if !shouldLoop && loopIndex >= mediaItems.count {
+                    break
+                }
+                continue
+            }
+
+            let remaining = totalDuration - cursor
+            let duration = min(intendedDuration, remaining)
+            guard duration > .zero else { break }
+
+            segments.append(
+                TimelineSegment(
+                    mediaItem: item,
+                    timeRange: CMTimeRange(start: cursor, duration: duration)
+                )
+            )
+            cursor = cursor + duration
+            loopIndex += 1
+
+            if !shouldLoop && loopIndex >= mediaItems.count {
                 break
             }
         }
@@ -2125,7 +2246,9 @@ struct VideoExporter {
         duration: CMTime,
         videoPressure: VideoPressure,
         timingMode: TimingMode,
-        mediaItems: [MediaItem]
+        mediaItems: [MediaItem],
+        includeCaptions: Bool = true,
+        videoModeSettings: VideoModeExportSettings? = nil
     ) -> RenderProfile {
         let seconds = CMTimeGetSeconds(duration)
         let baseSize = quality.renderSize(for: aspectRatio)
@@ -2182,61 +2305,55 @@ struct VideoExporter {
                     videoSampleStride: 1
                 )
             }
+            let effectiveSettings = effectiveSlideshowExportSettings(
+                requestedSettings: quality == .preview ? nil : videoModeSettings,
+                mediaItems: mediaItems,
+                narrationDuration: duration,
+                fallbackRenderSize: preferredMediaDrivenRenderSize(
+                    for: mediaItems,
+                    aspectRatio: aspectRatio,
+                    minimumSize: baseSize
+                ),
+                fallbackFrameRate: {
+                    switch quality {
+                    case .preview:
+                        return 12
+                    case .finalStandard:
+                        return 24
+                    case .finalHigh:
+                        return 30
+                    }
+                }()
+            )
 
-            if !seconds.isFinite || seconds <= 180 {
-                return RenderProfile(renderSize: baseSize, frameRate: baseRate, longFormOptimized: false, videoSampleStride: 1)
-            }
+            return RenderProfile(
+                renderSize: effectiveSettings.renderSize,
+                frameRate: effectiveSettings.frameRate,
+                longFormOptimized: false,
+                videoSampleStride: 1
+            )
+        }
 
-            switch quality {
-            case .preview:
-                return RenderProfile(renderSize: baseSize, frameRate: baseRate, longFormOptimized: false, videoSampleStride: 1)
-            case .finalStandard:
-                if hasHeavyVideoLoad || seconds > 900 {
-                    return RenderProfile(
-                        renderSize: aspectRatio == .widescreen ? CGSize(width: 640, height: 360) : CGSize(width: 480, height: 360),
-                        frameRate: 10,
-                        longFormOptimized: true,
-                        videoSampleStride: 1
-                    )
-                }
-                if seconds > 420 {
-                    return RenderProfile(
-                        renderSize: aspectRatio == .widescreen ? CGSize(width: 960, height: 540) : CGSize(width: 720, height: 540),
-                        frameRate: 10,
-                        longFormOptimized: true,
-                        videoSampleStride: 1
-                    )
-                }
-                return RenderProfile(
-                    renderSize: aspectRatio == .widescreen ? CGSize(width: 960, height: 540) : CGSize(width: 720, height: 540),
-                    frameRate: baseRate,
-                    longFormOptimized: false,
-                    videoSampleStride: 1
-                )
-            case .finalHigh:
-                if hasHeavyVideoLoad || seconds > 900 {
-                    return RenderProfile(
-                        renderSize: aspectRatio == .widescreen ? CGSize(width: 960, height: 540) : CGSize(width: 720, height: 540),
-                        frameRate: 12,
-                        longFormOptimized: true,
-                        videoSampleStride: 1
-                    )
-                }
-                if seconds > 420 {
-                    return RenderProfile(
-                        renderSize: aspectRatio == .widescreen ? CGSize(width: 1280, height: 720) : CGSize(width: 960, height: 720),
-                        frameRate: 12,
-                        longFormOptimized: true,
-                        videoSampleStride: 1
-                    )
-                }
-                return RenderProfile(
-                    renderSize: aspectRatio == .widescreen ? CGSize(width: 1280, height: 720) : CGSize(width: 960, height: 720),
-                    frameRate: baseRate,
-                    longFormOptimized: false,
-                    videoSampleStride: 1
-                )
-            }
+        if timingMode == .story {
+            return RenderProfile(
+                renderSize: preferredMediaDrivenRenderSize(
+                    for: mediaItems,
+                    aspectRatio: aspectRatio,
+                    minimumSize: baseSize
+                ),
+                frameRate: {
+                    switch quality {
+                    case .preview:
+                        return 12
+                    case .finalStandard:
+                        return 24
+                    case .finalHigh:
+                        return 30
+                    }
+                }(),
+                longFormOptimized: false,
+                videoSampleStride: 1
+            )
         }
 
         guard seconds.isFinite, seconds > 180 else {
@@ -2328,6 +2445,43 @@ struct VideoExporter {
         let width = max(minimumSize.width, round(resolvedFitted.width / 2) * 2)
         let height = max(minimumSize.height, round(resolvedFitted.height / 2) * 2)
         return CGSize(width: width, height: height)
+    }
+
+    private func effectiveSlideshowExportSettings(
+        requestedSettings: VideoModeExportSettings?,
+        mediaItems: [MediaItem],
+        narrationDuration: CMTime,
+        fallbackRenderSize: CGSize,
+        fallbackFrameRate: Int32
+    ) -> EffectiveSlideshowExportSettings {
+        guard let requestedSettings else {
+            return EffectiveSlideshowExportSettings(
+                frameRate: fallbackFrameRate,
+                renderSize: fallbackRenderSize,
+                presetName: AVAssetExportPresetHighestQuality
+            )
+        }
+
+        let mediaDuration = realLifeVisualDuration(for: mediaItems)
+        let narrationIsLonger = narrationDuration > mediaDuration
+        let selectedIsHeavyCombo =
+            requestedSettings.resolution == .p4k &&
+            requestedSettings.frameRate == .fps60 &&
+            requestedSettings.quality == .high
+
+        if narrationIsLonger && selectedIsHeavyCombo {
+            return EffectiveSlideshowExportSettings(
+                frameRate: VideoModeFrameRate.fps30.value,
+                renderSize: VideoModeResolution.p1080.renderSize,
+                presetName: VideoModeQuality.high.exportPresetName
+            )
+        }
+
+        return EffectiveSlideshowExportSettings(
+            frameRate: requestedSettings.frameRate.value,
+            renderSize: requestedSettings.resolution.renderSize,
+            presetName: requestedSettings.quality.exportPresetName
+        )
     }
 
     private func videoPressure(for timelineSegments: [TimelineSegment]) -> VideoPressure {

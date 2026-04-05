@@ -212,7 +212,7 @@ final class AppViewModel: NSObject, ObservableObject {
                 hasPendingFinalVideoChanges = true
                 exportedVideoURL = nil
                 exportProgress = 0
-                statusMessage = "Video mode frame rate updated to \(selectedVideoModeFrameRate.displayName). Build a new final render to use it."
+                statusMessage = "\(selectedTimingMode.rawValue) frame rate updated to \(selectedVideoModeFrameRate.displayName). Build a new final render to use it."
             }
         }
     }
@@ -222,7 +222,7 @@ final class AppViewModel: NSObject, ObservableObject {
                 hasPendingFinalVideoChanges = true
                 exportedVideoURL = nil
                 exportProgress = 0
-                statusMessage = "Video mode resolution updated to \(selectedVideoModeResolution.rawValue). Build a new final render to use it."
+                statusMessage = "\(selectedTimingMode.rawValue) resolution updated to \(selectedVideoModeResolution.rawValue). Build a new final render to use it."
             }
         }
     }
@@ -232,7 +232,7 @@ final class AppViewModel: NSObject, ObservableObject {
                 hasPendingFinalVideoChanges = true
                 exportedVideoURL = nil
                 exportProgress = 0
-                statusMessage = "Video mode export quality updated to \(selectedVideoModeQuality.rawValue). Build a new final render to use it."
+                statusMessage = "\(selectedTimingMode.rawValue) export quality updated to \(selectedVideoModeQuality.rawValue). Build a new final render to use it."
             }
         }
     }
@@ -912,7 +912,7 @@ final class AppViewModel: NSObject, ObservableObject {
                         timingMode: timingMode,
                         includeCaptions: includeCaptions,
                         renderQuality: renderQuality,
-                        videoModeSettings: timingMode == .video ? videoModeSettings : nil,
+                        videoModeSettings: (timingMode == .video || timingMode == .realLife) ? videoModeSettings : nil,
                         externalCues: previewCues,
                         externalNarrationAudioURL: previewAudioURL,
                         progressHandler: { progress, message in
@@ -1792,7 +1792,8 @@ final class AppViewModel: NSObject, ObservableObject {
             aspectRatio: selectedAspectRatio,
             finalQuality: selectedFinalExportQuality,
             timingMode: selectedTimingMode,
-            videoModeSettings: selectedTimingMode == .video ? videoModeSettings : nil
+            includeCaptions: selectedTimingMode == .story ? includesFinalCaptions : false,
+            videoModeSettings: (selectedTimingMode == .video || selectedTimingMode == .realLife) ? videoModeSettings : nil
         )
     }
 
@@ -1936,6 +1937,9 @@ final class AppViewModel: NSObject, ObservableObject {
         case .video:
             return estimatedVideoOnlyDurationSeconds
         case .realLife:
+            if estimatedNarrationDurationSeconds > 0 {
+                return max(estimatedMediaOnlyDurationSeconds, estimatedNarrationDurationSeconds)
+            }
             return estimatedMediaOnlyDurationSeconds
         case .story:
             return estimatedNarrationDurationSeconds > 0 ? estimatedNarrationDurationSeconds : estimatedMediaOnlyDurationSeconds

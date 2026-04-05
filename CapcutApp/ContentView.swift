@@ -1769,10 +1769,10 @@ struct ContentView: View {
 
                 videoAspectRatioCard
                 videoTimingModeCard
-                if viewModel.selectedTimingMode == .video {
+                if viewModel.selectedTimingMode == .video || viewModel.selectedTimingMode == .realLife {
                     videoModeExportCard
                 }
-                if viewModel.selectedTimingMode != .video {
+                if viewModel.selectedTimingMode == .story {
                     videoQualityCard
                 }
                 estimatedExportSpecCard
