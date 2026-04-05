@@ -2051,6 +2051,10 @@ final class AppViewModel: NSObject, ObservableObject {
     private func selectLanguageCompatibleVoiceIfNeeded(for text: String) {
         guard !availableVoices.isEmpty else { return }
 
+        if availableVoices.contains(where: { $0.id == selectedVoiceIdentifier }) {
+            return
+        }
+
         let expectsCJKVoice = SpeechVoiceLibrary.containsCJKContent(in: text)
         let selectedIsCompatible = availableVoices.contains {
             $0.id == selectedVoiceIdentifier && Self.voiceOption($0, isCompatibleWithCJK: expectsCJKVoice)
@@ -2090,7 +2094,11 @@ final class AppViewModel: NSObject, ObservableObject {
 
     private static func voiceOption(_ option: VoiceOption, isCompatibleWithCJK expectsCJKVoice: Bool) -> Bool {
         if expectsCJKVoice {
-            return option.language.hasPrefix("zh") || option.language.hasPrefix("yue")
+            return option.language.hasPrefix("zh")
+                || option.language.hasPrefix("yue")
+                || option.language.hasPrefix("wuu")
+                || option.language.hasPrefix("ja")
+                || option.language.hasPrefix("ko")
         }
         return option.language.hasPrefix("en")
     }
@@ -2283,11 +2291,10 @@ enum SpeechVoiceLibrary {
 
     private static func resolvedVoice(for text: String, preferredIdentifier: String) -> AVSpeechSynthesisVoice? {
         let preferredVoice = voice(for: preferredIdentifier)
-        let expectsCJKVoice = containsCJKContent(in: text)
-
-        if let preferredVoice, isVoice(preferredVoice, compatibleWithCJK: expectsCJKVoice) {
+        if let preferredVoice {
             return preferredVoice
         }
+        let expectsCJKVoice = containsCJKContent(in: text)
 
         let candidateVoices = AVSpeechSynthesisVoice.speechVoices().filter {
             !isNoveltyVoice($0) &&
