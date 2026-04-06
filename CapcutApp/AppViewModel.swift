@@ -1,6 +1,7 @@
 import AVFoundation
 import CryptoKit
 import CoreTransferable
+import NaturalLanguage
 import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
@@ -100,6 +101,33 @@ final class AppViewModel: NSObject, ObservableObject {
         let voiceCount: Int
     }
 
+    struct NarrationSpeedOption: Identifiable, Equatable {
+        let multiplier: Double
+
+        var id: Double { multiplier }
+        var label: String { String(format: "%.1fx", multiplier) }
+    }
+
+    private enum ScriptLanguageFamily: String {
+        case english = "en"
+        case chinese = "zh"
+        case japanese = "ja"
+        case korean = "ko"
+        case arabic = "ar"
+        case unknown = "unknown"
+
+        var label: String {
+            switch self {
+            case .english: return "English"
+            case .chinese: return "Chinese"
+            case .japanese: return "Japanese"
+            case .korean: return "Korean"
+            case .arabic: return "Arabic"
+            case .unknown: return "Unknown"
+            }
+        }
+    }
+
     struct DemoTrackOption: Identifiable {
         let id: String
         let name: String
@@ -121,6 +149,13 @@ final class AppViewModel: NSObject, ObservableObject {
         let description: String?
         let url: URL
         let source: Source
+    }
+
+    struct SoundtrackItem: Identifiable, Equatable {
+        let id = UUID()
+        let url: URL
+        let name: String
+        let duration: TimeInterval
     }
 
     @Published var mediaItems: [MediaItem] = []
@@ -155,6 +190,7 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var currentSlideIndex = 0
     @Published var importedMusicName = "No music selected"
     @Published var isImportingMusic = false
+    @Published var soundtrackItems: [SoundtrackItem] = []
     @Published var isLoadingMediaSelection = false
     @Published var isSpeaking = false
     @Published var isPreparingNarrationPreview = false
@@ -163,6 +199,8 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var narrationPreviewCurrentTime: Double = 0
     @Published var narrationPreviewCaption = "Build a seekable preview to test subtitle sync."
     @Published var isMusicPlaying = false
+    @Published var musicPlaybackDuration: Double = 0
+    @Published var musicPlaybackCurrentTime: Double = 0
     @Published var isExportingVideo = false
     @Published var isPreparingVideoPreview = false
     @Published var exportProgress: Double = 0
@@ -187,6 +225,14 @@ final class AppViewModel: NSObject, ObservableObject {
                 markAllVideoRendersDirty(reason: "Voice updated. Build a new preview or final render to hear the change.")
                 invalidateNarrationPreviewIfNeeded()
             }
+        }
+    }
+    @Published var selectedNarrationSpeed: Double = 1.0 {
+        didSet {
+            guard oldValue != selectedNarrationSpeed else { return }
+            stopLiveNarrationPlayback(reason: "Speech speed updated. Tap Play Script to hear the new pacing.")
+            markAllVideoRendersDirty(reason: "Speech speed updated. Build a new preview or final render to use the new pacing.")
+            invalidateNarrationPreviewIfNeeded()
         }
     }
     @Published var selectedVoiceName = "No Apple voice selected yet."
@@ -299,10 +345,12 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var storageUsage = StorageUsageSnapshot()
     @Published var isLoadingMusicLibrary = false
     @Published var musicLibraryItems: [MusicLibraryItem] = []
+    @Published var musicLibraryFeedback = ""
 
     private let videoExporter = VideoExporter()
     private let narrationPreviewBuilder = NarrationPreviewBuilder()
     private var audioPlayer: AVAudioPlayer?
+    private var musicPlaybackTimer: Timer?
     private var narrationPreviewPlayer: AVAudioPlayer?
     private var narrationPreviewTimer: Timer?
     private var importedMusicURL: URL?
@@ -311,6 +359,7 @@ final class AppViewModel: NSObject, ObservableObject {
     private var narrationTimelineEngine = SubtitleTimelineEngine(cues: [])
     private var previewSourceText = ""
     private var previewSourceVoiceIdentifier = ""
+    private var previewSourceSpeechRate: Double = 1.0
     private var narrationPreviewIsFullLength = false
     private var pendingUtteranceCount = 0
     private var didLoadFullVoiceList = false
@@ -352,6 +401,11 @@ final class AppViewModel: NSObject, ObservableObject {
             return
         }
 
+        guard !hasNarrationLanguageMismatch else {
+            statusMessage = narrationLanguageWarning ?? "Selected voice language does not match the script."
+            return
+        }
+
         if availableVoices.isEmpty {
             reloadAvailableVoices(restoringHiddenVoices: false)
         }
@@ -381,7 +435,8 @@ final class AppViewModel: NSObject, ObservableObject {
 
         let utterances = SpeechVoiceLibrary.makeUtterances(
             from: narrationText,
-            voiceIdentifier: activeVoiceIdentifier
+            voiceIdentifier: activeVoiceIdentifier,
+            speechRateMultiplier: selectedNarrationSpeed
         )
         guard !utterances.isEmpty else {
             statusMessage = "Add some narration text before starting text-to-speech."
@@ -402,13 +457,20 @@ final class AppViewModel: NSObject, ObservableObject {
             return
         }
 
+        guard !hasNarrationLanguageMismatch else {
+            statusMessage = narrationLanguageWarning ?? "Selected voice language does not match the script."
+            return
+        }
+
         let voiceIdentifier = selectedVoiceIdentifier
+        let speechRateMultiplier = selectedNarrationSpeed
 
         Task {
             do {
                 try await prepareNarrationPreview(
                     text: text,
                     voiceIdentifier: voiceIdentifier,
+                    speechRateMultiplier: speechRateMultiplier,
                     maximumDuration: 180,
                     startedMessage: "Generating seekable narration preview.",
                     completedMessage: "Seekable narration preview is ready."
@@ -561,18 +623,46 @@ final class AppViewModel: NSObject, ObservableObject {
     func importMusic(from selectedURL: URL) {
         configureAudioSessionIfNeeded()
         Task {
-            await importMusicAsset(from: selectedURL)
+            await importMusicAssets(from: [selectedURL], appendToQueue: false)
         }
     }
 
-    func importMusicVideo(from item: PhotosPickerItem) async {
+    func importMusic(from selectedURLs: [URL]) {
+        configureAudioSessionIfNeeded()
+        Task {
+            await importMusicAssets(from: selectedURLs, appendToQueue: false)
+        }
+    }
+
+    func addMusic(from selectedURLs: [URL]) {
+        configureAudioSessionIfNeeded()
+        Task {
+            await importMusicAssets(from: selectedURLs, appendToQueue: true)
+        }
+    }
+
+    func importMusicToLibrary(from selectedURLs: [URL]) {
+        configureAudioSessionIfNeeded()
+        Task {
+            await saveMusicAssetsToLibrary(from: selectedURLs)
+        }
+    }
+
+    func extractSoundtrackForExport(from item: PhotosPickerItem) async -> URL? {
         configureAudioSessionIfNeeded()
         guard let pickedURL = await importedVideoURL(from: item) else {
             statusMessage = "Could not load that video from Photos."
-            return
+            return nil
         }
 
-        await importMusicAsset(from: pickedURL, shouldManageSecurityScope: false)
+        do {
+            let extractedURL = try await extractAudioTrackIfNeeded(from: pickedURL)
+            statusMessage = "Soundtrack extracted. Choose a location to save or share it."
+            return extractedURL
+        } catch {
+            statusMessage = error.localizedDescription.isEmpty ? "Could not extract a soundtrack from that video." : error.localizedDescription
+            return nil
+        }
     }
 
     func loadSelectedBundledMusic() {
@@ -593,6 +683,14 @@ final class AppViewModel: NSObject, ObservableObject {
 
         do {
             stopMusic()
+            let duration = Self.quickAudioDuration(for: bundledURL)
+            soundtrackItems = [
+                SoundtrackItem(
+                    url: bundledURL,
+                    name: track.name,
+                    duration: duration
+                )
+            ]
             importedMusicURL = bundledURL
             importedMusicName = "\(track.name).\(track.fileExtension)"
             try prepareAudioPlayer(with: bundledURL)
@@ -606,9 +704,13 @@ final class AppViewModel: NSObject, ObservableObject {
 
     func clearMusicSelection() {
         stopMusicSilently()
+        stopMusicPlaybackTimer()
         audioPlayer = nil
         importedMusicURL = nil
         importedMusicName = "No music selected"
+        soundtrackItems = []
+        musicPlaybackCurrentTime = 0
+        musicPlaybackDuration = 0
         isImportingMusic = false
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
@@ -626,19 +728,84 @@ final class AppViewModel: NSObject, ObservableObject {
         }
     }
 
+    func deleteMusicLibraryItem(_ item: MusicLibraryItem) {
+        guard item.source == .imported else { return }
+
+        stopMusicSilently()
+
+        let remainingQueue = soundtrackItems.filter { $0.url.standardizedFileURL != item.url.standardizedFileURL }
+        let shouldClearSelection = importedMusicURL?.standardizedFileURL == item.url.standardizedFileURL
+
+        Task {
+            if remainingQueue.count != soundtrackItems.count {
+                if remainingQueue.isEmpty {
+                    clearMusicSelection()
+                } else {
+                    await rebuildCombinedSoundtrack(from: remainingQueue, startedMessage: "Updating soundtrack after library delete...")
+                }
+            } else if shouldClearSelection {
+                clearMusicSelection()
+            }
+
+            do {
+                try FileManager.default.removeItem(at: item.url)
+                statusMessage = "\(item.name) removed from Music Library."
+                musicLibraryFeedback = "\(item.name) removed from Music Library."
+            } catch {
+                statusMessage = "Could not remove \(item.name) from Music Library."
+                musicLibraryFeedback = "Could not remove \(item.name) from Music Library."
+            }
+            refreshMusicLibrary()
+        }
+    }
+
     func selectMusicLibraryItem(_ item: MusicLibraryItem) {
+        previewMusicLibraryItem(item)
+    }
+
+    func previewMusicLibraryItem(_ item: MusicLibraryItem) {
         configureAudioSessionIfNeeded()
 
         do {
             stopMusicSilently()
-            importedMusicURL = item.url
-            importedMusicName = item.url.lastPathComponent
             try prepareAudioPlayer(with: item.url)
-            hasPendingPreviewChanges = true
-            hasPendingFinalVideoChanges = true
-            statusMessage = "\(item.name) is ready to play."
+            statusMessage = "\(item.name) is ready to preview."
         } catch {
             statusMessage = "Could not load that music item."
+        }
+    }
+
+    func restoreProjectMusicAfterLibraryPreview() {
+        stopMusicSilently()
+
+        guard let importedMusicURL else {
+            audioPlayer = nil
+            musicPlaybackCurrentTime = 0
+            musicPlaybackDuration = 0
+            isMusicPlaying = false
+            return
+        }
+
+        do {
+            try prepareAudioPlayer(with: importedMusicURL)
+        } catch {
+            audioPlayer = nil
+            musicPlaybackCurrentTime = 0
+            musicPlaybackDuration = 0
+            isMusicPlaying = false
+        }
+    }
+
+    func addMusicLibraryItem(_ item: MusicLibraryItem) {
+        let queueItem = SoundtrackItem(url: item.url, name: item.name, duration: item.duration)
+        if soundtrackItems.isEmpty {
+            Task {
+                await rebuildCombinedSoundtrack(from: [queueItem], startedMessage: "Adding soundtrack to project...")
+            }
+        } else {
+            Task {
+                await rebuildCombinedSoundtrack(from: soundtrackItems + [queueItem], startedMessage: "Adding soundtrack to project...")
+            }
         }
     }
 
@@ -655,10 +822,13 @@ final class AppViewModel: NSObject, ObservableObject {
 
         if audioPlayer.isPlaying {
             audioPlayer.pause()
+            stopMusicPlaybackTimer()
+            syncMusicPlaybackState()
             isMusicPlaying = false
             statusMessage = "Background music paused."
         } else {
             audioPlayer.play()
+            startMusicPlaybackTimer()
             isMusicPlaying = true
             statusMessage = "Background music playing."
         }
@@ -667,6 +837,8 @@ final class AppViewModel: NSObject, ObservableObject {
     func stopMusic() {
         audioPlayer?.stop()
         audioPlayer?.currentTime = 0
+        stopMusicPlaybackTimer()
+        syncMusicPlaybackState()
         isMusicPlaying = false
         statusMessage = "Background music stopped."
     }
@@ -674,7 +846,46 @@ final class AppViewModel: NSObject, ObservableObject {
     func stopMusicSilently() {
         audioPlayer?.stop()
         audioPlayer?.currentTime = 0
+        stopMusicPlaybackTimer()
+        syncMusicPlaybackState()
         isMusicPlaying = false
+    }
+
+    func seekMusic(to time: Double) {
+        guard let audioPlayer else { return }
+        let clampedTime = min(max(time, 0), audioPlayer.duration)
+        audioPlayer.currentTime = clampedTime
+        syncMusicPlaybackState()
+    }
+
+    func moveSoundtrackItem(withId sourceID: UUID, before targetID: UUID) {
+        guard sourceID != targetID,
+              let sourceIndex = soundtrackItems.firstIndex(where: { $0.id == sourceID }),
+              let targetIndex = soundtrackItems.firstIndex(where: { $0.id == targetID }) else {
+            return
+        }
+
+        let movedItem = soundtrackItems[sourceIndex]
+        soundtrackItems.remove(at: sourceIndex)
+        let destinationIndex = soundtrackItems.firstIndex(where: { $0.id == targetID }) ?? targetIndex
+        soundtrackItems.insert(movedItem, at: destinationIndex)
+        Task {
+            await rebuildCombinedSoundtrack(from: soundtrackItems, startedMessage: "Updating soundtrack order...")
+        }
+    }
+
+    func removeSoundtrackItem(withId itemID: UUID) {
+        guard let itemIndex = soundtrackItems.firstIndex(where: { $0.id == itemID }) else { return }
+        soundtrackItems.remove(at: itemIndex)
+
+        if soundtrackItems.isEmpty {
+            clearMusicSelection()
+            return
+        }
+
+        Task {
+            await rebuildCombinedSoundtrack(from: soundtrackItems, startedMessage: "Removing track from soundtrack...")
+        }
     }
 
     func nextSlide() {
@@ -732,16 +943,21 @@ final class AppViewModel: NSObject, ObservableObject {
 
         let currentMediaItems = mediaItems
         let currentMusicURL = importedMusicURL?.standardizedFileURL
+        let currentSoundtrackItemURLs = soundtrackItems.map(\.url).map { $0.standardizedFileURL }
         let currentExportURL = exportedVideoURL?.standardizedFileURL
         let currentPreviewURL = videoPreviewURL?.standardizedFileURL
 
         stopMusicSilently()
+        stopMusicPlaybackTimer()
         clearNarrationPreviewState(resetCaption: true)
         mediaItems = []
         selectedPhotoItems = []
         currentSlideIndex = 0
         importedMusicURL = nil
         importedMusicName = "No music selected"
+        soundtrackItems = []
+        musicPlaybackCurrentTime = 0
+        musicPlaybackDuration = 0
         audioPlayer = nil
         exportedVideoURL = nil
         videoPreviewURL = nil
@@ -756,6 +972,7 @@ final class AppViewModel: NSObject, ObservableObject {
             let result = await Task.detached(priority: .utility) {
                 Self.performCurrentProjectCleanup(
                     mediaItems: currentMediaItems,
+                    soundtrackItemURLs: currentSoundtrackItemURLs,
                     musicURL: currentMusicURL,
                     exportedVideoURL: currentExportURL,
                     previewVideoURL: currentPreviewURL
@@ -838,6 +1055,11 @@ final class AppViewModel: NSObject, ObservableObject {
             return
         }
 
+        guard !hasNarrationLanguageMismatchForRender else {
+            statusMessage = narrationLanguageWarning ?? "Selected voice language does not match the script."
+            return
+        }
+
         guard hasRenderableMediaForSelectedMode else {
             statusMessage = selectedTimingMode == .video
                 ? "Import at least one video before using Video mode."
@@ -878,6 +1100,7 @@ final class AppViewModel: NSObject, ObservableObject {
         let narrationVolume = narrationVolume
         let videoAudioVolume = videoAudioVolume
         let voiceIdentifier = selectedVoiceIdentifier
+        let speechRateMultiplier = selectedNarrationSpeed
         let exporter = videoExporter
         let aspectRatio = selectedAspectRatio
         let timingMode = selectedTimingMode
@@ -895,12 +1118,14 @@ final class AppViewModel: NSObject, ObservableObject {
                 if shouldPrepareNarration, needsPreviewRefresh(
                     for: narrationText,
                     voiceIdentifier: voiceIdentifier,
+                    speechRateMultiplier: speechRateMultiplier,
                     requireFullLength: requiresFullNarrationPreview
                 ) {
                     exportProgress = 0.08
                     try await prepareNarrationPreview(
                         text: narrationText,
                         voiceIdentifier: voiceIdentifier,
+                        speechRateMultiplier: speechRateMultiplier,
                         maximumDuration: requiresFullNarrationPreview ? nil : (renderQuality == .preview ? 180 : nil),
                         startedMessage: renderQuality == .preview
                             ? "Preparing narration and captions for the quick preview."
@@ -1099,6 +1324,7 @@ final class AppViewModel: NSObject, ObservableObject {
 
     private func currentProtectedStorageURLs() -> Set<URL> {
         var urls = Set(mediaItems.compactMap({ self.mediaVideoURLIfManagedCopy(for: $0) }).map { $0.standardizedFileURL })
+        urls.formUnion(soundtrackItems.map(\.url).map { $0.standardizedFileURL })
 
         if let exportedVideoURL {
             urls.insert(exportedVideoURL.standardizedFileURL)
@@ -1165,6 +1391,7 @@ final class AppViewModel: NSObject, ObservableObject {
 
     nonisolated private static func performCurrentProjectCleanup(
         mediaItems: [MediaItem],
+        soundtrackItemURLs: [URL],
         musicURL: URL?,
         exportedVideoURL: URL?,
         previewVideoURL: URL?
@@ -1172,6 +1399,9 @@ final class AppViewModel: NSObject, ObservableObject {
         var result = StorageCleanupResult()
 
         for url in mediaItems.compactMap({ Self.mediaVideoIfManagedCopyURL(for: $0) as URL? }) {
+            result = mergeCleanupResults(result, removeItem(at: url.standardizedFileURL))
+        }
+        for url in soundtrackItemURLs {
             result = mergeCleanupResults(result, removeItem(at: url.standardizedFileURL))
         }
         if let musicURL {
@@ -1285,8 +1515,49 @@ final class AppViewModel: NSObject, ObservableObject {
             )
         }
 
-        return items.sorted { lhs, rhs in
-            lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
+        let fileManager = FileManager.default
+        let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
+
+        if let documentContents = try? fileManager.contentsOfDirectory(
+            at: documents,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) {
+            for url in documentContents {
+                guard let importedURL = importedAudioDocumentURL(url) else { continue }
+                let duration = await audioDuration(for: importedURL)
+                items.append(
+                    MusicLibraryItem(
+                        id: "imported-\(importedURL.lastPathComponent)",
+                        name: displayMusicName(for: importedURL),
+                        duration: duration,
+                        description: "Saved import in FluxCut",
+                        url: importedURL,
+                        source: .imported
+                    )
+                )
+            }
+        }
+
+        var dedupedItemsByKey: [String: MusicLibraryItem] = [:]
+        for item in items {
+            let key = "\(item.source.rawValue.lowercased())|\(item.name.lowercased())|\(Int(item.duration.rounded()))"
+            if let existing = dedupedItemsByKey[key] {
+                if item.name.localizedCaseInsensitiveCompare(existing.name) == .orderedAscending {
+                    dedupedItemsByKey[key] = item
+                }
+            } else {
+                dedupedItemsByKey[key] = item
+            }
+        }
+
+        return dedupedItemsByKey.values.sorted { lhs, rhs in
+            let lhsRank = sourceSortRank(lhs.source)
+            let rhsRank = sourceSortRank(rhs.source)
+            if lhsRank != rhsRank {
+                return lhsRank < rhsRank
+            }
+            return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
     }
 
@@ -1305,9 +1576,18 @@ final class AppViewModel: NSObject, ObservableObject {
 
     nonisolated private static func importedAudioDocumentURL(_ url: URL) -> URL? {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        guard url.deletingLastPathComponent() == documents else { return nil }
+        guard url.deletingLastPathComponent().standardizedFileURL == documents.standardizedFileURL else { return nil }
+        guard !url.hasDirectoryPath else { return nil }
         guard !url.lastPathComponent.hasPrefix("picked-video-") else { return nil }
         guard !url.lastPathComponent.hasPrefix("capcut-mini-") else { return nil }
+        guard !url.lastPathComponent.hasPrefix(".") else { return nil }
+
+        let ext = url.pathExtension.lowercased()
+        let knownAudioExtensions = Set(["mp3", "m4a", "aac", "wav", "aif", "aiff", "caf", "m4b"])
+        if knownAudioExtensions.contains(ext) {
+            return url
+        }
+
         guard importedMediaType(for: url) == .audio else { return nil }
         return url
     }
@@ -1366,17 +1646,24 @@ final class AppViewModel: NSObject, ObservableObject {
         narrationText.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    private func needsPreviewRefresh(for text: String, voiceIdentifier: String, requireFullLength: Bool = false) -> Bool {
+    private func needsPreviewRefresh(
+        for text: String,
+        voiceIdentifier: String,
+        speechRateMultiplier: Double,
+        requireFullLength: Bool = false
+    ) -> Bool {
         narrationPreviewAudioURL == nil
             || narrationPreviewCues.isEmpty
             || previewSourceText != text
             || previewSourceVoiceIdentifier != voiceIdentifier
+            || abs(previewSourceSpeechRate - speechRateMultiplier) > 0.0001
             || (requireFullLength && !narrationPreviewIsFullLength)
     }
 
     private func prepareNarrationPreview(
         text: String,
         voiceIdentifier: String,
+        speechRateMultiplier: Double,
         maximumDuration: TimeInterval? = nil,
         startedMessage: String,
         completedMessage: String
@@ -1393,6 +1680,7 @@ final class AppViewModel: NSObject, ObservableObject {
         let preview = try await narrationPreviewBuilder.buildPreview(
             text: text,
             voiceIdentifier: voiceIdentifier,
+            speechRateMultiplier: speechRateMultiplier,
             maximumDuration: maximumDuration
         )
         narrationPreviewPlayer = try AVAudioPlayer(contentsOf: preview.audioURL)
@@ -1405,6 +1693,7 @@ final class AppViewModel: NSObject, ObservableObject {
         narrationPreviewCaption = preview.cues.first?.text ?? "Preview ready."
         previewSourceText = text
         previewSourceVoiceIdentifier = voiceIdentifier
+        previewSourceSpeechRate = speechRateMultiplier
         narrationPreviewIsFullLength = maximumDuration == nil
         statusMessage = completedMessage
     }
@@ -1424,6 +1713,7 @@ final class AppViewModel: NSObject, ObservableObject {
         narrationTimelineEngine = SubtitleTimelineEngine(cues: [])
         previewSourceText = ""
         previewSourceVoiceIdentifier = ""
+        previewSourceSpeechRate = 1.0
         narrationPreviewIsFullLength = false
         isNarrationPreviewPlaying = false
         stopNarrationPreviewTimer()
@@ -1492,45 +1782,143 @@ final class AppViewModel: NSObject, ObservableObject {
         return destination
     }
 
-    private func importMusicAsset(from selectedURL: URL, shouldManageSecurityScope: Bool = true) async {
+    private func importMusicAssets(
+        from selectedURLs: [URL],
+        appendToQueue: Bool,
+        shouldManageSecurityScope: Bool = true
+    ) async {
         isImportingMusic = true
-        statusMessage = "Importing soundtrack..."
+        statusMessage = selectedURLs.count > 1 ? "Importing soundtrack files..." : "Importing soundtrack..."
         defer {
             isImportingMusic = false
         }
 
         do {
             stopMusicSilently()
-            let canAccess = shouldManageSecurityScope ? selectedURL.startAccessingSecurityScopedResource() : false
-            defer {
-                if canAccess {
-                    selectedURL.stopAccessingSecurityScopedResource()
+            var importedItems: [SoundtrackItem] = []
+
+            for selectedURL in selectedURLs {
+                let canAccess = shouldManageSecurityScope ? selectedURL.startAccessingSecurityScopedResource() : false
+                defer {
+                    if canAccess {
+                        selectedURL.stopAccessingSecurityScopedResource()
+                    }
                 }
+
+                let imported = try await prepareImportedMusicAsset(from: selectedURL)
+                importedItems.append(
+                    SoundtrackItem(
+                        url: imported.url,
+                        name: displayNameWithoutExtension(imported.displayName),
+                        duration: imported.duration
+                    )
+                )
             }
 
-            let imported = try await prepareImportedMusicAsset(from: selectedURL)
-            importedMusicURL = imported.url
-            importedMusicName = imported.displayName
-            try prepareAudioPlayer(with: imported.url)
-            hasPendingPreviewChanges = true
-            hasPendingFinalVideoChanges = true
-            statusMessage = imported.wasExtractedFromVideo
-                ? "Video soundtrack extracted and ready to play."
-                : "Music imported and ready to play."
+            let updatedQueue = appendToQueue ? soundtrackItems + importedItems : importedItems
+            await rebuildCombinedSoundtrack(
+                from: updatedQueue,
+                startedMessage: selectedURLs.count > 1 ? "Combining soundtrack files..." : "Preparing soundtrack..."
+            )
+            refreshMusicLibrary()
         } catch {
             statusMessage = error.localizedDescription.isEmpty ? "Could not import that music file." : error.localizedDescription
         }
     }
 
-    private func prepareImportedMusicAsset(from sourceURL: URL) async throws -> (url: URL, displayName: String, wasExtractedFromVideo: Bool) {
+    private func saveMusicAssetsToLibrary(
+        from selectedURLs: [URL],
+        shouldManageSecurityScope: Bool = true
+    ) async {
+        isImportingMusic = true
+        statusMessage = selectedURLs.count > 1 ? "Importing tracks into Music Library..." : "Importing track into Music Library..."
+        defer {
+            isImportingMusic = false
+        }
+
+        do {
+            var importedCount = 0
+            var existingCount = 0
+            for selectedURL in selectedURLs {
+                let canAccess = shouldManageSecurityScope ? selectedURL.startAccessingSecurityScopedResource() : false
+                defer {
+                    if canAccess {
+                        selectedURL.stopAccessingSecurityScopedResource()
+                    }
+                }
+
+                if let existingURL = try existingImportedAudioURL(matching: selectedURL) {
+                    let _ = existingURL
+                    existingCount += 1
+                    continue
+                }
+
+                _ = try await prepareImportedMusicAsset(from: selectedURL)
+                importedCount += 1
+            }
+
+            refreshMusicLibrary()
+            switch (importedCount, existingCount) {
+            case (0, let duplicates) where duplicates > 0:
+                let message = duplicates == 1
+                    ? "That music already exists in Music Library."
+                    : "\(duplicates) music files already exist in Music Library."
+                statusMessage = message
+                musicLibraryFeedback = message
+            case (let imported, 0):
+                let message = imported == 1
+                    ? "Music imported into Music Library."
+                    : "\(imported) music files imported into Music Library."
+                statusMessage = message
+                musicLibraryFeedback = message
+            case (let imported, let duplicates):
+                let message = "\(imported) imported • \(duplicates) already existed"
+                statusMessage = message
+                musicLibraryFeedback = message
+            default:
+                statusMessage = "No music files were imported."
+                musicLibraryFeedback = "No music files were imported."
+            }
+        } catch {
+            statusMessage = error.localizedDescription.isEmpty ? "Could not import that music file into Music Library." : error.localizedDescription
+            musicLibraryFeedback = statusMessage
+        }
+    }
+
+    private func existingImportedAudioURL(matching sourceURL: URL) throws -> URL? {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let sourceSize = try sourceURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        let sourceExtension = sourceURL.pathExtension.lowercased()
+        let sourceName = Self.displayMusicName(for: sourceURL).lowercased()
+
+        let documentContents = try FileManager.default.contentsOfDirectory(
+            at: documents,
+            includingPropertiesForKeys: [.fileSizeKey],
+            options: [.skipsHiddenFiles]
+        )
+
+        for url in documentContents {
+            guard let importedURL = Self.importedAudioDocumentURL(url) else { continue }
+            guard importedURL.pathExtension.lowercased() == sourceExtension else { continue }
+            guard Self.displayMusicName(for: importedURL).lowercased() == sourceName else { continue }
+            let importedSize = try importedURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+            if importedSize == sourceSize {
+                return importedURL
+            }
+        }
+
+        return nil
+    }
+
+    private func prepareImportedMusicAsset(from sourceURL: URL) async throws -> (url: URL, displayName: String, wasExtractedFromVideo: Bool, duration: TimeInterval) {
         let sourceType = importedMediaType(for: sourceURL)
         switch sourceType {
         case .audio:
             let destination = try copyImportedFileToDocuments(sourceURL)
-            return (destination, destination.lastPathComponent, false)
+            return (destination, destination.lastPathComponent, false, await Self.audioDuration(for: destination))
         case .video:
             let extractedURL = try await extractAudioTrackIfNeeded(from: sourceURL)
-            return (extractedURL, extractedURL.lastPathComponent, true)
+            return (extractedURL, extractedURL.lastPathComponent, true, await Self.audioDuration(for: extractedURL))
         case .unknown:
             throw NSError(
                 domain: "FluxCutMusicImport",
@@ -1628,6 +2016,97 @@ final class AppViewModel: NSObject, ObservableObject {
         return destination
     }
 
+    private func rebuildCombinedSoundtrack(from items: [SoundtrackItem], startedMessage: String) async {
+        isImportingMusic = true
+        statusMessage = startedMessage
+        defer {
+            isImportingMusic = false
+        }
+
+        do {
+            stopMusicSilently()
+            soundtrackItems = items
+
+            guard let prepared = try await prepareCombinedSoundtrack(from: items) else {
+                clearMusicSelection()
+                return
+            }
+
+            importedMusicURL = prepared.url
+            importedMusicName = prepared.displayName
+            try prepareAudioPlayer(with: prepared.url)
+            hasPendingPreviewChanges = true
+            hasPendingFinalVideoChanges = true
+            statusMessage = items.count > 1
+                ? "Combined soundtrack is ready to play."
+                : "\(prepared.baseName) is ready to play."
+        } catch {
+            statusMessage = error.localizedDescription.isEmpty ? "Could not build the combined soundtrack." : error.localizedDescription
+        }
+    }
+
+    private func prepareCombinedSoundtrack(from items: [SoundtrackItem]) async throws -> (url: URL, displayName: String, baseName: String)? {
+        guard !items.isEmpty else { return nil }
+        if items.count == 1, let single = items.first {
+            return (single.url, single.url.lastPathComponent, single.name)
+        }
+
+        let outputURL = try combinedSoundtrackOutputURL()
+        try await mergeAudioFilesSequentially(items.map(\.url), outputURL: outputURL)
+        return (outputURL, outputURL.lastPathComponent, "Combined Soundtrack")
+    }
+
+    private func combinedSoundtrackOutputURL() throws -> URL {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let folder = documents.appendingPathComponent("CombinedAudio", isDirectory: true)
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        return folder.appendingPathComponent("combined-soundtrack.m4a")
+    }
+
+    private func mergeAudioFilesSequentially(_ urls: [URL], outputURL: URL) async throws {
+        let composition = AVMutableComposition()
+        guard let compositionTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) else {
+            throw NSError(domain: "FluxCutMusicImport", code: 7, userInfo: [NSLocalizedDescriptionKey: "FluxCut could not prepare the combined soundtrack."])
+        }
+
+        var insertionTime = CMTime.zero
+        for url in urls {
+            let asset = AVURLAsset(url: url)
+            let duration = try await asset.load(.duration)
+            let tracks = try await asset.loadTracks(withMediaType: .audio)
+            guard let sourceTrack = tracks.first else { continue }
+            try compositionTrack.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: sourceTrack, at: insertionTime)
+            insertionTime = insertionTime + duration
+        }
+
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try FileManager.default.removeItem(at: outputURL)
+        }
+
+        guard let exportSession = AVAssetExportSession(asset: composition, presetName: AVAssetExportPresetAppleM4A) else {
+            throw NSError(domain: "FluxCutMusicImport", code: 8, userInfo: [NSLocalizedDescriptionKey: "FluxCut could not export the combined soundtrack."])
+        }
+
+        exportSession.outputURL = outputURL
+        exportSession.outputFileType = .m4a
+        exportSession.shouldOptimizeForNetworkUse = false
+        let sessionBox = ExportSessionBox(exportSession)
+        try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+            sessionBox.session.exportAsynchronously {
+                switch sessionBox.session.status {
+                case .completed:
+                    continuation.resume()
+                case .failed:
+                    continuation.resume(throwing: sessionBox.session.error ?? NSError(domain: "FluxCutMusicImport", code: 9, userInfo: [NSLocalizedDescriptionKey: "Combined soundtrack export failed."]))
+                case .cancelled:
+                    continuation.resume(throwing: NSError(domain: "FluxCutMusicImport", code: 10, userInfo: [NSLocalizedDescriptionKey: "Combined soundtrack export was cancelled."]))
+                default:
+                    continuation.resume(throwing: NSError(domain: "FluxCutMusicImport", code: 11, userInfo: [NSLocalizedDescriptionKey: "Combined soundtrack did not finish correctly."]))
+                }
+            }
+        }
+    }
+
     private func extractedAudioCacheURL(for sourceURL: URL) throws -> URL {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let sharedAudioFolder = documents.appendingPathComponent("SharedAudio", isDirectory: true)
@@ -1652,6 +2131,8 @@ final class AppViewModel: NSObject, ObservableObject {
         audioPlayer?.numberOfLoops = -1
         audioPlayer?.volume = Float(musicVolume)
         audioPlayer?.prepareToPlay()
+        musicPlaybackDuration = audioPlayer?.duration ?? 0
+        musicPlaybackCurrentTime = 0
         isMusicPlaying = false
     }
 
@@ -1677,10 +2158,52 @@ final class AppViewModel: NSObject, ObservableObject {
         return duration.map(CMTimeGetSeconds) ?? 0
     }
 
+    nonisolated private static func quickAudioDuration(for url: URL) -> TimeInterval {
+        if let player = try? AVAudioPlayer(contentsOf: url) {
+            return player.duration
+        }
+        return 0
+    }
+
+    private func syncMusicPlaybackState() {
+        musicPlaybackCurrentTime = audioPlayer?.currentTime ?? 0
+        musicPlaybackDuration = audioPlayer?.duration ?? 0
+    }
+
+    private func startMusicPlaybackTimer() {
+        stopMusicPlaybackTimer()
+        musicPlaybackTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                self?.syncMusicPlaybackState()
+            }
+        }
+    }
+
+    private func stopMusicPlaybackTimer() {
+        musicPlaybackTimer?.invalidate()
+        musicPlaybackTimer = nil
+    }
+
+    private func displayNameWithoutExtension(_ name: String) -> String {
+        let url = URL(fileURLWithPath: name)
+        let base = url.deletingPathExtension().lastPathComponent
+        return base.isEmpty ? name : base
+    }
+
     nonisolated private static func displayMusicName(for url: URL) -> String {
         let baseName = url.deletingPathExtension().lastPathComponent
-        let cleaned = baseName.replacingOccurrences(
+        let withoutHashSuffix = baseName.replacingOccurrences(
             of: "-[0-9A-Fa-f]{12}$",
+            with: "",
+            options: .regularExpression
+        )
+        let withoutUUIDSuffix = withoutHashSuffix.replacingOccurrences(
+            of: "-[0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}$",
+            with: "",
+            options: .regularExpression
+        )
+        let cleaned = withoutUUIDSuffix.replacingOccurrences(
+            of: "-[0-9A-Fa-f]{8,}(?:-[0-9A-Fa-f]{2,})+$",
             with: "",
             options: .regularExpression
         )
@@ -1774,6 +2297,14 @@ final class AppViewModel: NSObject, ObservableObject {
             ?? "No high-quality language available"
     }
 
+    var narrationSpeedOptions: [NarrationSpeedOption] {
+        [0.8, 0.9, 1.0, 1.1, 1.2, 1.3, 1.4, 1.5, 1.8, 2.0].map(NarrationSpeedOption.init)
+    }
+
+    var selectedNarrationSpeedLabel: String {
+        String(format: "%.1fx", selectedNarrationSpeed)
+    }
+
     var canHideVoices: Bool {
         availableVoices.count > 1
     }
@@ -1796,6 +2327,12 @@ final class AppViewModel: NSObject, ObservableObject {
     var estimatedNarrationMetaLine: String {
         guard estimatedNarrationDurationSeconds > 0 else { return "Add a script to estimate pacing." }
         return "Narration Length: \(formatPreviewTime(estimatedNarrationDurationSeconds))"
+    }
+
+    var narrationLanguageWarning: String? {
+        guard let detectedFamily = detectedNarrationLanguageFamily,
+              hasNarrationLanguageMismatch else { return nil }
+        return "Script looks like \(detectedFamily.label). Choose a matching narration voice before playing or rendering."
     }
 
     var estimatedExportSpecLine: String {
@@ -1883,6 +2420,7 @@ final class AppViewModel: NSObject, ObservableObject {
             && !isExportingVideo
             && !isPreparingVideoPreview
             && !isPreparingNarrationPreview
+            && !hasNarrationLanguageMismatchForRender
     }
 
     var canStartFinalVideoRender: Bool {
@@ -1892,6 +2430,15 @@ final class AppViewModel: NSObject, ObservableObject {
             && !isPreparingVideoPreview
             && !isPreparingNarrationPreview
             && hasPendingFinalVideoChanges
+            && !hasNarrationLanguageMismatchForRender
+    }
+
+    var canPlayNarration: Bool {
+        !isPreparingNarrationPreview && !hasNarrationLanguageMismatch
+    }
+
+    var canBuildNarrationPreview: Bool {
+        !isPreparingNarrationPreview && !hasNarrationLanguageMismatch
     }
 
     var hasNarrationPreview: Bool {
@@ -1900,6 +2447,7 @@ final class AppViewModel: NSObject, ObservableObject {
             && !narrationPreviewCues.isEmpty
             && previewSourceText == normalizedNarrationSourceText
             && previewSourceVoiceIdentifier == selectedVoiceIdentifier
+            && abs(previewSourceSpeechRate - selectedNarrationSpeed) <= 0.0001
     }
 
     private func formatPreviewTime(_ value: TimeInterval) -> String {
@@ -1914,7 +2462,7 @@ final class AppViewModel: NSObject, ObservableObject {
         guard !normalized.isEmpty else { return 0 }
 
         let segments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
-        return max(segments.reduce(0.0) { partial, segment in
+        let baseEstimate = max(segments.reduce(0.0) { partial, segment in
             let timingText = SpeechVoiceLibrary.normalizedTimingText(segment)
             if SpeechVoiceLibrary.containsCJKContent(in: timingText) {
                 return partial + max(Double(timingText.count) / 3.6, 0.8)
@@ -1922,6 +2470,7 @@ final class AppViewModel: NSObject, ObservableObject {
             let words = timingText.split(whereSeparator: \.isWhitespace)
             return partial + max(Double(words.count) / 2.4, 0.8)
         }, 1)
+        return max(baseEstimate / max(SpeechVoiceLibrary.effectiveSpeechRateMultiplier(for: selectedNarrationSpeed), 0.1), 1)
     }
 
     private var estimatedMediaOnlyDurationSeconds: Double {
@@ -1987,6 +2536,22 @@ final class AppViewModel: NSObject, ObservableObject {
         case .story, .realLife:
             return !mediaItems.isEmpty
         }
+    }
+
+    private var hasNarrationLanguageMismatchForRender: Bool {
+        selectedTimingMode != .video && hasNarrationLanguageMismatch
+    }
+
+    private var hasNarrationLanguageMismatch: Bool {
+        guard !normalizedNarrationSourceText.isEmpty,
+              let detectedFamily = detectedNarrationLanguageFamily else {
+            return false
+        }
+        return !Self.voiceLanguageGroup(selectedVoiceLanguage, isCompatibleWith: detectedFamily)
+    }
+
+    private var detectedNarrationLanguageFamily: ScriptLanguageFamily? {
+        Self.detectNarrationLanguageFamily(for: normalizedNarrationSourceText)
     }
 
     private func markAllVideoRendersDirty(reason: String) {
@@ -2090,6 +2655,50 @@ final class AppViewModel: NSObject, ObservableObject {
             return firstFallback
         }
         return ""
+    }
+
+    private static func detectNarrationLanguageFamily(for text: String) -> ScriptLanguageFamily? {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return nil }
+
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(normalized)
+        let hypotheses = recognizer.languageHypotheses(withMaximum: 1)
+        guard let (language, confidence) = hypotheses.first, confidence >= 0.55 else {
+            return nil
+        }
+
+        switch language {
+        case .english:
+            return .english
+        case .simplifiedChinese, .traditionalChinese:
+            return .chinese
+        case .japanese:
+            return .japanese
+        case .korean:
+            return .korean
+        case .arabic:
+            return .arabic
+        default:
+            return nil
+        }
+    }
+
+    private static func voiceLanguageGroup(_ group: String, isCompatibleWith family: ScriptLanguageFamily) -> Bool {
+        switch family {
+        case .english:
+            return group == "en"
+        case .chinese:
+            return group == "zh" || group == "yue" || group == "wuu"
+        case .japanese:
+            return group == "ja"
+        case .korean:
+            return group == "ko"
+        case .arabic:
+            return group == "ar"
+        case .unknown:
+            return true
+        }
     }
 
     private static func voiceOption(_ option: VoiceOption, isCompatibleWithCJK expectsCJKVoice: Bool) -> Bool {
@@ -2204,9 +2813,14 @@ enum SpeechVoiceLibrary {
             ?? defaultVoice
     }
 
-    static func makeUtterances(from text: String, voiceIdentifier: String, optimizeForLongForm: Bool = false) -> [AVSpeechUtterance] {
+    static func makeUtterances(
+        from text: String,
+        voiceIdentifier: String,
+        speechRateMultiplier: Double = 1.0,
+        optimizeForLongForm: Bool = false
+    ) -> [AVSpeechUtterance] {
         narrationSegments(from: text, optimizeForLongForm: optimizeForLongForm).map {
-            makeUtterance(from: $0, voiceIdentifier: voiceIdentifier)
+            makeUtterance(from: $0, voiceIdentifier: voiceIdentifier, speechRateMultiplier: speechRateMultiplier)
         }
     }
 
@@ -2235,16 +2849,41 @@ enum SpeechVoiceLibrary {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
-    static func makeUtterance(from text: String, voiceIdentifier: String) -> AVSpeechUtterance {
+    static func makeUtterance(from text: String, voiceIdentifier: String, speechRateMultiplier: Double = 1.0) -> AVSpeechUtterance {
         let selectedVoice = resolvedVoice(for: text, preferredIdentifier: voiceIdentifier)
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = selectedVoice
-        utterance.rate = speakingRate(for: selectedVoice)
+        utterance.rate = speakingRate(for: selectedVoice, multiplier: speechRateMultiplier)
         utterance.pitchMultiplier = 1.0
         utterance.volume = 1.0
         utterance.preUtteranceDelay = 0.02
         utterance.postUtteranceDelay = postUtteranceDelay(for: text.last)
         return utterance
+    }
+
+    static func effectiveSpeechRateMultiplier(for selectedMultiplier: Double) -> Double {
+        switch selectedMultiplier {
+        case ..<0.85:
+            return 0.80
+        case ..<0.95:
+            return 0.90
+        case ..<1.05:
+            return 1.00
+        case ..<1.15:
+            return 1.12
+        case ..<1.25:
+            return 1.24
+        case ..<1.35:
+            return 1.36
+        case ..<1.45:
+            return 1.50
+        case ..<1.65:
+            return 1.66
+        case ..<1.90:
+            return 1.86
+        default:
+            return 2.00
+        }
     }
 
     private static var defaultVoice: AVSpeechSynthesisVoice? {
@@ -2540,12 +3179,19 @@ enum SpeechVoiceLibrary {
         return code
     }
 
-    private static func speakingRate(for voice: AVSpeechSynthesisVoice?) -> Float {
-        guard let voice else { return 0.42 }
-        if voice.language.hasPrefix("zh") {
-            return voice.quality == .premium ? 0.36 : 0.38
+    private static func speakingRate(for voice: AVSpeechSynthesisVoice?, multiplier: Double) -> Float {
+        let effectiveMultiplier = effectiveSpeechRateMultiplier(for: multiplier)
+        guard let voice else {
+            return Float(min(max(0.42 * effectiveMultiplier, Double(AVSpeechUtteranceMinimumSpeechRate)), Double(AVSpeechUtteranceMaximumSpeechRate)))
         }
-        return voice.quality == .premium ? 0.40 : 0.42
+        let baseRate: Double
+        if voice.language.hasPrefix("zh") {
+            baseRate = voice.quality == .premium ? 0.36 : 0.38
+        } else {
+            baseRate = voice.quality == .premium ? 0.40 : 0.42
+        }
+        let scaled = baseRate * effectiveMultiplier
+        return Float(min(max(scaled, Double(AVSpeechUtteranceMinimumSpeechRate)), Double(AVSpeechUtteranceMaximumSpeechRate)))
     }
 
     private static func postUtteranceDelay(for lastCharacter: Character?) -> TimeInterval {

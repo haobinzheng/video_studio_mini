@@ -4,6 +4,11 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
+    private struct ShareableFile: Identifiable {
+        let id = UUID()
+        let url: URL
+    }
+
     enum StudioStep: String, CaseIterable, Identifiable {
         case narration = "Script"
         case photos = "Media"
@@ -14,16 +19,21 @@ struct ContentView: View {
     }
 
     @ObservedObject var viewModel: AppViewModel
-    @State private var isMusicImporterPresented = false
+    @State private var isMusicLibraryImporterPresented = false
     @State private var selectedMusicVideoItem: PhotosPickerItem?
+    @State private var extractedSoundtrackShareFile: ShareableFile?
     @State private var selectedStep: StudioStep = .narration
     @State private var draggedMediaItem: AppViewModel.MediaItem?
+    @State private var draggedSoundtrackItem: AppViewModel.SoundtrackItem?
     @State private var renderPreviewPlayer = AVPlayer()
     @State private var scriptScrollProxy: ScrollViewProxy?
     @State private var isSettingsPresented = false
     @State private var isMusicBrowserPresented = false
     @State private var isRenderPlayerExpanded = false
     @State private var voicePendingHide: AppViewModel.VoiceOption?
+    @State private var musicLibrarySearchText = ""
+    @State private var pendingMusicLibraryDeletion: AppViewModel.MusicLibraryItem?
+    @State private var selectedMusicLibraryItemID: String?
     @FocusState private var isNarrationFocused: Bool
 
     var body: some View {
@@ -74,22 +84,15 @@ struct ContentView: View {
                     secondaryButton: .cancel()
                 )
             }
-            .fileImporter(
-                isPresented: $isMusicImporterPresented,
-                allowedContentTypes: [.audio, .mpeg4Audio, .mp3, .wav, .movie, .video, .mpeg4Movie, .quickTimeMovie]
-            ) { result in
-                if case let .success(url) = result {
-                    viewModel.importMusic(from: url)
-                    selectedStep = .music
-                }
-            }
             .onChange(of: selectedMusicVideoItem) { _, newValue in
                 guard let newValue else { return }
                 Task {
-                    await viewModel.importMusicVideo(from: newValue)
+                    let extractedURL = await viewModel.extractSoundtrackForExport(from: newValue)
                     await MainActor.run {
                         selectedMusicVideoItem = nil
-                        selectedStep = .music
+                        if let extractedURL {
+                            extractedSoundtrackShareFile = ShareableFile(url: extractedURL)
+                        }
                     }
                 }
             }
@@ -391,7 +394,7 @@ struct ContentView: View {
             List {
                 Section {
                     HStack {
-                        Text("\(viewModel.musicLibraryItems.count) built-in tracks")
+                        Text("\(filteredMusicLibraryItems.count) tracks available")
                             .font(.headline.weight(.semibold))
                         Spacer()
                         if viewModel.isLoadingMusicLibrary {
@@ -412,52 +415,193 @@ struct ContentView: View {
                         }
                     }
                     .disabled(viewModel.isLoadingMusicLibrary)
+
+                    if !viewModel.musicLibraryFeedback.isEmpty {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(Color.blue.opacity(0.92))
+                            Text(viewModel.musicLibraryFeedback)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.primary)
+                        }
+                        .padding(.vertical, 6)
+                    }
                 }
 
-                ForEach(viewModel.musicLibraryItems) { item in
+                ForEach(filteredMusicLibraryItems) { item in
                     Button {
-                        viewModel.selectMusicLibraryItem(item)
-                        isMusicBrowserPresented = false
+                        selectedMusicLibraryItemID = item.id
+                        viewModel.previewMusicLibraryItem(item)
                     } label: {
-                        VStack(alignment: .leading, spacing: 4) {
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Text(item.name)
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.primary)
-                                    .lineLimit(1)
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text(item.name)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
 
-                                Spacer(minLength: 8)
+                                    Spacer(minLength: 8)
 
-                                Text(viewModel.formattedMusicDuration(item.duration))
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.secondary)
+                                    Text(viewModel.formattedMusicDuration(item.duration))
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                if let description = item.description, !description.isEmpty {
+                                    Text(description)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
                             }
 
-                            if let description = item.description, !description.isEmpty {
-                                Text(description)
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(2)
+                            if selectedMusicLibraryItemID == item.id {
+                                Button {
+                                    if !viewModel.isMusicPlaying {
+                                        viewModel.previewMusicLibraryItem(item)
+                                    }
+                                    viewModel.toggleMusicPlayback()
+                                } label: {
+                                    Image(systemName: viewModel.isMusicPlaying ? "pause.fill" : "play.fill")
+                                        .font(.system(size: 14, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .frame(width: 38, height: 38)
+                                        .background(
+                                            LinearGradient(
+                                                colors: [
+                                                    Color(red: 0.30, green: 0.61, blue: 0.85),
+                                                    Color(red: 0.18, green: 0.39, blue: 0.73)
+                                                ],
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            ),
+                                            in: Circle()
+                                        )
+                                }
+                                .buttonStyle(.plain)
                             }
                         }
                         .padding(.vertical, 4)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(selectedMusicLibraryItemID == item.id ? Color.blue.opacity(0.14) : Color.white.opacity(0.001))
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(selectedMusicLibraryItemID == item.id ? Color.blue.opacity(0.28) : Color.clear, lineWidth: 1)
+                        }
                     }
                     .buttonStyle(.plain)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        if item.source == .imported {
+                            Button(role: .destructive) {
+                                pendingMusicLibraryDeletion = item
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
                 }
             }
             .navigationTitle("Music Library")
             .navigationBarTitleDisplayMode(.inline)
+            .fileImporter(
+                isPresented: $isMusicLibraryImporterPresented,
+                allowedContentTypes: [.audio, .mpeg4Audio, .mp3, .wav],
+                allowsMultipleSelection: true
+            ) { result in
+                if case let .success(urls) = result, !urls.isEmpty {
+                    viewModel.importMusicToLibrary(from: urls)
+                    selectedStep = .music
+                }
+            }
+            .searchable(text: $musicLibrarySearchText, prompt: "Search music")
             .onAppear {
                 viewModel.refreshMusicLibrary()
             }
+            .alert(item: $pendingMusicLibraryDeletion) { item in
+                Alert(
+                    title: Text("Delete Music?"),
+                    message: Text("\(item.name) will be removed from Music Library."),
+                    primaryButton: .destructive(Text("Delete")) {
+                        viewModel.deleteMusicLibraryItem(item)
+                    },
+                    secondaryButton: .cancel()
+                )
+            }
+            .sheet(item: $extractedSoundtrackShareFile) { file in
+                ShareSheet(items: [file.url])
+            }
+            .onDisappear {
+                selectedMusicLibraryItemID = nil
+                musicLibrarySearchText = ""
+                viewModel.restoreProjectMusicAfterLibraryPreview()
+            }
             .toolbar {
-                ToolbarItem(placement: .navigationBarTrailing) {
+                ToolbarItem(placement: .navigationBarLeading) {
                     Button("Done") {
                         isMusicBrowserPresented = false
                     }
+                    .fontWeight(.semibold)
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        if let selectedMusicLibrarySelection {
+                            viewModel.addMusicLibraryItem(selectedMusicLibrarySelection)
+                        }
+                    } label: {
+                        Label("Add", systemImage: "plus.circle.fill")
+                            .fontWeight(.semibold)
+                    }
+                    .disabled(selectedMusicLibrarySelection == nil)
                 }
             }
+            .safeAreaInset(edge: .bottom) {
+                HStack(spacing: 12) {
+                    PhotosPicker(selection: $selectedMusicVideoItem, matching: .videos) {
+                        Label("Extract Soundtracks", systemImage: "film.badge.plus")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(Color(red: 0.44, green: 0.36, blue: 0.78))
+                    .disabled(viewModel.isImportingMusic)
+
+                    Button {
+                        isMusicLibraryImporterPresented = true
+                    } label: {
+                        Label("Import", systemImage: "square.and.arrow.down")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color(red: 0.19, green: 0.48, blue: 0.82))
+                    .disabled(viewModel.isImportingMusic)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 12)
+                .background(.ultraThinMaterial)
+            }
         }
+    }
+
+    private var filteredMusicLibraryItems: [AppViewModel.MusicLibraryItem] {
+        let query = musicLibrarySearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return viewModel.musicLibraryItems }
+        return viewModel.musicLibraryItems.filter { item in
+            item.name.localizedCaseInsensitiveContains(query)
+                || (item.description?.localizedCaseInsensitiveContains(query) ?? false)
+        }
+    }
+
+    private var selectedMusicLibrarySelection: AppViewModel.MusicLibraryItem? {
+        filteredMusicLibraryItems.first(where: { $0.id == selectedMusicLibraryItemID })
+            ?? viewModel.musicLibraryItems.first(where: { $0.id == selectedMusicLibraryItemID })
     }
 
     private var expandedRenderPlayerView: some View {
@@ -881,6 +1025,19 @@ struct ContentView: View {
             .padding(.vertical, 7)
             .background(Color.white.opacity(0.72), in: Capsule())
 
+            if let narrationLanguageWarning = viewModel.narrationLanguageWarning {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 12, weight: .bold))
+                    Text(narrationLanguageWarning)
+                        .font(.caption.weight(.semibold))
+                }
+                .foregroundStyle(Color.orange.opacity(0.92))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(Color.white.opacity(0.72), in: Capsule())
+            }
+
             VStack(alignment: .leading, spacing: 12) {
                 HStack(spacing: 10) {
                     Text("Language")
@@ -913,6 +1070,38 @@ struct ContentView: View {
                         .background(Color.white.opacity(0.82), in: Capsule())
                     }
                     .disabled(viewModel.availableVoiceLanguages.isEmpty)
+                }
+
+                HStack(spacing: 10) {
+                    Text("Speed")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Menu {
+                        ForEach(viewModel.narrationSpeedOptions) { option in
+                            Button {
+                                viewModel.selectedNarrationSpeed = option.multiplier
+                                isNarrationFocused = false
+                            } label: {
+                                if option.multiplier == viewModel.selectedNarrationSpeed {
+                                    Label(option.label, systemImage: "checkmark")
+                                } else {
+                                    Text(option.label)
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(viewModel.selectedNarrationSpeedLabel)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(Color.white.opacity(0.82), in: Capsule())
+                    }
                 }
 
                 VStack(alignment: .leading, spacing: 8) {
@@ -1068,6 +1257,8 @@ struct ContentView: View {
                 ) {
                     viewModel.playNarration()
                 }
+                .opacity(viewModel.canPlayNarration ? 1 : 0.6)
+                .disabled(!viewModel.canPlayNarration)
 
                 inlineScriptActionButton(title: "Introduction", systemImage: "text.badge.plus") {
                     viewModel.loadSampleNarration()
@@ -1101,6 +1292,9 @@ struct ContentView: View {
                 .scrollContentBackground(.hidden)
                 .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .focused($isNarrationFocused)
+                .onTapGesture {
+                    isNarrationFocused = true
+                }
 
             narrationPreviewSection
                 .id("script-preview")
@@ -1112,6 +1306,10 @@ struct ContentView: View {
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(Color.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            isNarrationFocused = false
+        }
     }
 
     private var narrationPreviewSection: some View {
@@ -1144,7 +1342,8 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .foregroundStyle(.white)
             .background(Color.purple, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .disabled(viewModel.isPreparingNarrationPreview)
+            .opacity(viewModel.canBuildNarrationPreview ? 1 : 0.6)
+            .disabled(!viewModel.canBuildNarrationPreview)
 
             HStack(spacing: 12) {
                 previewControlButton(
@@ -1486,236 +1685,26 @@ struct ContentView: View {
                 .font(.title2.weight(.semibold))
 
             VStack(alignment: .leading, spacing: 10) {
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(alignment: .center, spacing: 12) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(
-                                    LinearGradient(
-                                        colors: [
-                                            Color(red: 0.20, green: 0.45, blue: 0.86),
-                                            Color(red: 0.12, green: 0.24, blue: 0.62)
-                                        ],
-                                        startPoint: .topLeading,
-                                        endPoint: .bottomTrailing
-                                    )
-                                )
-                                .frame(width: 44, height: 44)
-
-                            Image(systemName: "music.note")
-                                .font(.system(size: 18, weight: .bold))
-                                .foregroundStyle(.white)
-                        }
-
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text("Current Music")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(Color.white.opacity(0.82))
-                                .textCase(.uppercase)
-                                .tracking(0.6)
-
-                            Text(viewModel.importedMusicName)
-                                .font(.headline.weight(.semibold))
-                                .foregroundStyle(.white)
-                                .lineLimit(2)
-                                .truncationMode(.middle)
-                        }
-
-                        Spacer(minLength: 0)
-                    }
-
-                    HStack(spacing: 8) {
-                        Image(systemName: viewModel.hasSelectedMusic ? "waveform.circle.fill" : "sparkles")
-                            .font(.caption.weight(.bold))
-                            .foregroundStyle(Color.white.opacity(0.88))
-                        Text(viewModel.hasSelectedMusic ? "Ready for soundtrack mixing" : "No music selected yet")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Color.white.opacity(0.88))
-                    }
-                }
-                .padding(14)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.22, green: 0.49, blue: 0.86),
-                            Color(red: 0.12, green: 0.27, blue: 0.58)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    in: RoundedRectangle(cornerRadius: 20, style: .continuous)
-                )
-                .overlay {
-                    RoundedRectangle(cornerRadius: 20, style: .continuous)
-                        .stroke(Color.white.opacity(0.14), lineWidth: 1)
-                }
-
-                VStack(spacing: 12) {
-                    Button {
-                        isMusicImporterPresented = true
-                    } label: {
-                        HStack(spacing: 10) {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(.white.opacity(0.18))
-                                    .frame(width: 30, height: 30)
-                                Image(systemName: "waveform.badge.plus")
-                                    .font(.system(size: 14, weight: .bold))
-                            }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Import Audio")
-                                    .font(.subheadline.weight(.semibold))
-                            }
-                            Spacer()
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.white)
-                    .background(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.20, green: 0.45, blue: 0.86),
-                                Color(red: 0.12, green: 0.24, blue: 0.62)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    )
-                    .disabled(viewModel.isImportingMusic)
-                    .opacity(viewModel.isImportingMusic ? 0.55 : 1)
-
-                    Button {
-                        viewModel.refreshMusicLibrary()
-                        isMusicBrowserPresented = true
-                    } label: {
-                        HStack(spacing: 10) {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(.white.opacity(0.18))
-                                    .frame(width: 30, height: 30)
-                                Image(systemName: "music.note.list")
-                                    .font(.system(size: 14, weight: .bold))
-                            }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Music Library")
-                                    .font(.subheadline.weight(.semibold))
-                            }
-                            Spacer()
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.white)
-                    .background(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.23, green: 0.58, blue: 0.63),
-                                Color(red: 0.11, green: 0.35, blue: 0.39)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    )
-                    .disabled(viewModel.isImportingMusic)
-
-                    PhotosPicker(
-                        selection: $selectedMusicVideoItem,
-                        matching: .videos
-                    ) {
-                        HStack(spacing: 10) {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(.white.opacity(0.18))
-                                    .frame(width: 30, height: 30)
-                                Image(systemName: "film.badge.plus")
-                                    .font(.system(size: 14, weight: .bold))
-                            }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Extract Soundtracks")
-                                    .font(.subheadline.weight(.semibold))
-                            }
-                            Spacer()
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.white)
-                    .background(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.30, green: 0.56, blue: 0.82),
-                                Color(red: 0.13, green: 0.31, blue: 0.52)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    )
-                    .disabled(viewModel.isImportingMusic)
-                    .opacity(viewModel.isImportingMusic ? 0.55 : 1)
-                }
-
+                musicHeaderCard
+                musicActionButtons
                 if viewModel.isImportingMusic {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .scaleEffect(0.8)
-                        Text("Preparing soundtrack...")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Color.blue.opacity(0.9))
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(Color.white.opacity(0.72), in: Capsule())
+                    musicImportingPill
                 }
-
+                if !viewModel.soundtrackItems.isEmpty {
+                    soundtrackQueueCard
+                }
                 if viewModel.hasSelectedMusic {
-                    Button {
-                        viewModel.clearMusicSelection()
-                    } label: {
-                        HStack(spacing: 10) {
-                            ZStack {
-                                Circle()
-                                    .fill(Color.red.opacity(0.14))
-                                    .frame(width: 30, height: 30)
-                                Image(systemName: "trash.fill")
-                                    .font(.system(size: 13, weight: .bold))
-                                    .foregroundStyle(Color.red.opacity(0.92))
-                            }
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("Clear Music")
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.primary)
-                                Text("Export with narration only")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: "arrow.clockwise")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 11)
-                        .background(Color.white.opacity(0.86), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(Color.red.opacity(0.12), lineWidth: 1)
-                        }
-                    }
-                    .buttonStyle(.plain)
+                    clearMusicButton
                 }
             }
             .padding(.horizontal, 14)
             .padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.white.opacity(0.58), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+
+            if viewModel.hasSelectedMusic {
+                soundtrackReviewCard
+            }
 
             VStack(alignment: .leading, spacing: 8) {
                 Text("Volume In Video")
@@ -1790,6 +1779,279 @@ struct ContentView: View {
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .background(Color.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+    }
+
+    private var musicHeaderCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.20, green: 0.45, blue: 0.86),
+                                    Color(red: 0.12, green: 0.24, blue: 0.62)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 44, height: 44)
+
+                    Image(systemName: "music.note")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Current Music")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Color.white.opacity(0.82))
+                        .textCase(.uppercase)
+                        .tracking(0.6)
+
+                    Text(viewModel.importedMusicName)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: viewModel.hasSelectedMusic ? "waveform.circle.fill" : "sparkles")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Color.white.opacity(0.88))
+                Text(viewModel.hasSelectedMusic ? "Ready for soundtrack mixing" : "No music selected yet")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.88))
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(red: 0.22, green: 0.49, blue: 0.86),
+                    Color(red: 0.12, green: 0.27, blue: 0.58)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+        }
+    }
+
+    private var musicActionButtons: some View {
+        VStack(spacing: 12) {
+            Button {
+                viewModel.refreshMusicLibrary()
+                isMusicBrowserPresented = true
+            } label: {
+                musicActionLabel(title: "Music Library", systemImage: "music.note.list")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .background(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.23, green: 0.58, blue: 0.63),
+                        Color(red: 0.11, green: 0.35, blue: 0.39)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
+            .disabled(viewModel.isImportingMusic)
+        }
+    }
+
+    private var musicImportingPill: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .scaleEffect(0.8)
+            Text("Preparing soundtrack...")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.blue.opacity(0.9))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.white.opacity(0.72), in: Capsule())
+    }
+
+    private var soundtrackQueueCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Soundtrack Queue")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text("\(viewModel.soundtrackItems.count) track\(viewModel.soundtrackItems.count == 1 ? "" : "s") in order")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if viewModel.soundtrackItems.count > 1 {
+                    Text("Drag to reorder")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(spacing: 10) {
+                ForEach(viewModel.soundtrackItems) { item in
+                    soundtrackQueueRow(for: item)
+                }
+            }
+        }
+        .padding(14)
+        .background(Color.white.opacity(0.64), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var soundtrackReviewCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Soundtrack Review")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(viewModel.formattedMusicDuration(viewModel.musicPlaybackCurrentTime)) / \(viewModel.formattedMusicDuration(viewModel.musicPlaybackDuration))")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            Slider(
+                value: Binding(
+                    get: { viewModel.musicPlaybackCurrentTime },
+                    set: { viewModel.seekMusic(to: $0) }
+                ),
+                in: 0...max(viewModel.musicPlaybackDuration, 0.1)
+            )
+            .tint(.blue)
+            .disabled(viewModel.musicPlaybackDuration <= 0)
+        }
+        .padding(14)
+        .background(Color.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var clearMusicButton: some View {
+        Button {
+            viewModel.clearMusicSelection()
+        } label: {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(Color.red.opacity(0.14))
+                        .frame(width: 30, height: 30)
+                    Image(systemName: "trash.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Color.red.opacity(0.92))
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Clear Music")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text("Export with narration only")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "arrow.clockwise")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(Color.white.opacity(0.86), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.red.opacity(0.12), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func musicActionLabel(title: String, systemImage: String) -> some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(.white.opacity(0.18))
+                    .frame(width: 30, height: 30)
+                Image(systemName: systemImage)
+                    .font(.system(size: 14, weight: .bold))
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private func soundtrackQueueRow(for item: AppViewModel.SoundtrackItem) -> some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.blue.opacity(0.12))
+                    .frame(width: 34, height: 34)
+                Image(systemName: "music.note")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Color.blue.opacity(0.9))
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(viewModel.formattedMusicDuration(item.duration))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button {
+                viewModel.removeSoundtrackItem(withId: item.id)
+            } label: {
+                Image(systemName: "minus.circle.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Color.red.opacity(0.9))
+            }
+            .buttonStyle(.plain)
+
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.white.opacity(0.88), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.black.opacity(0.05), lineWidth: 1)
+        }
+        .onDrag {
+            draggedSoundtrackItem = item
+            return NSItemProvider(object: item.id.uuidString as NSString)
+        }
+        .onDrop(
+            of: [.text],
+            delegate: SoundtrackReorderDropDelegate(
+                targetItem: item,
+                draggedItem: $draggedSoundtrackItem,
+                viewModel: viewModel
+            )
+        )
     }
 
     private var videoSection: some View {
@@ -1880,6 +2142,20 @@ struct ContentView: View {
             .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
             VStack(spacing: 12) {
+                if viewModel.selectedTimingMode != .video, let narrationLanguageWarning = viewModel.narrationLanguageWarning {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 12, weight: .bold))
+                        Text(narrationLanguageWarning)
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(Color.orange.opacity(0.94))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.white.opacity(0.76), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+
                 Button {
                     deactivateRenderPlaybackForNewRender()
                     viewModel.buildVideoPreview()
@@ -2219,6 +2495,36 @@ private struct MediaReorderDropDelegate: DropDelegate {
     func dropUpdated(info: DropInfo) -> DropProposal? {
         DropProposal(operation: .move)
     }
+}
+
+private struct SoundtrackReorderDropDelegate: DropDelegate {
+    let targetItem: AppViewModel.SoundtrackItem
+    @Binding var draggedItem: AppViewModel.SoundtrackItem?
+    let viewModel: AppViewModel
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedItem else { return }
+        viewModel.moveSoundtrackItem(withId: draggedItem.id, before: targetItem.id)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedItem = nil
+        return true
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+}
+
+private struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
 private struct FullscreenPlayerContainer: UIViewControllerRepresentable {

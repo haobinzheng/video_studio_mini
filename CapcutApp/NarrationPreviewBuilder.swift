@@ -29,7 +29,12 @@ struct NarrationPreviewBuilder {
         let weight: Double
     }
 
-    func buildPreview(text: String, voiceIdentifier: String, maximumDuration: TimeInterval? = nil) async throws -> PreviewResult {
+    func buildPreview(
+        text: String,
+        voiceIdentifier: String,
+        speechRateMultiplier: Double = 1.0,
+        maximumDuration: TimeInterval? = nil
+    ) async throws -> PreviewResult {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let allSegments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
         let segments = cappedPreviewSegments(from: allSegments, maximumDuration: maximumDuration)
@@ -45,7 +50,11 @@ struct NarrationPreviewBuilder {
         var utteranceDurations: [TimeInterval] = []
 
         for (index, segment) in segments.enumerated() {
-            let utterance = SpeechVoiceLibrary.makeUtterance(from: segment, voiceIdentifier: voiceIdentifier)
+            let utterance = SpeechVoiceLibrary.makeUtterance(
+                from: segment,
+                voiceIdentifier: voiceIdentifier,
+                speechRateMultiplier: speechRateMultiplier
+            )
             let utteranceURL = workspace.appendingPathComponent("utterance-preview-\(index).caf")
             let duration = try await renderUtteranceAudio(utterance, outputURL: utteranceURL)
             utteranceURLs.append(utteranceURL)
