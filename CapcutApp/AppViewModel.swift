@@ -1325,6 +1325,7 @@ final class AppViewModel: NSObject, ObservableObject {
     private func currentProtectedStorageURLs() -> Set<URL> {
         var urls = Set(mediaItems.compactMap({ self.mediaVideoURLIfManagedCopy(for: $0) }).map { $0.standardizedFileURL })
         urls.formUnion(soundtrackItems.map(\.url).map { $0.standardizedFileURL })
+        urls.formUnion(Self.importedMusicLibraryURLs().map { $0.standardizedFileURL })
 
         if let exportedVideoURL {
             urls.insert(exportedVideoURL.standardizedFileURL)
@@ -1342,7 +1343,8 @@ final class AppViewModel: NSObject, ObservableObject {
     nonisolated private static func performStorageCleanup(keeping protectedURLs: Set<URL>) -> StorageCleanupResult {
         let fileManager = FileManager.default
         let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let standardizedProtected = Set(protectedURLs.map { $0.standardizedFileURL })
+        var standardizedProtected = Set(protectedURLs.map { $0.standardizedFileURL })
+        standardizedProtected.formUnion(importedMusicLibraryURLs().map { $0.standardizedFileURL })
         var result = StorageCleanupResult()
 
         let renderedVideosFolder = documents.appendingPathComponent("RenderedVideos", isDirectory: true)
@@ -1397,15 +1399,21 @@ final class AppViewModel: NSObject, ObservableObject {
         previewVideoURL: URL?
     ) -> StorageCleanupResult {
         var result = StorageCleanupResult()
+        let protectedLibraryURLs = Set(importedMusicLibraryURLs().map { $0.standardizedFileURL })
 
         for url in mediaItems.compactMap({ Self.mediaVideoIfManagedCopyURL(for: $0) as URL? }) {
             result = mergeCleanupResults(result, removeItem(at: url.standardizedFileURL))
         }
         for url in soundtrackItemURLs {
-            result = mergeCleanupResults(result, removeItem(at: url.standardizedFileURL))
+            let standardizedURL = url.standardizedFileURL
+            guard !protectedLibraryURLs.contains(standardizedURL) else { continue }
+            result = mergeCleanupResults(result, removeItem(at: standardizedURL))
         }
         if let musicURL {
-            result = mergeCleanupResults(result, removeItem(at: musicURL.standardizedFileURL))
+            let standardizedURL = musicURL.standardizedFileURL
+            if !protectedLibraryURLs.contains(standardizedURL) {
+                result = mergeCleanupResults(result, removeItem(at: standardizedURL))
+            }
         }
         if let exportedVideoURL {
             result = mergeCleanupResults(result, removeItem(at: exportedVideoURL.standardizedFileURL))
@@ -1415,7 +1423,7 @@ final class AppViewModel: NSObject, ObservableObject {
         }
 
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        result = mergeCleanupResults(result, cleanupDirectoryContents(at: documents, keeping: []))
+        result = mergeCleanupResults(result, cleanupDirectoryContents(at: documents, keeping: protectedLibraryURLs))
         let caches = FileManager.default.urls(for: .cachesDirectory, in: .userDomainMask).first!
         result = mergeCleanupResults(result, cleanupDirectoryContents(at: caches, keeping: []))
         result = mergeCleanupResults(result, cleanupDirectoryContents(at: FileManager.default.temporaryDirectory, keeping: []))
@@ -1590,6 +1598,20 @@ final class AppViewModel: NSObject, ObservableObject {
 
         guard importedMediaType(for: url) == .audio else { return nil }
         return url
+    }
+
+    nonisolated private static func importedMusicLibraryURLs() -> [URL] {
+        let fileManager = FileManager.default
+        let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
+        guard let documentContents = try? fileManager.contentsOfDirectory(
+            at: documents,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else {
+            return []
+        }
+
+        return documentContents.compactMap { importedAudioDocumentURL($0) }
     }
 
     nonisolated private static func mediaVideoIfManagedCopyURL(for item: MediaItem) -> URL? {
