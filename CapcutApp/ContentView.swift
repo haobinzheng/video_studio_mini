@@ -105,7 +105,10 @@ struct ContentView: View {
                     viewModel.stopMusicSilently()
                 }
                 if oldStep == .video && newStep != .video {
-                    deactivateRenderPlaybackForNewRender()
+                    pauseRenderPlaybackForTabSwitch()
+                }
+                if newStep == .video {
+                    updateRenderPreviewPlayer(for: activeRenderedVideoURL)
                 }
             }
             .onChange(of: viewModel.videoPreviewURL) { _, newValue in
@@ -2474,6 +2477,12 @@ struct ContentView: View {
         renderPreviewPlayer.pause()
         renderPreviewPlayer.seek(to: .zero)
         renderPreviewPlayer.replaceCurrentItem(with: nil)
+    }
+
+    private func pauseRenderPlaybackForTabSwitch() {
+        isRenderPlayerExpanded = false
+        renderPreviewPlayer.pause()
+        renderPreviewPlayer.seek(to: .zero)
     }
 }
 

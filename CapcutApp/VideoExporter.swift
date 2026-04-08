@@ -1394,8 +1394,6 @@ struct VideoExporter {
         instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
 
         let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compositionVideoTrack)
-        let preferredTransform = try await sourceVideoTrack.load(.preferredTransform)
-        layerInstruction.setTransform(preferredTransform, at: .zero)
         instruction.layerInstructions = [layerInstruction]
 
         let videoComposition = AVMutableVideoComposition()
