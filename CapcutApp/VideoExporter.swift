@@ -436,7 +436,7 @@ struct VideoExporter {
             includeCaptions: includeCaptions,
             videoModeSettings: videoModeSettings
         )
-        let trimmedCaptionSegments = timingMode == .realLife || !includeCaptions
+        let trimmedCaptionSegments = !includeCaptions
             ? []
             : captionSegmentsTrimmed(to: resolvedDuration, segments: narrationTimeline.captionSegments)
         let trimmedNarrationURLs = try await narrationURLsTrimmed(
@@ -459,8 +459,10 @@ struct VideoExporter {
                 fallbackFrameRate: renderProfile.frameRate
             )
             let smoothOutputURL: URL
-            if timingMode == .story && includeCaptions && hasMixedStoryMedia {
-                smoothOutputURL = workspace.appendingPathComponent("story-mixed-base.mov")
+            if includeCaptions && (timingMode == .realLife || (timingMode == .story && hasMixedStoryMedia)) {
+                smoothOutputURL = workspace.appendingPathComponent(
+                    timingMode == .realLife ? "slideshow-caption-base.mov" : "story-mixed-base.mov"
+                )
             } else {
                 smoothOutputURL = finalURL
             }
@@ -481,8 +483,10 @@ struct VideoExporter {
                 progressHandler: progressHandler
             )
 
-            if timingMode == .story && includeCaptions && hasMixedStoryMedia {
-                progressHandler?(0.9, "Burning captions into the smooth story video.")
+            if includeCaptions && (timingMode == .realLife || (timingMode == .story && hasMixedStoryMedia)) {
+                progressHandler?(0.9, timingMode == .realLife
+                    ? "Burning captions into the slideshow video."
+                    : "Burning captions into the smooth story video.")
                 try await burnCaptionsIntoVideo(
                     videoURL: smoothOutputURL,
                     captionSegments: trimmedCaptionSegments,
@@ -1985,7 +1989,7 @@ struct VideoExporter {
         }
 
         if !hasVideo && photoCount > 0 {
-            return CMTime(seconds: max(Double(photoCount) * 3.0, 3.0), preferredTimescale: 600)
+            return CMTime(seconds: max(Double(photoCount) * 8.0, 8.0), preferredTimescale: 600)
         }
 
         return minimumVisualDuration(for: mediaItems)
@@ -2244,7 +2248,7 @@ struct VideoExporter {
         let perPhotoDuration: CMTime = {
             guard hasPhotos else { return .zero }
             if allPhotos {
-                return CMTime(seconds: 3.0, preferredTimescale: 600)
+                return CMTime(seconds: 8.0, preferredTimescale: 600)
             }
             return CMTime(seconds: 1.6, preferredTimescale: 600)
         }()

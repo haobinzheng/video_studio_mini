@@ -2392,7 +2392,7 @@ final class AppViewModel: NSObject, ObservableObject {
             aspectRatio: selectedAspectRatio,
             finalQuality: selectedFinalExportQuality,
             timingMode: selectedTimingMode,
-            includeCaptions: selectedTimingMode == .story ? includesFinalCaptions : false,
+            includeCaptions: selectedTimingMode != .video ? includesFinalCaptions : false,
             videoModeSettings: (selectedTimingMode == .video || selectedTimingMode == .realLife) ? videoModeSettings : nil
         )
     }

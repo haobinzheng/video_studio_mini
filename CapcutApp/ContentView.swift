@@ -2109,8 +2109,8 @@ struct ContentView: View {
                     }
                 }
                 .toggleStyle(.switch)
-                .disabled(viewModel.selectedTimingMode != .story)
-                .opacity(viewModel.selectedTimingMode == .story ? 1 : 0.45)
+                .disabled(viewModel.selectedTimingMode == .video)
+                .opacity(viewModel.selectedTimingMode == .video ? 0.45 : 1)
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Original Video Sound")
