@@ -1,5 +1,6 @@
 import AVFoundation
 import UIKit
+import QuartzCore
 
 struct VideoExporter {
     enum TimingMode: String, CaseIterable, Identifiable {
@@ -374,6 +375,16 @@ struct VideoExporter {
             return finalURL
         }
 
+        let hasVideos = mediaItems.contains {
+            if case .video = $0.kind { return true }
+            return false
+        }
+        let hasPhotos = mediaItems.contains {
+            if case .photo = $0.kind { return true }
+            return false
+        }
+        let hasMixedStoryMedia = timingMode == .story && hasVideos && hasPhotos
+
         let minimumVisualDuration = minimumVisualDuration(for: mediaItems)
         let shouldUseNarration = timingMode != .video
         let narrationTimeline: NarrationTimeline
@@ -433,7 +444,10 @@ struct VideoExporter {
             maxDuration: resolvedDuration
         )
 
-        let shouldUseSmoothStoryExport = timingMode == .story && !includeCaptions && renderQuality != .preview
+        let shouldUseSmoothStoryExport =
+            timingMode == .story &&
+            renderQuality != .preview &&
+            (!includeCaptions || hasMixedStoryMedia)
 
         if timingMode == .realLife || shouldUseSmoothStoryExport {
             progressHandler?(0.24, "Building a real-life composition.")
@@ -444,6 +458,13 @@ struct VideoExporter {
                 fallbackRenderSize: renderProfile.renderSize,
                 fallbackFrameRate: renderProfile.frameRate
             )
+            let smoothOutputURL: URL
+            if timingMode == .story && includeCaptions && hasMixedStoryMedia {
+                smoothOutputURL = workspace.appendingPathComponent("story-mixed-base.mov")
+            } else {
+                smoothOutputURL = finalURL
+            }
+
             try await exportRealLifeComposition(
                 timelineSegments: timelineSegments,
                 narrationURLs: trimmedNarrationURLs,
@@ -456,9 +477,22 @@ struct VideoExporter {
                 frameRate: renderProfile.frameRate,
                 exportPresetName: effectiveSlideshowSettings.presetName,
                 workspace: workspace,
-                outputURL: finalURL,
+                outputURL: smoothOutputURL,
                 progressHandler: progressHandler
             )
+
+            if timingMode == .story && includeCaptions && hasMixedStoryMedia {
+                progressHandler?(0.9, "Burning captions into the smooth story video.")
+                try await burnCaptionsIntoVideo(
+                    videoURL: smoothOutputURL,
+                    captionSegments: trimmedCaptionSegments,
+                    renderSize: renderProfile.renderSize,
+                    frameRate: renderProfile.frameRate,
+                    outputURL: finalURL,
+                    progressHandler: progressHandler
+                )
+            }
+
             progressHandler?(1.0, "Finalizing exported video.")
             return finalURL
         }
@@ -1304,6 +1338,198 @@ struct VideoExporter {
         )
     }
 
+    private func burnCaptionsIntoVideo(
+        videoURL: URL,
+        captionSegments: [CaptionSegment],
+        renderSize: CGSize,
+        frameRate: Int32,
+        outputURL: URL,
+        progressHandler: ((Double, String) -> Void)? = nil
+    ) async throws {
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try FileManager.default.removeItem(at: outputURL)
+        }
+
+        let asset = AVURLAsset(url: videoURL)
+        let duration = try await asset.load(.duration)
+        guard let sourceVideoTrack = try await asset.loadTracks(withMediaType: .video).first else {
+            throw ExportError.missingVideoTrack
+        }
+
+        let composition = AVMutableComposition()
+        guard let compositionVideoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw ExportError.missingVideoTrack
+        }
+
+        try compositionVideoTrack.insertTimeRange(
+            CMTimeRange(start: .zero, duration: duration),
+            of: sourceVideoTrack,
+            at: .zero
+        )
+
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        for audioTrack in audioTracks {
+            guard let compositionAudioTrack = composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ) else {
+                continue
+            }
+
+            try compositionAudioTrack.insertTimeRange(
+                CMTimeRange(start: .zero, duration: duration),
+                of: audioTrack,
+                at: .zero
+            )
+        }
+
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
+
+        let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compositionVideoTrack)
+        let preferredTransform = try await sourceVideoTrack.load(.preferredTransform)
+        layerInstruction.setTransform(preferredTransform, at: .zero)
+        instruction.layerInstructions = [layerInstruction]
+
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.instructions = [instruction]
+        videoComposition.renderSize = CGSize(
+            width: max(round(renderSize.width / 2) * 2, 2),
+            height: max(round(renderSize.height / 2) * 2, 2)
+        )
+        videoComposition.frameDuration = CMTime(value: 1, timescale: frameRate)
+
+        let parentLayer = CALayer()
+        parentLayer.frame = CGRect(origin: .zero, size: videoComposition.renderSize)
+        parentLayer.masksToBounds = true
+
+        let videoLayer = CALayer()
+        videoLayer.frame = parentLayer.frame
+        parentLayer.addSublayer(videoLayer)
+
+        let captionsLayer = makeCaptionOverlayLayer(
+            for: captionSegments,
+            renderSize: videoComposition.renderSize
+        )
+        parentLayer.addSublayer(captionsLayer)
+
+        videoComposition.animationTool = AVVideoCompositionCoreAnimationTool(
+            postProcessingAsVideoLayer: videoLayer,
+            in: parentLayer
+        )
+
+        try await exportStitchedComposition(
+            composition,
+            presetName: AVAssetExportPresetHighestQuality,
+            outputURL: outputURL,
+            audioMixParameters: [],
+            videoComposition: videoComposition,
+            progressMessage: "Exporting story captions.",
+            progressHandler: progressHandler
+        )
+    }
+
+    private func makeCaptionOverlayLayer(
+        for segments: [CaptionSegment],
+        renderSize: CGSize
+    ) -> CALayer {
+        let rootLayer = CALayer()
+        rootLayer.frame = CGRect(origin: .zero, size: renderSize)
+
+        for segment in segments where segment.timeRange.duration > .zero {
+            let captionLayer = makeAnimatedCaptionLayer(
+                text: segment.text,
+                renderSize: renderSize
+            )
+            let startSeconds = max(CMTimeGetSeconds(segment.timeRange.start), 0)
+            let durationSeconds = max(CMTimeGetSeconds(segment.timeRange.duration), 0.1)
+
+            let opacityAnimation = CAKeyframeAnimation(keyPath: "opacity")
+            opacityAnimation.values = [0.0, 1.0, 1.0, 0.0]
+            opacityAnimation.keyTimes = [0.0, 0.08, 0.92, 1.0]
+            opacityAnimation.beginTime = AVCoreAnimationBeginTimeAtZero + startSeconds
+            opacityAnimation.duration = durationSeconds
+            opacityAnimation.isRemovedOnCompletion = false
+            opacityAnimation.fillMode = .forwards
+            captionLayer.add(opacityAnimation, forKey: "captionOpacity")
+            rootLayer.addSublayer(captionLayer)
+        }
+
+        return rootLayer
+    }
+
+    private func makeAnimatedCaptionLayer(text: String, renderSize: CGSize) -> CALayer {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byWordWrapping
+        let widthScale = max(min(renderSize.width / 720, 1.0), 0.5)
+        let maxTextWidth = renderSize.width - max(72, 120 * widthScale)
+        let maxTextHeight: CGFloat = max(140, 240 * widthScale)
+        let minimumFontSize: CGFloat = max(14, 20 * widthScale)
+        var fontSize: CGFloat = renderSize.width < renderSize.height ? max(18, 34 * widthScale) : max(16, 30 * widthScale)
+        var measuredText = CGRect.zero
+        var attributes: [NSAttributedString.Key: Any] = [:]
+
+        while fontSize >= minimumFontSize {
+            attributes = [
+                .font: UIFont.systemFont(ofSize: fontSize, weight: .semibold),
+                .foregroundColor: UIColor.white,
+                .paragraphStyle: paragraph
+            ]
+
+            measuredText = (text as NSString).boundingRect(
+                with: CGSize(width: maxTextWidth, height: maxTextHeight),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                attributes: attributes,
+                context: nil
+            ).integral
+
+            if measuredText.height <= maxTextHeight {
+                break
+            }
+
+            fontSize -= 2
+        }
+
+        let boxPadding: CGFloat = max(10, 16 * widthScale)
+        let bottomInset = max(renderSize.height * 0.025, 24)
+        let boxRect = CGRect(
+            x: (renderSize.width - measuredText.width) / 2 - boxPadding,
+            y: bottomInset,
+            width: measuredText.width + (boxPadding * 2),
+            height: measuredText.height + (boxPadding * 2)
+        )
+
+        let containerLayer = CALayer()
+        containerLayer.frame = boxRect
+        containerLayer.opacity = 0
+
+        let backgroundLayer = CALayer()
+        backgroundLayer.frame = containerLayer.bounds
+        backgroundLayer.backgroundColor = UIColor.black.withAlphaComponent(0.42).cgColor
+        backgroundLayer.cornerRadius = 32
+        backgroundLayer.masksToBounds = true
+        containerLayer.addSublayer(backgroundLayer)
+
+        let textLayer = CATextLayer()
+        textLayer.frame = CGRect(
+            x: boxPadding,
+            y: boxPadding,
+            width: measuredText.width,
+            height: measuredText.height
+        )
+        textLayer.string = NSAttributedString(string: text, attributes: attributes)
+        textLayer.contentsScale = UIScreen.main.scale
+        textLayer.alignmentMode = .center
+        textLayer.isWrapped = true
+        containerLayer.addSublayer(textLayer)
+
+        return containerLayer
+    }
+
     private func renderPhotoSegmentClip(
         image: UIImage,
         duration: CMTime,
@@ -1794,8 +2020,18 @@ struct VideoExporter {
             return realLifeTimelineSegments(for: mediaItems, totalDuration: totalDuration)
         }
 
-        if timingMode == .story && !includeCaptions {
+        let hasVideos = mediaItems.contains { if case .video = $0.kind { return true }; return false }
+        let hasPhotos = mediaItems.contains { if case .photo = $0.kind { return true }; return false }
+
+        if timingMode == .story && (!includeCaptions || (hasVideos && hasPhotos)) {
             return try storyCaptionOffTimelineSegments(
+                for: mediaItems,
+                totalDuration: totalDuration
+            )
+        }
+
+        if timingMode == .story && includeCaptions && hasPhotos && !hasVideos {
+            return storyCaptionOnPhotoOnlyTimelineSegments(
                 for: mediaItems,
                 totalDuration: totalDuration
             )
@@ -1803,8 +2039,6 @@ struct VideoExporter {
 
         let photoItems = mediaItems.filter { if case .photo = $0.kind { return true }; return false }
         let videoItems = mediaItems.filter { if case .video = $0.kind { return true }; return false }
-        let hasVideos = !videoItems.isEmpty
-        let hasPhotos = !photoItems.isEmpty
         let totalVideoDuration = videoItems.reduce(CMTime.zero) { partial, item in
             switch item.kind {
             case .photo:
@@ -1869,6 +2103,39 @@ struct VideoExporter {
             if !hasVideos && loopIndex >= mediaItems.count {
                 break
             }
+        }
+
+        return segments
+    }
+
+    private func storyCaptionOnPhotoOnlyTimelineSegments(
+        for mediaItems: [MediaItem],
+        totalDuration: CMTime
+    ) -> [TimelineSegment] {
+        guard !mediaItems.isEmpty, totalDuration > .zero else { return [] }
+
+        let photoItems = mediaItems.filter { if case .photo = $0.kind { return true }; return false }
+        guard !photoItems.isEmpty else { return [] }
+
+        let rawSecondsPerPhoto = CMTimeGetSeconds(totalDuration) / Double(photoItems.count)
+        let perPhotoDuration = CMTime(seconds: max(rawSecondsPerPhoto, 5.0), preferredTimescale: 600)
+
+        var segments: [TimelineSegment] = []
+        var cursor = CMTime.zero
+
+        for item in photoItems {
+            guard cursor < totalDuration else { break }
+            let remaining = totalDuration - cursor
+            let duration = min(perPhotoDuration, remaining)
+            guard duration > .zero else { break }
+
+            segments.append(
+                TimelineSegment(
+                    mediaItem: item,
+                    timeRange: CMTimeRange(start: cursor, duration: duration)
+                )
+            )
+            cursor = cursor + duration
         }
 
         return segments

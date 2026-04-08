@@ -33,7 +33,8 @@ struct NarrationPreviewBuilder {
         text: String,
         voiceIdentifier: String,
         speechRateMultiplier: Double = 1.0,
-        maximumDuration: TimeInterval? = nil
+        maximumDuration: TimeInterval? = nil,
+        progressHandler: ((Double, String) -> Void)? = nil
     ) async throws -> PreviewResult {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let allSegments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
@@ -50,6 +51,8 @@ struct NarrationPreviewBuilder {
         var utteranceDurations: [TimeInterval] = []
 
         for (index, segment) in segments.enumerated() {
+            let completion = Double(index) / Double(max(segments.count, 1))
+            progressHandler?(completion * 0.72, "Rendering narration segment \(index + 1) of \(segments.count).")
             let utterance = SpeechVoiceLibrary.makeUtterance(
                 from: segment,
                 voiceIdentifier: voiceIdentifier,
@@ -62,9 +65,12 @@ struct NarrationPreviewBuilder {
         }
 
         let measuredDuration = max(utteranceDurations.reduce(0, +), 1)
+        progressHandler?(0.8, "Combining narration audio.")
         try await mergeAudioFiles(utteranceURLs, outputURL: outputAudioURL)
+        progressHandler?(0.92, "Building caption cues.")
         let cues = buildCues(segments: segments, utteranceDurations: utteranceDurations, totalDuration: measuredDuration)
         try writeCues(cues, to: outputJSONURL)
+        progressHandler?(1.0, "Narration preview is ready.")
 
         return PreviewResult(
             audioURL: outputAudioURL,

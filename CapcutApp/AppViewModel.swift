@@ -1132,7 +1132,11 @@ final class AppViewModel: NSObject, ObservableObject {
                             : "Preparing narration and captions for video export.",
                         completedMessage: renderQuality == .preview
                             ? "Preview narration is ready. Building a short sample render now."
-                            : "Narration and captions are ready. Rendering your video now."
+                            : "Narration and captions are ready. Rendering your video now.",
+                        progressHandler: { progress, message in
+                            self.exportProgress = 0.08 + (progress * 0.14)
+                            self.statusMessage = message
+                        }
                     )
                 } else {
                     exportProgress = 0.22
@@ -1688,7 +1692,8 @@ final class AppViewModel: NSObject, ObservableObject {
         speechRateMultiplier: Double,
         maximumDuration: TimeInterval? = nil,
         startedMessage: String,
-        completedMessage: String
+        completedMessage: String,
+        progressHandler: ((Double, String) -> Void)? = nil
     ) async throws {
         configureAudioSessionIfNeeded()
         isPreparingNarrationPreview = true
@@ -1703,7 +1708,8 @@ final class AppViewModel: NSObject, ObservableObject {
             text: text,
             voiceIdentifier: voiceIdentifier,
             speechRateMultiplier: speechRateMultiplier,
-            maximumDuration: maximumDuration
+            maximumDuration: maximumDuration,
+            progressHandler: progressHandler
         )
         narrationPreviewPlayer = try AVAudioPlayer(contentsOf: preview.audioURL)
         narrationPreviewPlayer?.prepareToPlay()
