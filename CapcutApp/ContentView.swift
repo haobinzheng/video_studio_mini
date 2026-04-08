@@ -2416,7 +2416,7 @@ struct ContentView: View {
             Image(systemName: "sparkles.rectangle.stack")
                 .font(.title3)
                 .foregroundStyle(.orange)
-            Text(viewModel.statusMessage)
+            Text(viewModel.activeStatusMessage)
                 .font(.subheadline)
         }
         .padding(18)

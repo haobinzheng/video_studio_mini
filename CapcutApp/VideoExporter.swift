@@ -408,7 +408,8 @@ struct VideoExporter {
         let baseTimelineSegments = try await makeTimelineSegments(
             for: mediaItems,
             totalDuration: totalDuration,
-            timingMode: timingMode
+            timingMode: timingMode,
+            includeCaptions: includeCaptions
         )
         let timelineSegments = resolvedDuration < totalDuration
             ? timelineSegmentsTrimmed(to: resolvedDuration, segments: baseTimelineSegments)
@@ -1786,10 +1787,18 @@ struct VideoExporter {
     private func makeTimelineSegments(
         for mediaItems: [MediaItem],
         totalDuration: CMTime,
-        timingMode: TimingMode
+        timingMode: TimingMode,
+        includeCaptions: Bool = true
     ) async throws -> [TimelineSegment] {
         if timingMode == .realLife {
             return realLifeTimelineSegments(for: mediaItems, totalDuration: totalDuration)
+        }
+
+        if timingMode == .story && !includeCaptions {
+            return try storyCaptionOffTimelineSegments(
+                for: mediaItems,
+                totalDuration: totalDuration
+            )
         }
 
         let photoItems = mediaItems.filter { if case .photo = $0.kind { return true }; return false }
@@ -1817,6 +1826,90 @@ struct VideoExporter {
 
         var cursor = CMTime.zero
         var segments: [TimelineSegment] = []
+        var loopIndex = 0
+
+        while cursor < totalDuration {
+            let item = mediaItems[loopIndex % mediaItems.count]
+            let remainingDuration = totalDuration - cursor
+            guard remainingDuration > .zero else { break }
+
+            let intendedDuration: CMTime
+            switch item.kind {
+            case .photo:
+                intendedDuration = perPhotoDuration
+            case let .video(_, videoDuration):
+                intendedDuration = videoDuration
+            }
+
+            if intendedDuration <= .zero {
+                loopIndex += 1
+                if hasPhotos && hasVideos && loopIndex >= mediaItems.count {
+                    break
+                }
+                continue
+            }
+
+            let duration = min(intendedDuration, remainingDuration)
+            guard duration > .zero else {
+                loopIndex += 1
+                continue
+            }
+            segments.append(
+                TimelineSegment(
+                    mediaItem: item,
+                    timeRange: CMTimeRange(start: cursor, duration: duration)
+                )
+            )
+            cursor = cursor + duration
+            loopIndex += 1
+
+            if hasPhotos && hasVideos && loopIndex >= mediaItems.count {
+                break
+            }
+            if !hasVideos && loopIndex >= mediaItems.count {
+                break
+            }
+        }
+
+        return segments
+    }
+
+    private func storyCaptionOffTimelineSegments(
+        for mediaItems: [MediaItem],
+        totalDuration: CMTime
+    ) throws -> [TimelineSegment] {
+        guard !mediaItems.isEmpty, totalDuration > .zero else { return [] }
+
+        let photoItems = mediaItems.filter { if case .photo = $0.kind { return true }; return false }
+        let videoItems = mediaItems.filter { if case .video = $0.kind { return true }; return false }
+        let hasVideos = !videoItems.isEmpty
+        let hasPhotos = !photoItems.isEmpty
+        let totalVideoDuration = videoItems.reduce(CMTime.zero) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case let .video(_, duration):
+                return partial + duration
+            }
+        }
+
+        let perPhotoDuration: CMTime = {
+            guard hasPhotos else { return .zero }
+            let remainingForPhotos = CMTimeMaximum(.zero, totalDuration - totalVideoDuration)
+            guard remainingForPhotos > .zero else { return .zero }
+            let rawDuration = CMTimeGetSeconds(remainingForPhotos) / Double(photoItems.count)
+            if rawDuration > 20 {
+                return CMTime(seconds: 21, preferredTimescale: 600)
+            }
+            return CMTime(seconds: max(rawDuration, 5), preferredTimescale: 600)
+        }()
+
+        if hasPhotos, CMTimeGetSeconds(perPhotoDuration) > 20 {
+            throw ExportError.storyNeedsMoreMedia
+        }
+
+        var segments: [TimelineSegment] = []
+        var cursor = CMTime.zero
         var loopIndex = 0
 
         while cursor < totalDuration {
@@ -2219,6 +2312,7 @@ struct VideoExporter {
         case missingVideoTrack
         case exportSessionFailed
         case exportFailed
+        case storyNeedsMoreMedia
 
         var errorDescription: String? {
             switch self {
@@ -2236,6 +2330,8 @@ struct VideoExporter {
                 return "Could not create the export session."
             case .exportFailed:
                 return "Video export did not complete."
+            case .storyNeedsMoreMedia:
+                return "Story without captions needs more media. Add more photos or videos so each photo would be 20 seconds or less."
             }
         }
     }

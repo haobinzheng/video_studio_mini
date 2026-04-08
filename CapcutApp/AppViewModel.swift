@@ -2443,6 +2443,7 @@ final class AppViewModel: NSObject, ObservableObject {
             && !isPreparingVideoPreview
             && !isPreparingNarrationPreview
             && !hasNarrationLanguageMismatchForRender
+            && storyCaptionOffPlanningWarning == nil
     }
 
     var canStartFinalVideoRender: Bool {
@@ -2453,6 +2454,11 @@ final class AppViewModel: NSObject, ObservableObject {
             && !isPreparingNarrationPreview
             && hasPendingFinalVideoChanges
             && !hasNarrationLanguageMismatchForRender
+            && storyCaptionOffPlanningWarning == nil
+    }
+
+    var activeStatusMessage: String {
+        storyCaptionOffPlanningWarning ?? statusMessage
     }
 
     var canPlayNarration: Bool {
@@ -2549,6 +2555,37 @@ final class AppViewModel: NSObject, ObservableObject {
         case .story:
             return estimatedNarrationDurationSeconds > 0 ? estimatedNarrationDurationSeconds : estimatedMediaOnlyDurationSeconds
         }
+    }
+
+    var storyCaptionOffPlanningWarning: String? {
+        guard selectedTimingMode == .story,
+              !includesFinalCaptions else { return nil }
+
+        let narrationSeconds = estimatedNarrationDurationSeconds
+        guard narrationSeconds > 0 else { return nil }
+
+        let photoCount = mediaItems.reduce(0) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial + 1
+            case .video:
+                return partial
+            }
+        }
+        guard photoCount > 0 else { return nil }
+
+        let totalVideoSeconds = mediaItems.reduce(0.0) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case let .video(_, duration):
+                return partial + max(duration, 0)
+            }
+        }
+
+        let rawPhotoTime = max(narrationSeconds - totalVideoSeconds, 0) / Double(photoCount)
+        guard rawPhotoTime > 20 else { return nil }
+        return "Story without captions needs more media. Add more photos or videos so each photo would be 20 seconds or less."
     }
 
     private var hasRenderableMediaForSelectedMode: Bool {
