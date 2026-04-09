@@ -867,6 +867,25 @@ struct ContentView: View {
                                         .padding(14)
                                 }
                             }
+                            .overlay(alignment: .topTrailing) {
+                                if viewModel.currentSlideIndex == index {
+                                    Menu {
+                                        Button(role: .destructive) {
+                                            viewModel.removeMediaItem(withId: item.id)
+                                        } label: {
+                                            Label("Delete", systemImage: "trash")
+                                        }
+                                    } label: {
+                                        Image(systemName: "ellipsis")
+                                            .font(.caption.weight(.bold))
+                                            .foregroundStyle(.white)
+                                            .frame(width: 30, height: 30)
+                                            .background(Color.black.opacity(0.62), in: Circle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding(14)
+                                }
+                            }
                             .overlay(alignment: .bottomTrailing) {
                                 HStack(spacing: 8) {
                                     Text("#\(index + 1)")

@@ -889,6 +889,30 @@ final class AppViewModel: NSObject, ObservableObject {
         }
     }
 
+    func removeMediaItem(withId itemID: UUID) {
+        guard let itemIndex = mediaItems.firstIndex(where: { $0.id == itemID }) else { return }
+
+        let removedItem = mediaItems.remove(at: itemIndex)
+        if itemIndex < selectedPhotoItems.count {
+            selectedPhotoItems.remove(at: itemIndex)
+        }
+        if mediaItems.isEmpty {
+            currentSlideIndex = 0
+        } else {
+            currentSlideIndex = min(currentSlideIndex, mediaItems.count - 1)
+        }
+
+        if let managedURL = mediaVideoURLIfManagedCopy(for: removedItem) {
+            try? FileManager.default.removeItem(at: managedURL)
+        }
+
+        hasPendingPreviewChanges = true
+        hasPendingFinalVideoChanges = true
+        statusMessage = mediaItems.isEmpty
+            ? "All media removed from the project."
+            : "Media item removed from the project."
+    }
+
     func removeSoundtrackItem(withId itemID: UUID) {
         guard let itemIndex = soundtrackItems.firstIndex(where: { $0.id == itemID }) else { return }
         soundtrackItems.remove(at: itemIndex)
@@ -1041,6 +1065,12 @@ final class AppViewModel: NSObject, ObservableObject {
         mediaItems.remove(at: sourceIndex)
         let destinationIndex = mediaItems.firstIndex(where: { $0.id == targetID }) ?? targetIndex
         mediaItems.insert(movedItem, at: destinationIndex)
+        if sourceIndex < selectedPhotoItems.count {
+            let movedPickerItem = selectedPhotoItems[sourceIndex]
+            selectedPhotoItems.remove(at: sourceIndex)
+            let pickerDestinationIndex = min(destinationIndex, selectedPhotoItems.count)
+            selectedPhotoItems.insert(movedPickerItem, at: pickerDestinationIndex)
+        }
         currentSlideIndex = mediaItems.firstIndex(where: { $0.id == sourceID }) ?? 0
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
