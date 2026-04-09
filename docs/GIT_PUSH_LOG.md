@@ -337,7 +337,7 @@ This checkpoint includes:
 Details:
 
 - branch: `story_enhance`
-- new head: `pending`
+- new head: `f881208`
 - message: `Update design notes`
 
 This checkpoint includes:
