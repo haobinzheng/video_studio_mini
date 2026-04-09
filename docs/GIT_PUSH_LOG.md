@@ -323,7 +323,7 @@ This checkpoint includes:
 Details:
 
 - branch: `story_enhance`
-- new head: `pending`
+- new head: `63e6e39`
 - message: `Refine script preview controls`
 
 This checkpoint includes:
