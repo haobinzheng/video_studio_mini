@@ -360,3 +360,16 @@ This checkpoint includes:
 - final line cleanup adding missing ending punctuation more reliably
 - blank-line cleanup behaving consistently across paragraphs
 - trailing-space and full-width-space handling tightened for cleanup
+
+### 2026-04-09 10:32 PDT
+
+Details:
+
+- branch: `story_enhance`
+- new head: `accde57`
+- message: `Update git push log`
+
+This checkpoint includes:
+
+- pushed the local script cleanup punctuation fix to the remote branch
+- recorded the latest local cleanup fix and log update on the branch
