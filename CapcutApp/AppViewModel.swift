@@ -2781,24 +2781,30 @@ final class AppViewModel: NSObject, ObservableObject {
 
     private static func cleanedNarrationText(from text: String) -> String {
         let rawLines = text.components(separatedBy: .newlines)
-        let cleanedLines = rawLines.map(cleanupNarrationLine)
+        let cleanedLines = rawLines
+            .map(cleanupNarrationLine)
+            .filter { !$0.isEmpty }
 
         var finalLines = cleanedLines
-        for index in cleanedLines.indices {
+        for index in cleanedLines.indices.dropLast() {
             let line = cleanedLines[index]
-            guard !line.isEmpty else { continue }
-            guard let nextIndex = nextNonEmptyLineIndex(after: index, in: cleanedLines) else { continue }
-            let nextLine = cleanedLines[nextIndex]
+            let nextLine = cleanedLines[index + 1]
             guard shouldAppendPausePeriod(to: line, before: nextLine) else { continue }
             finalLines[index] = line + pauseTerminator(for: line, nextLine: nextLine)
         }
 
-        let collapsedParagraphs = collapseRepeatedBlankLines(in: finalLines)
-        return collapsedParagraphs.joined(separator: "\n")
+        if let lastIndex = finalLines.lastIndex(where: { !$0.isEmpty }) {
+            let line = finalLines[lastIndex]
+            if shouldAppendTerminalPausePeriod(to: line) {
+                finalLines[lastIndex] = line + pauseTerminator(for: line, nextLine: line)
+            }
+        }
+
+        return finalLines.joined(separator: "\n")
     }
 
     private static func cleanupNarrationLine(_ line: String) -> String {
-        var cleaned = line.trimmingCharacters(in: .whitespaces)
+        var cleaned = line.trimmingCharacters(in: narrationTrimCharacterSet)
         guard !cleaned.isEmpty else { return "" }
 
         cleaned = trimmedLeadingNarrationJunk(from: cleaned)
@@ -2827,57 +2833,31 @@ final class AppViewModel: NSObject, ObservableObject {
             options: .regularExpression
         )
 
-        return cleaned.trimmingCharacters(in: .whitespaces)
+        return cleaned.trimmingCharacters(in: narrationTrimCharacterSet)
     }
 
     private static func trimmedLeadingNarrationJunk(from text: String) -> String {
-        let junk = CharacterSet(charactersIn: ".-–—,:;!?，。！？•‣◦⁃∙ \t")
+        let junk = CharacterSet(charactersIn: ".-–—,:;!?，。！？•‣◦⁃∙ \t\u{3000}")
         let scalars = text.unicodeScalars
         let trimmedScalars = scalars.drop(while: { junk.contains($0) })
         return String(String.UnicodeScalarView(trimmedScalars))
     }
 
-    private static func nextNonEmptyLineIndex(after index: Int, in lines: [String]) -> Int? {
-        guard index + 1 < lines.count else { return nil }
-        for nextIndex in (index + 1)..<lines.count where !lines[nextIndex].isEmpty {
-            return nextIndex
-        }
-        return nil
-    }
-
-    private static func collapseRepeatedBlankLines(in lines: [String]) -> [String] {
-        var collapsed: [String] = []
-        var previousWasBlank = false
-
-        for line in lines {
-            if line.isEmpty {
-                guard !previousWasBlank else { continue }
-                collapsed.append("")
-                previousWasBlank = true
-            } else {
-                collapsed.append(line)
-                previousWasBlank = false
-            }
-        }
-
-        while collapsed.first?.isEmpty == true {
-            collapsed.removeFirst()
-        }
-
-        while collapsed.last?.isEmpty == true {
-            collapsed.removeLast()
-        }
-
-        return collapsed
-    }
-
     private static func shouldAppendPausePeriod(to line: String, before nextLine: String) -> Bool {
-        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        let trimmed = line.trimmingCharacters(in: narrationTrimCharacterSet)
         guard !trimmed.isEmpty else { return false }
         guard containsNarrationContent(trimmed) else { return false }
         guard !trimmed.hasSuffix(",") else { return false }
         guard !endsWithPausePunctuation(trimmed) else { return false }
         return containsNarrationContent(nextLine)
+    }
+
+    private static func shouldAppendTerminalPausePeriod(to line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: narrationTrimCharacterSet)
+        guard !trimmed.isEmpty else { return false }
+        guard containsNarrationContent(trimmed) else { return false }
+        guard !trimmed.hasSuffix(",") else { return false }
+        return !endsWithPausePunctuation(trimmed)
     }
 
     private static func pauseTerminator(for line: String, nextLine: String) -> String {
@@ -2916,11 +2896,14 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     private static func endsWithPausePunctuation(_ line: String) -> Bool {
-        let trailingTrimmed = line.trimmingCharacters(in: .whitespaces)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'”’)]}"))
+        let trailingTrimmed = line.trimmingCharacters(in: narrationTrimCharacterSet)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'”“‘’)]}）】》」』」』）】》,，"))
         guard let lastCharacter = trailingTrimmed.last else { return false }
         return ".!?;:。！？；：…".contains(lastCharacter)
     }
+
+    private static let narrationTrimCharacterSet = CharacterSet.whitespacesAndNewlines
+        .union(CharacterSet(charactersIn: "\u{3000}"))
 
     private static func detectNarrationLanguageFamily(for text: String) -> ScriptLanguageFamily? {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
