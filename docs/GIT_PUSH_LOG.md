@@ -283,3 +283,20 @@ This checkpoint includes:
 - `+` adding all selected tracks and closing the library
 - `Exit` closing without adding
 - only one selected row acting as the active preview/play row at a time
+
+### 2026-04-08 18:30 PDT
+
+Details:
+
+- branch: `story_enhance`
+- new head: `61972fa`
+- message: `Improve media item management`
+
+This checkpoint includes:
+
+- per-item media delete moved into the upper preview-stage `...` menu
+- media delete syncing with `Import Media`
+- media drag reorder syncing with `Import Media`
+- new docs:
+  - `docs/GIT_PUSH_LOG.md`
+  - `docs/DESIGN_NOTES.md`
