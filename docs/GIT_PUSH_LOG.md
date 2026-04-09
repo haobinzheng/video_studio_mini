@@ -300,3 +300,20 @@ This checkpoint includes:
 - new docs:
   - `docs/GIT_PUSH_LOG.md`
   - `docs/DESIGN_NOTES.md`
+
+### 2026-04-08 21:12 PDT
+
+Details:
+
+- branch: `story_enhance`
+- new head: `pending`
+- message: `Add script cleanup action`
+
+This checkpoint includes:
+
+- Script-tab `Clean Up` action for narration text
+- removal of stray leading punctuation before TTS
+- removal of leading numbering such as `1.`, `1)`, and Chinese outline prefixes like `一、`
+- automatic title-style pause punctuation, using `。` for Chinese lines
+- repeated blank lines collapsed to a single blank line
+- cleanup dismissing the keyboard and scrolling back to the top of the script

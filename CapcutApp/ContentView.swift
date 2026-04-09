@@ -1307,6 +1307,18 @@ struct ContentView: View {
                 inlineScriptActionButton(title: "Introduction", systemImage: "text.badge.plus") {
                     viewModel.loadSampleNarration()
                 }
+
+                inlineScriptActionButton(title: "Clean Up", systemImage: "wand.and.stars") {
+                    isNarrationFocused = false
+                    viewModel.cleanupNarrationText()
+                    DispatchQueue.main.async {
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            scriptScrollProxy?.scrollTo("script-top", anchor: .top)
+                        }
+                    }
+                }
+                .opacity(viewModel.narrationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.6 : 1)
+                .disabled(viewModel.narrationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
             .disabled(viewModel.isPreparingNarrationPreview)
 

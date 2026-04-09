@@ -586,6 +586,18 @@ final class AppViewModel: NSObject, ObservableObject {
         statusMessage = "Last saved script recovered."
     }
 
+    func cleanupNarrationText() {
+        let cleanedText = Self.cleanedNarrationText(from: narrationText)
+        guard cleanedText != narrationText else {
+            statusMessage = "Script is already clean for narration."
+            return
+        }
+
+        stopLiveNarrationPlayback()
+        narrationText = cleanedText
+        statusMessage = "Script cleaned for narration."
+    }
+
     private func stopLiveNarrationPlayback(reason: String? = nil) {
         speechSynthesizer.stopSpeaking(at: .immediate)
         isSpeaking = false
@@ -2765,6 +2777,149 @@ final class AppViewModel: NSObject, ObservableObject {
             return firstFallback
         }
         return ""
+    }
+
+    private static func cleanedNarrationText(from text: String) -> String {
+        let rawLines = text.components(separatedBy: .newlines)
+        let cleanedLines = rawLines.map(cleanupNarrationLine)
+
+        var finalLines = cleanedLines
+        for index in cleanedLines.indices {
+            let line = cleanedLines[index]
+            guard !line.isEmpty else { continue }
+            guard let nextIndex = nextNonEmptyLineIndex(after: index, in: cleanedLines) else { continue }
+            let nextLine = cleanedLines[nextIndex]
+            guard shouldAppendPausePeriod(to: line, before: nextLine) else { continue }
+            finalLines[index] = line + pauseTerminator(for: line, nextLine: nextLine)
+        }
+
+        let collapsedParagraphs = collapseRepeatedBlankLines(in: finalLines)
+        return collapsedParagraphs.joined(separator: "\n")
+    }
+
+    private static func cleanupNarrationLine(_ line: String) -> String {
+        var cleaned = line.trimmingCharacters(in: .whitespaces)
+        guard !cleaned.isEmpty else { return "" }
+
+        cleaned = trimmedLeadingNarrationJunk(from: cleaned)
+
+        cleaned = cleaned.replacingOccurrences(
+            of: #"^[\(\uff08]?\d+[\)\uff09]?[.)\uff0e\uff09](?=\s*[\p{L}\p{N}])\s*"#,
+            with: "",
+            options: .regularExpression
+        )
+
+        cleaned = cleaned.replacingOccurrences(
+            of: #"^\d+\s*[-:\uff1a](?=\s*[\p{L}\p{N}])\s*"#,
+            with: "",
+            options: .regularExpression
+        )
+
+        cleaned = cleaned.replacingOccurrences(
+            of: #"^[一二三四五六七八九十百千万零〇两甲乙丙丁戊己庚辛壬癸]+[、.)\uff09\uff0e](?=\s*[\p{L}\p{N}])\s*"#,
+            with: "",
+            options: .regularExpression
+        )
+
+        cleaned = cleaned.replacingOccurrences(
+            of: #"\s+"#,
+            with: " ",
+            options: .regularExpression
+        )
+
+        return cleaned.trimmingCharacters(in: .whitespaces)
+    }
+
+    private static func trimmedLeadingNarrationJunk(from text: String) -> String {
+        let junk = CharacterSet(charactersIn: ".-–—,:;!?，。！？•‣◦⁃∙ \t")
+        let scalars = text.unicodeScalars
+        let trimmedScalars = scalars.drop(while: { junk.contains($0) })
+        return String(String.UnicodeScalarView(trimmedScalars))
+    }
+
+    private static func nextNonEmptyLineIndex(after index: Int, in lines: [String]) -> Int? {
+        guard index + 1 < lines.count else { return nil }
+        for nextIndex in (index + 1)..<lines.count where !lines[nextIndex].isEmpty {
+            return nextIndex
+        }
+        return nil
+    }
+
+    private static func collapseRepeatedBlankLines(in lines: [String]) -> [String] {
+        var collapsed: [String] = []
+        var previousWasBlank = false
+
+        for line in lines {
+            if line.isEmpty {
+                guard !previousWasBlank else { continue }
+                collapsed.append("")
+                previousWasBlank = true
+            } else {
+                collapsed.append(line)
+                previousWasBlank = false
+            }
+        }
+
+        while collapsed.first?.isEmpty == true {
+            collapsed.removeFirst()
+        }
+
+        while collapsed.last?.isEmpty == true {
+            collapsed.removeLast()
+        }
+
+        return collapsed
+    }
+
+    private static func shouldAppendPausePeriod(to line: String, before nextLine: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return false }
+        guard containsNarrationContent(trimmed) else { return false }
+        guard !trimmed.hasSuffix(",") else { return false }
+        guard !endsWithPausePunctuation(trimmed) else { return false }
+        return containsNarrationContent(nextLine)
+    }
+
+    private static func pauseTerminator(for line: String, nextLine: String) -> String {
+        if containsChineseStyleText(line) || containsChineseStyleText(nextLine) {
+            return "。"
+        }
+        return "."
+    }
+
+    private static func containsChineseStyleText(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            switch scalar.value {
+            case 0x4E00...0x9FFF, 0x3400...0x4DBF, 0x3000...0x303F, 0xFF00...0xFFEF:
+                return true
+            default:
+                return false
+            }
+        }
+    }
+
+    private static func containsNarrationContent(_ text: String) -> Bool {
+        text.unicodeScalars.contains { scalar in
+            CharacterSet.letters.contains(scalar)
+                || CharacterSet.decimalDigits.contains(scalar)
+                || containsChineseStyleScalar(scalar)
+        }
+    }
+
+    private static func containsChineseStyleScalar(_ scalar: UnicodeScalar) -> Bool {
+        switch scalar.value {
+        case 0x4E00...0x9FFF, 0x3400...0x4DBF:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private static func endsWithPausePunctuation(_ line: String) -> Bool {
+        let trailingTrimmed = line.trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "\"'”’)]}"))
+        guard let lastCharacter = trailingTrimmed.last else { return false }
+        return ".!?;:。！？；：…".contains(lastCharacter)
     }
 
     private static func detectNarrationLanguageFamily(for text: String) -> ScriptLanguageFamily? {
