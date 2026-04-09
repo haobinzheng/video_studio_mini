@@ -344,3 +344,19 @@ This checkpoint includes:
 
 - Script cleanup design notes
 - Script preview control design notes
+
+### 2026-04-09 10:23 PDT
+
+Details:
+
+- branch: `story_enhance`
+- new head: `7f76ba7`
+- message: `Fix script cleanup punctuation handling`
+- status: `local only, not pushed`
+
+This checkpoint includes:
+
+- script cleanup no longer duplicating Chinese paragraph-ending `。`
+- final line cleanup adding missing ending punctuation more reliably
+- blank-line cleanup behaving consistently across paragraphs
+- trailing-space and full-width-space handling tightened for cleanup
