@@ -33,7 +33,8 @@ struct ContentView: View {
     @State private var voicePendingHide: AppViewModel.VoiceOption?
     @State private var musicLibrarySearchText = ""
     @State private var pendingMusicLibraryDeletion: AppViewModel.MusicLibraryItem?
-    @State private var selectedMusicLibraryItemID: String?
+    @State private var selectedMusicLibraryItemIDs: Set<String> = []
+    @State private var previewingMusicLibraryItemID: String?
     @FocusState private var isNarrationFocused: Bool
 
     var body: some View {
@@ -434,8 +435,7 @@ struct ContentView: View {
 
                 ForEach(filteredMusicLibraryItems) { item in
                     Button {
-                        selectedMusicLibraryItemID = item.id
-                        viewModel.previewMusicLibraryItem(item)
+                        toggleMusicLibrarySelection(for: item)
                     } label: {
                         HStack(spacing: 12) {
                             VStack(alignment: .leading, spacing: 4) {
@@ -460,14 +460,19 @@ struct ContentView: View {
                                 }
                             }
 
-                            if selectedMusicLibraryItemID == item.id {
+                            if selectedMusicLibraryItemIDs.contains(item.id) {
                                 Button {
-                                    if !viewModel.isMusicPlaying {
+                                    if previewingMusicLibraryItemID != item.id {
                                         viewModel.previewMusicLibraryItem(item)
+                                        previewingMusicLibraryItemID = item.id
                                     }
-                                    viewModel.toggleMusicPlayback()
+                                    if previewingMusicLibraryItemID == item.id, !viewModel.isMusicPlaying {
+                                        viewModel.toggleMusicPlayback()
+                                    } else if previewingMusicLibraryItemID == item.id {
+                                        viewModel.toggleMusicPlayback()
+                                    }
                                 } label: {
-                                    Image(systemName: viewModel.isMusicPlaying ? "pause.fill" : "play.fill")
+                                    Image(systemName: isActivelyPreviewingMusicLibraryItem(item) ? "pause.fill" : "play.fill")
                                         .font(.system(size: 14, weight: .bold))
                                         .foregroundStyle(.white)
                                         .frame(width: 38, height: 38)
@@ -491,11 +496,11 @@ struct ContentView: View {
                         .padding(.vertical, 8)
                         .background(
                             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .fill(selectedMusicLibraryItemID == item.id ? Color.blue.opacity(0.14) : Color.white.opacity(0.001))
+                                .fill(selectedMusicLibraryItemIDs.contains(item.id) ? Color.blue.opacity(0.14) : Color.white.opacity(0.001))
                         )
                         .overlay {
                             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(selectedMusicLibraryItemID == item.id ? Color.blue.opacity(0.28) : Color.clear, lineWidth: 1)
+                                .stroke(selectedMusicLibraryItemIDs.contains(item.id) ? Color.blue.opacity(0.28) : Color.clear, lineWidth: 1)
                         }
                     }
                     .buttonStyle(.plain)
@@ -540,27 +545,29 @@ struct ContentView: View {
                 ShareSheet(items: [file.url])
             }
             .onDisappear {
-                selectedMusicLibraryItemID = nil
+                selectedMusicLibraryItemIDs = []
+                previewingMusicLibraryItemID = nil
                 musicLibrarySearchText = ""
                 viewModel.restoreProjectMusicAfterLibraryPreview()
             }
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
-                    Button("Done") {
+                    Button("Exit") {
                         isMusicBrowserPresented = false
                     }
                     .fontWeight(.semibold)
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
                     Button {
-                        if let selectedMusicLibrarySelection {
-                            viewModel.addMusicLibraryItem(selectedMusicLibrarySelection)
-                        }
+                        guard !selectedMusicLibrarySelections.isEmpty else { return }
+                        viewModel.addMusicLibraryItems(selectedMusicLibrarySelections)
+                        selectedMusicLibraryItemIDs = []
+                        isMusicBrowserPresented = false
                     } label: {
-                        Label("Add", systemImage: "plus.circle.fill")
+                        Image(systemName: "plus.circle.fill")
                             .fontWeight(.semibold)
                     }
-                    .disabled(selectedMusicLibrarySelection == nil)
+                    .disabled(selectedMusicLibrarySelections.isEmpty)
                 }
             }
             .safeAreaInset(edge: .bottom) {
@@ -602,9 +609,24 @@ struct ContentView: View {
         }
     }
 
-    private var selectedMusicLibrarySelection: AppViewModel.MusicLibraryItem? {
-        filteredMusicLibraryItems.first(where: { $0.id == selectedMusicLibraryItemID })
-            ?? viewModel.musicLibraryItems.first(where: { $0.id == selectedMusicLibraryItemID })
+    private var selectedMusicLibrarySelections: [AppViewModel.MusicLibraryItem] {
+        viewModel.musicLibraryItems.filter { selectedMusicLibraryItemIDs.contains($0.id) }
+    }
+
+    private func toggleMusicLibrarySelection(for item: AppViewModel.MusicLibraryItem) {
+        if selectedMusicLibraryItemIDs.contains(item.id) {
+            selectedMusicLibraryItemIDs.remove(item.id)
+            if previewingMusicLibraryItemID == item.id {
+                previewingMusicLibraryItemID = nil
+                viewModel.stopMusicSilently()
+            }
+        } else {
+            selectedMusicLibraryItemIDs.insert(item.id)
+        }
+    }
+
+    private func isActivelyPreviewingMusicLibraryItem(_ item: AppViewModel.MusicLibraryItem) -> Bool {
+        previewingMusicLibraryItemID == item.id && viewModel.isMusicPlaying
     }
 
     private var expandedRenderPlayerView: some View {

@@ -809,6 +809,21 @@ final class AppViewModel: NSObject, ObservableObject {
         }
     }
 
+    func addMusicLibraryItems(_ items: [MusicLibraryItem]) {
+        let queueItems = items.map { SoundtrackItem(url: $0.url, name: $0.name, duration: $0.duration) }
+        guard !queueItems.isEmpty else { return }
+
+        let updatedQueue = soundtrackItems + queueItems
+        Task {
+            await rebuildCombinedSoundtrack(
+                from: updatedQueue,
+                startedMessage: queueItems.count == 1
+                    ? "Adding soundtrack to project..."
+                    : "Adding selected soundtracks to project..."
+            )
+        }
+    }
+
     private func saveNarrationDraft() {
         guard shouldPersistNarrationDraft else { return }
         UserDefaults.standard.set(narrationText, forKey: Self.savedNarrationDraftKey)
