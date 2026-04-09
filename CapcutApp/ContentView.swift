@@ -35,6 +35,7 @@ struct ContentView: View {
     @State private var pendingMusicLibraryDeletion: AppViewModel.MusicLibraryItem?
     @State private var selectedMusicLibraryItemIDs: Set<String> = []
     @State private var previewingMusicLibraryItemID: String?
+    @State private var isNarrationPreviewSectionVisible = false
     @FocusState private var isNarrationFocused: Bool
 
     var body: some View {
@@ -1307,8 +1308,30 @@ struct ContentView: View {
                 inlineScriptActionButton(title: "Introduction", systemImage: "text.badge.plus") {
                     viewModel.loadSampleNarration()
                 }
+            }
+            .disabled(viewModel.isPreparingNarrationPreview)
 
-                inlineScriptActionButton(title: "Clean Up", systemImage: "wand.and.stars") {
+            HStack(spacing: 10) {
+                scriptJumpButton(
+                    title: isNarrationPreviewSectionVisible ? "Hide Preview" : "Preview",
+                    systemImage: isNarrationPreviewSectionVisible ? "eye.slash" : "waveform.path.ecg"
+                ) {
+                    isNarrationFocused = false
+                    withAnimation(.easeInOut(duration: 0.25)) {
+                        isNarrationPreviewSectionVisible.toggle()
+                    }
+                    if !isNarrationPreviewSectionVisible {
+                        viewModel.stopNarrationPreview()
+                    } else {
+                        DispatchQueue.main.async {
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                scriptScrollProxy?.scrollTo("script-preview", anchor: .top)
+                            }
+                        }
+                    }
+                }
+
+                scriptJumpButton(title: "Clean Up", systemImage: "wand.and.stars") {
                     isNarrationFocused = false
                     viewModel.cleanupNarrationText()
                     DispatchQueue.main.async {
@@ -1319,27 +1342,6 @@ struct ContentView: View {
                 }
                 .opacity(viewModel.narrationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.6 : 1)
                 .disabled(viewModel.narrationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-            }
-            .disabled(viewModel.isPreparingNarrationPreview)
-
-            HStack(spacing: 10) {
-                scriptJumpButton(title: "Top", systemImage: "arrow.up.to.line") {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        scriptScrollProxy?.scrollTo("script-top", anchor: .top)
-                    }
-                }
-
-                scriptJumpButton(title: "Preview", systemImage: "waveform.path.ecg") {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        scriptScrollProxy?.scrollTo("script-preview", anchor: .top)
-                    }
-                }
-
-                scriptJumpButton(title: "Bottom", systemImage: "arrow.down.to.line") {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        scriptScrollProxy?.scrollTo("script-bottom", anchor: .bottom)
-                    }
-                }
             }
 
             TextEditor(text: $viewModel.narrationText)
@@ -1352,8 +1354,10 @@ struct ContentView: View {
                     isNarrationFocused = true
                 }
 
-            narrationPreviewSection
-                .id("script-preview")
+            if isNarrationPreviewSectionVisible {
+                narrationPreviewSection
+                    .id("script-preview")
+            }
 
             Color.clear
                 .frame(height: 1)

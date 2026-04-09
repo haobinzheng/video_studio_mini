@@ -317,3 +317,17 @@ This checkpoint includes:
 - automatic title-style pause punctuation, using `。` for Chinese lines
 - repeated blank lines collapsed to a single blank line
 - cleanup dismissing the keyboard and scrolling back to the top of the script
+
+### 2026-04-08 21:32 PDT
+
+Details:
+
+- branch: `story_enhance`
+- new head: `pending`
+- message: `Refine script preview controls`
+
+This checkpoint includes:
+
+- Script `Preview` becoming a show or hide toggle for the preview tool
+- `Top` and `Bottom` buttons removed from the Script tab
+- `Clean Up` moved onto the same row as `Preview`
