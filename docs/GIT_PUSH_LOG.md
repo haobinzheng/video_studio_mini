@@ -331,3 +331,16 @@ This checkpoint includes:
 - Script `Preview` becoming a show or hide toggle for the preview tool
 - `Top` and `Bottom` buttons removed from the Script tab
 - `Clean Up` moved onto the same row as `Preview`
+
+### 2026-04-08 21:36 PDT
+
+Details:
+
+- branch: `story_enhance`
+- new head: `pending`
+- message: `Update design notes`
+
+This checkpoint includes:
+
+- Script cleanup design notes
+- Script preview control design notes

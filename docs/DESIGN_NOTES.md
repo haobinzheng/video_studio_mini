@@ -448,3 +448,65 @@ Resulting UX:
 Design note:
 
 - `Exit` is clearer than `Enter` for this workflow
+
+## Script Cleanup
+
+Script cleanup design:
+
+- the Script tab gets a one-tap `Clean Up` action before TTS or render
+- cleanup is meant to normalize messy pasted script text without trying to rewrite the script itself
+
+Current cleanup targets:
+
+- stray leading punctuation such as a leading `.`
+- leading numbering such as `1.`, `1)`, `(1)`
+- Chinese outline prefixes such as `一、`, `二、`, `甲、`
+- repeated blank lines
+- extra spaces inside a line
+
+Pause behavior:
+
+- if a title-like line is missing ending punctuation before the next non-empty line, cleanup inserts a pause-ending mark
+- Chinese lines use `。`
+- other lines use `.`
+
+Product intent:
+
+- reduce unwanted TTS pauses from messy prefixes
+- restore missing pauses between title-style lines and the next sentence
+- make pasted legal or outline-style text more narration-friendly before playback
+
+UI behavior:
+
+- after cleanup, the keyboard is dismissed
+- the script view returns to the beginning so the cleaned text can be reviewed quickly
+
+Important scope note:
+
+- cleanup is conservative
+- it normalizes common TTS-breaking patterns
+- it is not intended to paraphrase, translate, or structurally rewrite the script
+
+## Script Preview Controls
+
+Script preview controls design:
+
+- the preview tool is optional, not always visible
+- the Script tab should keep more editing space unless the user explicitly wants preview tools
+
+Control model:
+
+- `Preview` is a toggle
+- tap `Preview` to show the preview tool
+- tap `Hide Preview` to close it again
+- hiding the preview tool also stops active preview playback
+
+Layout simplification:
+
+- `Top` and `Bottom` quick-jump buttons are removed
+- `Clean Up` sits on the same row as `Preview`
+
+Product framing:
+
+- editing and cleanup are the primary Script-tab tasks
+- preview tools should be available when needed, but not consume space by default
