@@ -379,7 +379,7 @@ This checkpoint includes:
 Details:
 
 - branch: `story_enhance`
-- new head: `pending`
+- new head: `f101458`
 - message: `Improve media append flow`
 
 This checkpoint includes:
