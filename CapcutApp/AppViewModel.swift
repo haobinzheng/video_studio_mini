@@ -182,6 +182,10 @@ final class AppViewModel: NSObject, ObservableObject {
     }
     @Published var selectedPhotoItems: [PhotosPickerItem] = [] {
         didSet {
+            guard !suppressSelectedPhotoItemsReload else {
+                suppressSelectedPhotoItemsReload = false
+                return
+            }
             Task {
                 await loadSelectedMedia(from: selectedPhotoItems)
             }
@@ -368,6 +372,7 @@ final class AppViewModel: NSObject, ObservableObject {
     private var allAvailableVoices: [VoiceOption] = []
     private var speechSynthesizer = AVSpeechSynthesizer()
     private var didConfigureAudioSession = false
+    private var suppressSelectedPhotoItemsReload = false
 
     override init() {
         if let hidden = UserDefaults.standard.array(forKey: Self.hiddenVoiceIdentifiersKey) as? [String] {
@@ -1329,22 +1334,9 @@ final class AppViewModel: NSObject, ObservableObject {
         }
 
         var loadedMedia: [MediaItem] = []
-
         for item in pickerItems {
-            if item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) || $0.conforms(to: .video) }) {
-                if let videoURL = await importedVideoURL(from: item),
-                   let previewImage = await makeVideoThumbnail(for: videoURL) {
-                    let duration = await videoDuration(for: videoURL)
-                    loadedMedia.append(
-                        MediaItem(
-                            previewImage: previewImage,
-                            kind: .video(url: videoURL, duration: duration)
-                        )
-                    )
-                }
-            } else if let data = try? await item.loadTransferable(type: Data.self),
-                      let image = downsampledImage(from: data, maxDimension: 1280) {
-                loadedMedia.append(MediaItem(previewImage: image.normalizedOrientationImage(), kind: .photo))
+            if let mediaItem = await makeMediaItem(from: item) {
+                loadedMedia.append(mediaItem)
             }
         }
 
@@ -1356,6 +1348,55 @@ final class AppViewModel: NSObject, ObservableObject {
         statusMessage = loadedMedia.isEmpty
             ? "No valid photos or videos were selected."
             : "\(loadedMedia.count) media item(s) ready for your project."
+    }
+
+    func appendSelectedMedia(from pickerItems: [PhotosPickerItem], combinedSelection: [PhotosPickerItem]) async {
+        guard !pickerItems.isEmpty else { return }
+
+        isLoadingMediaSelection = true
+        defer {
+            isLoadingMediaSelection = false
+        }
+
+        let previousMediaItems = mediaItems
+        var appendedMedia: [MediaItem] = []
+
+        for item in pickerItems {
+            if let mediaItem = await makeMediaItem(from: item) {
+                appendedMedia.append(mediaItem)
+            }
+        }
+
+        guard !appendedMedia.isEmpty else {
+            statusMessage = "No valid photos or videos were selected."
+            return
+        }
+
+        mediaItems.append(contentsOf: appendedMedia)
+        suppressSelectedPhotoItemsReload = true
+        selectedPhotoItems = combinedSelection
+        cleanupStaleMediaVideoCopies(from: previousMediaItems, keeping: mediaItems)
+        hasPendingPreviewChanges = true
+        hasPendingFinalVideoChanges = true
+        statusMessage = "\(appendedMedia.count) media item(s) added to the end of your project."
+    }
+
+    private func makeMediaItem(from item: PhotosPickerItem) async -> MediaItem? {
+        if item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) || $0.conforms(to: .video) }) {
+            if let videoURL = await importedVideoURL(from: item),
+               let previewImage = await makeVideoThumbnail(for: videoURL) {
+                let duration = await videoDuration(for: videoURL)
+                return MediaItem(
+                    previewImage: previewImage,
+                    kind: .video(url: videoURL, duration: duration)
+                )
+            }
+        } else if let data = try? await item.loadTransferable(type: Data.self),
+                  let image = downsampledImage(from: data, maxDimension: 1280) {
+            return MediaItem(previewImage: image.normalizedOrientationImage(), kind: .photo)
+        }
+
+        return nil
     }
 
     private func cleanupStaleMediaVideoCopies(from previousItems: [MediaItem], keeping currentItems: [MediaItem]) {

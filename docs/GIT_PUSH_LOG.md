@@ -373,3 +373,18 @@ This checkpoint includes:
 
 - pushed the local script cleanup punctuation fix to the remote branch
 - recorded the latest local cleanup fix and log update on the branch
+
+### 2026-04-09 23:36 PDT
+
+Details:
+
+- branch: `story_enhance`
+- new head: `pending`
+- message: `Improve media append flow`
+
+This checkpoint includes:
+
+- trailing `+` add-media tile in the media thumbnail row
+- append-only media loading instead of reloading the full existing selection
+- already imported media showing as selected when opening the append picker
+- improved `+` tile alignment in the media row

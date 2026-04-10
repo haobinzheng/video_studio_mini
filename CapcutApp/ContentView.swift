@@ -25,6 +25,7 @@ struct ContentView: View {
     @State private var selectedStep: StudioStep = .narration
     @State private var draggedMediaItem: AppViewModel.MediaItem?
     @State private var draggedSoundtrackItem: AppViewModel.SoundtrackItem?
+    @State private var appendPhotoItems: [PhotosPickerItem] = []
     @State private var renderPreviewPlayer = AVPlayer()
     @State private var scriptScrollProxy: ScrollViewProxy?
     @State private var isSettingsPresented = false
@@ -127,6 +128,21 @@ struct ContentView: View {
             .onChange(of: viewModel.isExportingVideo) { _, isExporting in
                 if isExporting {
                     deactivateRenderPlaybackForNewRender()
+                }
+            }
+            .onChange(of: appendPhotoItems) { _, newItems in
+                let existingItems = viewModel.selectedPhotoItems
+                guard !newItems.isEmpty else { return }
+                guard newItems.count > existingItems.count else {
+                    appendPhotoItems = existingItems
+                    return
+                }
+                Task {
+                    let appendedItems = Array(newItems.dropFirst(existingItems.count))
+                    await viewModel.appendSelectedMedia(from: appendedItems, combinedSelection: newItems)
+                    await MainActor.run {
+                        appendPhotoItems = viewModel.selectedPhotoItems
+                    }
                 }
             }
         }
@@ -707,44 +723,46 @@ struct ContentView: View {
                 Text("Media")
                     .font(.title2.weight(.semibold))
                 Spacer()
-                PhotosPicker(
-                    selection: $viewModel.selectedPhotoItems,
-                    maxSelectionCount: nil,
-                    selectionBehavior: .ordered,
-                    matching: .any(of: [.images, .videos])
-                ) {
-                    HStack(spacing: 10) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(.white.opacity(0.18))
-                                .frame(width: 30, height: 30)
-                            Image(systemName: "square.stack.3d.up.fill")
-                                .font(.system(size: 14, weight: .bold))
+                if viewModel.mediaItems.isEmpty {
+                    PhotosPicker(
+                        selection: $viewModel.selectedPhotoItems,
+                        maxSelectionCount: nil,
+                        selectionBehavior: .ordered,
+                        matching: .any(of: [.images, .videos])
+                    ) {
+                        HStack(spacing: 10) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(.white.opacity(0.18))
+                                    .frame(width: 30, height: 30)
+                                Image(systemName: "square.stack.3d.up.fill")
+                                    .font(.system(size: 14, weight: .bold))
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Import Media")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("Photos and videos")
+                                    .font(.caption2)
+                                    .foregroundStyle(.white.opacity(0.82))
+                            }
                         }
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Import Media")
-                                .font(.subheadline.weight(.semibold))
-                            Text("Photos and videos")
-                                .font(.caption2)
-                                .foregroundStyle(.white.opacity(0.82))
-                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .background(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.94, green: 0.46, blue: 0.22),
+                                Color(red: 0.80, green: 0.26, blue: 0.10)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    )
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white)
-                .background(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.94, green: 0.46, blue: 0.22),
-                            Color(red: 0.80, green: 0.26, blue: 0.10)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-                )
             }
 
             VStack(alignment: .leading, spacing: 10) {
@@ -928,6 +946,21 @@ struct ContentView: View {
                                         )
                                     )
                             }
+
+                            PhotosPicker(
+                                selection: $appendPhotoItems,
+                                maxSelectionCount: nil,
+                                selectionBehavior: .ordered,
+                                matching: .any(of: [.images, .videos])
+                            ) {
+                                mediaAppendThumbnail
+                            }
+                            .buttonStyle(.plain)
+                            .simultaneousGesture(
+                                TapGesture().onEnded {
+                                    appendPhotoItems = viewModel.selectedPhotoItems
+                                }
+                            )
                         }
                         .padding(.vertical, 4)
                     }
@@ -1000,6 +1033,25 @@ struct ContentView: View {
         }
         .onTapGesture {
             viewModel.currentSlideIndex = index
+        }
+    }
+
+    private var mediaAppendThumbnail: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white.opacity(0.72))
+                .frame(width: 78, height: 78)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(
+                            Color.orange.opacity(0.55),
+                            style: StrokeStyle(lineWidth: 2, dash: [6, 4])
+                        )
+                }
+
+            Image(systemName: "plus")
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(Color.orange)
         }
     }
 
