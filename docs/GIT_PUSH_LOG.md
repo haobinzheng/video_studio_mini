@@ -443,3 +443,20 @@ Smaller follow-up commits on the same branch may only update this log file; use 
 - **Subtitle lookup** holds the previous cue across **gaps** between cue times; removed unused `index(at:)`.
 
 Later commits on the same branch may only touch `docs/GIT_PUSH_LOG.md` to record pushes; see `git log` for the exact tip after those updates.
+
+### 2026-04-11 (NLTokenizer caption chunking)
+
+Pushed to the remote feature branch.
+
+Details:
+
+- branch: `story_enhance`
+- remote: `origin` (`github.com:haobinzheng/video_studio_mini.git`)
+- primary commit: `6146603` — `Caption chunking: NLTokenizer + punctuation hierarchy for CJK/JA`
+
+**`6146603` — caption chunking**
+
+- New **`CaptionTextChunker.swift`**: **`NLTokenizer`** (on-device `NaturalLanguage`) for **zh / ja / ko / th / lo** and related voice tags; shared by **`NarrationPreviewBuilder`** and **`VideoExporter`**.
+- **`SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier:)`** for tokenizer language selection.
+- **Chinese & Japanese:** preprocess with **sentence / clause / light punctuation** boundaries, then tokenizer; tighter line limits; merge very short **tail** caption fragments.
+- **Latin / English:** unchanged **legacy** splitting (whitespace + word caps).
