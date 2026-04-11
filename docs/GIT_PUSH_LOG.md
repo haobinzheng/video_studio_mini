@@ -388,3 +388,19 @@ This checkpoint includes:
 - append-only media loading instead of reloading the full existing selection
 - already imported media showing as selected when opening the append picker
 - improved `+` tile alignment in the media row
+
+### 2026-04-10 22:50 PDT
+
+Details:
+
+- branch: `story_enhance`
+- new head: `a7474f4`
+- message: `Add media duplicate controls`
+
+This checkpoint includes:
+
+- Media `...` menu adding `Duplicate` alongside `Delete`
+- duplicate entries using source-aware labels like `#3A`
+- duplicate implemented as a reference-only timeline copy, not a physical asset copy
+- Media and Import Media sync updated to track unique underlying source assets
+- delete confirmation added for media items, while duplicate remains instant
