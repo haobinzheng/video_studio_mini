@@ -422,3 +422,21 @@ This checkpoint includes:
 - **Media import:** `PhotosPicker` wired with `photoLibrary: PHPhotoLibrary.shared()` so `itemIdentifier` resolves and imports reference **PHAsset** + duration instead of exporting the full movie up front; parallel per-item load; `URL` before `PickedMovie` when resolving files; move/stream copy helpers (no `Data(contentsOf:)` for huge files); optional background completion for file-backed placeholders; append flow `combinedSelection` + duplicate-append fix; deferred small local thumbnails for library videos.
 - **Assets:** `AppIcon-1024.png` resized to **1024×1024** for the marketing icon slot.
 - **Build:** `FileHandle.read(upToCount:)` optional `Data?` handling for newer SDKs.
+
+### 2026-04-11 (caption sync)
+
+Pushed to the remote feature branch.
+
+Details:
+
+- branch: `story_enhance`
+- new head: `a97bd5d`
+- message: `Fix narration and caption sync for preview and export`
+- remote: `origin` (`github.com:haobinzheng/video_studio_mini.git`)
+
+This checkpoint includes:
+
+- Remove **1.9×** narration duration bias; caption timing follows **measured TTS** length.
+- **Unified** on-screen lead (`SubtitleTimelineEngine.displayLeadSeconds`) for **preview** and **burned** captions.
+- **Aligned** preview vs export **caption chunking** (`NarrationPreviewBuilder` ↔ `VideoExporter`).
+- **Subtitle lookup** holds the previous cue across **gaps** between cue times; removed unused `index(at:)`.
