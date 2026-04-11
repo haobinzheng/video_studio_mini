@@ -510,3 +510,50 @@ Product framing:
 
 - editing and cleanup are the primary Script-tab tasks
 - preview tools should be available when needed, but not consume space by default
+
+## Media Duplicate And Delete
+
+Media duplicate and delete design:
+
+- the large media preview window `...` menu supports per-item management
+- `Duplicate` and `Delete` live in that menu
+- duplicate is immediate
+- delete requires confirmation
+
+Duplicate behavior:
+
+- duplicating inserts the new media item immediately after the current one
+- the duplicate is reference-only, not a physical copy of the source file
+- the duplicate gets a new app-level identity, but points to the same underlying photo or video asset
+- this keeps duplication fast and avoids extra storage usage
+
+Numbering behavior:
+
+- duplicates use source-aware labels such as `#3A`, `#3B`
+- the original item keeps its base label such as `#3`
+- later unrelated media keep their own base numbering
+- this avoids a disruptive full renumbering of the whole sequence just because one item was duplicated
+
+Timing behavior:
+
+- duplicated videos keep the same natural duration as the original source clip
+- duplicated photos are treated as another instance of the same photo in the timeline
+- timing mode rules still apply normally during render
+
+Delete behavior:
+
+- `Delete` removes the currently selected media item from the project
+- delete is confirmed before execution
+- the confirmation message identifies the item using its visible label, such as `#3A`
+
+Sync behavior:
+
+- duplicate, delete, reorder, and Import Media must stay in sync
+- Import Media reflects unique underlying source assets, not every visible duplicate entry
+- removing one duplicate does not remove the shared source asset if another copy is still in the project
+
+Product framing:
+
+- duplicate is a timeline tool, not a file-copy tool
+- delete is destructive and should be guarded
+- media management should stay fast, predictable, and sequence-aware

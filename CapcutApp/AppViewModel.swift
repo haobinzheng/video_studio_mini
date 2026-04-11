@@ -68,9 +68,22 @@ final class AppViewModel: NSObject, ObservableObject {
             case video(url: URL, duration: Double)
         }
 
-        let id = UUID()
+        let id: UUID
         let previewImage: UIImage
         let kind: Kind
+        let sourceAssetID: UUID
+
+        init(
+            id: UUID = UUID(),
+            previewImage: UIImage,
+            kind: Kind,
+            sourceAssetID: UUID = UUID()
+        ) {
+            self.id = id
+            self.previewImage = previewImage
+            self.kind = kind
+            self.sourceAssetID = sourceAssetID
+        }
 
         var isVideo: Bool {
             if case .video = kind { return true }
@@ -373,6 +386,7 @@ final class AppViewModel: NSObject, ObservableObject {
     private var speechSynthesizer = AVSpeechSynthesizer()
     private var didConfigureAudioSession = false
     private var suppressSelectedPhotoItemsReload = false
+    private var pickerItemsBySourceAssetID: [UUID: PhotosPickerItem] = [:]
 
     override init() {
         if let hidden = UserDefaults.standard.array(forKey: Self.hiddenVoiceIdentifiersKey) as? [String] {
@@ -909,25 +923,43 @@ final class AppViewModel: NSObject, ObservableObject {
     func removeMediaItem(withId itemID: UUID) {
         guard let itemIndex = mediaItems.firstIndex(where: { $0.id == itemID }) else { return }
 
+        let previousMediaItems = mediaItems
         let removedItem = mediaItems.remove(at: itemIndex)
-        if itemIndex < selectedPhotoItems.count {
-            selectedPhotoItems.remove(at: itemIndex)
+        if !mediaItems.contains(where: { $0.sourceAssetID == removedItem.sourceAssetID }) {
+            pickerItemsBySourceAssetID.removeValue(forKey: removedItem.sourceAssetID)
         }
+        refreshSelectedPhotoItemsFromMediaItems()
         if mediaItems.isEmpty {
             currentSlideIndex = 0
         } else {
             currentSlideIndex = min(currentSlideIndex, mediaItems.count - 1)
         }
 
-        if let managedURL = mediaVideoURLIfManagedCopy(for: removedItem) {
-            try? FileManager.default.removeItem(at: managedURL)
-        }
+        cleanupStaleMediaVideoCopies(from: previousMediaItems, keeping: mediaItems)
 
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
         statusMessage = mediaItems.isEmpty
             ? "All media removed from the project."
             : "Media item removed from the project."
+    }
+
+    func duplicateMediaItem(withId itemID: UUID) {
+        guard let itemIndex = mediaItems.firstIndex(where: { $0.id == itemID }) else { return }
+
+        let original = mediaItems[itemIndex]
+        let duplicate = MediaItem(
+            previewImage: original.previewImage,
+            kind: original.kind,
+            sourceAssetID: original.sourceAssetID
+        )
+        let insertionIndex = min(itemIndex + 1, mediaItems.count)
+        mediaItems.insert(duplicate, at: insertionIndex)
+        currentSlideIndex = insertionIndex
+        refreshSelectedPhotoItemsFromMediaItems()
+        hasPendingPreviewChanges = true
+        hasPendingFinalVideoChanges = true
+        statusMessage = "Media duplicated and inserted after the current item."
     }
 
     func removeSoundtrackItem(withId itemID: UUID) {
@@ -957,6 +989,7 @@ final class AppViewModel: NSObject, ObservableObject {
     func clearMediaSelection() {
         let previousMediaItems = mediaItems
         selectedPhotoItems = []
+        pickerItemsBySourceAssetID = [:]
         mediaItems = []
         currentSlideIndex = 0
         cleanupStaleMediaVideoCopies(from: previousMediaItems, keeping: [])
@@ -1008,6 +1041,7 @@ final class AppViewModel: NSObject, ObservableObject {
         clearNarrationPreviewState(resetCaption: true)
         mediaItems = []
         selectedPhotoItems = []
+        pickerItemsBySourceAssetID = [:]
         currentSlideIndex = 0
         importedMusicURL = nil
         importedMusicName = "No music selected"
@@ -1082,12 +1116,7 @@ final class AppViewModel: NSObject, ObservableObject {
         mediaItems.remove(at: sourceIndex)
         let destinationIndex = mediaItems.firstIndex(where: { $0.id == targetID }) ?? targetIndex
         mediaItems.insert(movedItem, at: destinationIndex)
-        if sourceIndex < selectedPhotoItems.count {
-            let movedPickerItem = selectedPhotoItems[sourceIndex]
-            selectedPhotoItems.remove(at: sourceIndex)
-            let pickerDestinationIndex = min(destinationIndex, selectedPhotoItems.count)
-            selectedPhotoItems.insert(movedPickerItem, at: pickerDestinationIndex)
-        }
+        refreshSelectedPhotoItemsFromMediaItems()
         currentSlideIndex = mediaItems.firstIndex(where: { $0.id == sourceID }) ?? 0
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
@@ -1326,6 +1355,7 @@ final class AppViewModel: NSObject, ObservableObject {
         let previousMediaItems = mediaItems
 
         guard !pickerItems.isEmpty else {
+            pickerItemsBySourceAssetID = [:]
             mediaItems = []
             currentSlideIndex = 0
             cleanupStaleMediaVideoCopies(from: previousMediaItems, keeping: [])
@@ -1334,12 +1364,16 @@ final class AppViewModel: NSObject, ObservableObject {
         }
 
         var loadedMedia: [MediaItem] = []
+        var loadedPickerMap: [UUID: PhotosPickerItem] = [:]
         for item in pickerItems {
-            if let mediaItem = await makeMediaItem(from: item) {
+            let sourceAssetID = UUID()
+            if let mediaItem = await makeMediaItem(from: item, sourceAssetID: sourceAssetID) {
                 loadedMedia.append(mediaItem)
+                loadedPickerMap[sourceAssetID] = item
             }
         }
 
+        pickerItemsBySourceAssetID = loadedPickerMap
         mediaItems = loadedMedia
         currentSlideIndex = 0
         cleanupStaleMediaVideoCopies(from: previousMediaItems, keeping: loadedMedia)
@@ -1362,8 +1396,10 @@ final class AppViewModel: NSObject, ObservableObject {
         var appendedMedia: [MediaItem] = []
 
         for item in pickerItems {
-            if let mediaItem = await makeMediaItem(from: item) {
+            let sourceAssetID = UUID()
+            if let mediaItem = await makeMediaItem(from: item, sourceAssetID: sourceAssetID) {
                 appendedMedia.append(mediaItem)
+                pickerItemsBySourceAssetID[sourceAssetID] = item
             }
         }
 
@@ -1373,27 +1409,32 @@ final class AppViewModel: NSObject, ObservableObject {
         }
 
         mediaItems.append(contentsOf: appendedMedia)
-        suppressSelectedPhotoItemsReload = true
-        selectedPhotoItems = combinedSelection
+        synchronizePickerSelectionToCombinedSelection(combinedSelection)
+        refreshSelectedPhotoItemsFromMediaItems()
         cleanupStaleMediaVideoCopies(from: previousMediaItems, keeping: mediaItems)
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
         statusMessage = "\(appendedMedia.count) media item(s) added to the end of your project."
     }
 
-    private func makeMediaItem(from item: PhotosPickerItem) async -> MediaItem? {
+    private func makeMediaItem(from item: PhotosPickerItem, sourceAssetID: UUID) async -> MediaItem? {
         if item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) || $0.conforms(to: .video) }) {
             if let videoURL = await importedVideoURL(from: item),
                let previewImage = await makeVideoThumbnail(for: videoURL) {
                 let duration = await videoDuration(for: videoURL)
                 return MediaItem(
                     previewImage: previewImage,
-                    kind: .video(url: videoURL, duration: duration)
+                    kind: .video(url: videoURL, duration: duration),
+                    sourceAssetID: sourceAssetID
                 )
             }
         } else if let data = try? await item.loadTransferable(type: Data.self),
                   let image = downsampledImage(from: data, maxDimension: 1280) {
-            return MediaItem(previewImage: image.normalizedOrientationImage(), kind: .photo)
+            return MediaItem(
+                previewImage: image.normalizedOrientationImage(),
+                kind: .photo,
+                sourceAssetID: sourceAssetID
+            )
         }
 
         return nil
@@ -1405,6 +1446,78 @@ final class AppViewModel: NSObject, ObservableObject {
         for url in previousItems.compactMap({ self.mediaVideoURLIfManagedCopy(for: $0) }) where !activeURLs.contains(url) {
             try? FileManager.default.removeItem(at: url)
         }
+    }
+
+    private func synchronizePickerSelectionToCombinedSelection(_ combinedSelection: [PhotosPickerItem]) {
+        guard !combinedSelection.isEmpty else { return }
+
+        let knownSourceCount = mediaItems.map(\.sourceAssetID).reduce(into: Set<UUID>()) { partial, sourceAssetID in
+            partial.insert(sourceAssetID)
+        }.count
+        guard combinedSelection.count >= knownSourceCount else { return }
+
+        let orderedSourceIDs = orderedUniqueSourceAssetIDs()
+        for (pickerItem, sourceAssetID) in zip(combinedSelection, orderedSourceIDs) {
+            pickerItemsBySourceAssetID[sourceAssetID] = pickerItem
+        }
+    }
+
+    private func refreshSelectedPhotoItemsFromMediaItems() {
+        let refreshedItems = orderedUniqueSourceAssetIDs().compactMap { pickerItemsBySourceAssetID[$0] }
+        suppressSelectedPhotoItemsReload = true
+        selectedPhotoItems = refreshedItems
+    }
+
+    private func orderedUniqueSourceAssetIDs() -> [UUID] {
+        var seen = Set<UUID>()
+        var ordered: [UUID] = []
+
+        for item in mediaItems where seen.insert(item.sourceAssetID).inserted {
+            ordered.append(item.sourceAssetID)
+        }
+
+        return ordered
+    }
+
+    func mediaDisplayLabel(for itemID: UUID) -> String {
+        var baseNumberBySource: [UUID: Int] = [:]
+        var occurrenceBySource: [UUID: Int] = [:]
+        var nextBaseNumber = 1
+
+        for item in mediaItems {
+            if baseNumberBySource[item.sourceAssetID] == nil {
+                baseNumberBySource[item.sourceAssetID] = nextBaseNumber
+                nextBaseNumber += 1
+            }
+
+            let occurrence = occurrenceBySource[item.sourceAssetID, default: 0]
+            let baseNumber = baseNumberBySource[item.sourceAssetID] ?? nextBaseNumber
+            let label = occurrence == 0
+                ? "#\(baseNumber)"
+                : "#\(baseNumber)\(alphabeticDuplicateSuffix(for: occurrence))"
+
+            if item.id == itemID {
+                return label
+            }
+
+            occurrenceBySource[item.sourceAssetID] = occurrence + 1
+        }
+
+        return "#?"
+    }
+
+    private func alphabeticDuplicateSuffix(for occurrence: Int) -> String {
+        guard occurrence > 0 else { return "" }
+
+        var index = occurrence
+        var suffix = ""
+        while index > 0 {
+            let remainder = (index - 1) % 26
+            let scalar = UnicodeScalar(65 + remainder)!
+            suffix = String(Character(scalar)) + suffix
+            index = (index - 1) / 26
+        }
+        return suffix
     }
 
     private func mediaVideoURLIfManagedCopy(for item: MediaItem) -> URL? {

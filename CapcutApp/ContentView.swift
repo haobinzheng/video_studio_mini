@@ -34,6 +34,7 @@ struct ContentView: View {
     @State private var voicePendingHide: AppViewModel.VoiceOption?
     @State private var musicLibrarySearchText = ""
     @State private var pendingMusicLibraryDeletion: AppViewModel.MusicLibraryItem?
+    @State private var pendingMediaDeletion: AppViewModel.MediaItem?
     @State private var selectedMusicLibraryItemIDs: Set<String> = []
     @State private var previewingMusicLibraryItemID: String?
     @State private var isNarrationPreviewSectionVisible = false
@@ -83,6 +84,16 @@ struct ContentView: View {
                     message: Text("\(voice.name) will be removed from the narration voice list. Reload iPhone Voices will bring it back."),
                     primaryButton: .destructive(Text("Hide")) {
                         viewModel.hideVoice(withId: voice.id)
+                    },
+                    secondaryButton: .cancel()
+                )
+            }
+            .alert(item: $pendingMediaDeletion) { item in
+                Alert(
+                    title: Text("Delete Media?"),
+                    message: Text("This removes \(viewModel.mediaDisplayLabel(for: item.id)) from the current project."),
+                    primaryButton: .destructive(Text("Delete")) {
+                        viewModel.removeMediaItem(withId: item.id)
                     },
                     secondaryButton: .cancel()
                 )
@@ -889,8 +900,14 @@ struct ContentView: View {
                             .overlay(alignment: .topTrailing) {
                                 if viewModel.currentSlideIndex == index {
                                     Menu {
+                                        Button {
+                                            viewModel.duplicateMediaItem(withId: item.id)
+                                        } label: {
+                                            Label("Duplicate", systemImage: "plus.square.on.square")
+                                        }
+
                                         Button(role: .destructive) {
-                                            viewModel.removeMediaItem(withId: item.id)
+                                            pendingMediaDeletion = item
                                         } label: {
                                             Label("Delete", systemImage: "trash")
                                         }
@@ -907,7 +924,7 @@ struct ContentView: View {
                             }
                             .overlay(alignment: .bottomTrailing) {
                                 HStack(spacing: 8) {
-                                    Text("#\(index + 1)")
+                                    Text(viewModel.mediaDisplayLabel(for: item.id))
                                         .font(.caption.weight(.bold))
                                         .padding(.horizontal, 10)
                                         .padding(.vertical, 6)
@@ -1023,7 +1040,7 @@ struct ContentView: View {
         }
         .frame(width: 78, height: 78)
         .overlay(alignment: .bottomTrailing) {
-            Text("\(index + 1)")
+            Text(viewModel.mediaDisplayLabel(for: item.id))
                 .font(.caption2.weight(.bold))
                 .padding(.horizontal, 7)
                 .padding(.vertical, 4)
