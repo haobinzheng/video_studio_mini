@@ -404,3 +404,21 @@ This checkpoint includes:
 - duplicate implemented as a reference-only timeline copy, not a physical asset copy
 - Media and Import Media sync updated to track unique underlying source assets
 - delete confirmation added for media items, while duplicate remains instant
+
+### 2026-04-11
+
+Pushed to the remote feature branch.
+
+Details:
+
+- branch: `story_enhance`
+- new head: `96488a0`
+- message: `Story smooth export, faster Photos import, safer large-file copy`
+- remote: `origin` (`github.com:haobinzheng/video_studio_mini.git`)
+
+This checkpoint includes:
+
+- **Story / video:** `Story` timelines that contain **only videos** use the **smooth** composition + export path (including **preview**); **Story + video + captions** uses the same smooth base plus caption-burn instead of per-frame `AVAssetImageGenerator` slideshow rendering (avoids jetsam on long/large clips).
+- **Media import:** `PhotosPicker` wired with `photoLibrary: PHPhotoLibrary.shared()` so `itemIdentifier` resolves and imports reference **PHAsset** + duration instead of exporting the full movie up front; parallel per-item load; `URL` before `PickedMovie` when resolving files; move/stream copy helpers (no `Data(contentsOf:)` for huge files); optional background completion for file-backed placeholders; append flow `combinedSelection` + duplicate-append fix; deferred small local thumbnails for library videos.
+- **Assets:** `AppIcon-1024.png` resized to **1024×1024** for the marketing icon slot.
+- **Build:** `FileHandle.read(upToCount:)` optional `Data?` handling for newer SDKs.
