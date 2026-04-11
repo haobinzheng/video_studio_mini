@@ -452,7 +452,12 @@ Details:
 
 - branch: `story_enhance`
 - remote: `origin` (`github.com:haobinzheng/video_studio_mini.git`)
-- primary commit: `6146603` — `Caption chunking: NLTokenizer + punctuation hierarchy for CJK/JA`
+- tip after push: `8eb3faf`
+
+Commits:
+
+1. `6146603` — `Caption chunking: NLTokenizer + punctuation hierarchy for CJK/JA`
+2. `8eb3faf` — `docs: log NLTokenizer caption chunking push 6146603`
 
 **`6146603` — caption chunking**
 
@@ -460,3 +465,7 @@ Details:
 - **`SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier:)`** for tokenizer language selection.
 - **Chinese & Japanese:** preprocess with **sentence / clause / light punctuation** boundaries, then tokenizer; tighter line limits; merge very short **tail** caption fragments.
 - **Latin / English:** unchanged **legacy** splitting (whitespace + word caps).
+
+**`8eb3faf`**
+
+- This **`GIT_PUSH_LOG.md`** entry for the NLTokenizer checkpoint.
