@@ -423,20 +423,28 @@ This checkpoint includes:
 - **Assets:** `AppIcon-1024.png` resized to **1024×1024** for the marketing icon slot.
 - **Build:** `FileHandle.read(upToCount:)` optional `Data?` handling for newer SDKs.
 
-### 2026-04-11 (caption sync)
+### 2026-04-11 (narration/caption sync + log)
 
 Pushed to the remote feature branch.
 
 Details:
 
 - branch: `story_enhance`
-- new head: `a97bd5d`
-- message: `Fix narration and caption sync for preview and export`
+- tip: `8e9a939`
 - remote: `origin` (`github.com:haobinzheng/video_studio_mini.git`)
 
-This checkpoint includes:
+Commits (in order):
+
+1. `a97bd5d` — `Fix narration and caption sync for preview and export`
+2. `8e9a939` — `docs: log push for caption sync commit a97bd5d`
+
+**`a97bd5d` — caption sync**
 
 - Remove **1.9×** narration duration bias; caption timing follows **measured TTS** length.
 - **Unified** on-screen lead (`SubtitleTimelineEngine.displayLeadSeconds`) for **preview** and **burned** captions.
 - **Aligned** preview vs export **caption chunking** (`NarrationPreviewBuilder` ↔ `VideoExporter`).
 - **Subtitle lookup** holds the previous cue across **gaps** between cue times; removed unused `index(at:)`.
+
+**`8e9a939` — documentation**
+
+- This file updated to record the caption sync push and branch tip.
