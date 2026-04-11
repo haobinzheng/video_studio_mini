@@ -3514,6 +3514,11 @@ enum SpeechVoiceLibrary {
             ?? defaultVoice
     }
 
+    /// BCP-47 language tag from the resolved voice (drives `CaptionTextChunker` / `NLTokenizer`).
+    static func voiceLanguageTag(forVoiceIdentifier identifier: String) -> String {
+        voice(for: identifier)?.language ?? ""
+    }
+
     static func makeUtterances(
         from text: String,
         voiceIdentifier: String,

@@ -18,6 +18,7 @@
 		A1B2C3D41E00001000000001 /* NarrationPreviewBuilder.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001200000001 /* NarrationPreviewBuilder.swift */; };
 		A1B2C3D41E00001100000001 /* SubtitleTimelineEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001300000001 /* SubtitleTimelineEngine.swift */; };
 		A1B2C3D41E00001200000001 /* FluxCutLogoMark.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001400000001 /* FluxCutLogoMark.swift */; };
+		A1B2C3D41E00002000000001 /* CaptionTextChunker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001600000001 /* CaptionTextChunker.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -34,6 +35,7 @@
 		A1B2C3D41D00001200000001 /* NarrationPreviewBuilder.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NarrationPreviewBuilder.swift; sourceTree = "<group>"; };
 		A1B2C3D41D00001300000001 /* SubtitleTimelineEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleTimelineEngine.swift; sourceTree = "<group>"; };
 		A1B2C3D41D00001400000001 /* FluxCutLogoMark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FluxCutLogoMark.swift; sourceTree = "<group>"; };
+		A1B2C3D41D00001600000001 /* CaptionTextChunker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptionTextChunker.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -63,6 +65,7 @@
 				A1B2C3D41D00000300000001 /* AppViewModel.swift */,
 				A1B2C3D41D00000800000001 /* VideoExporter.swift */,
 				A1B2C3D41D00001200000001 /* NarrationPreviewBuilder.swift */,
+				A1B2C3D41D00001600000001 /* CaptionTextChunker.swift */,
 				A1B2C3D41D00001300000001 /* SubtitleTimelineEngine.swift */,
 				A1B2C3D41D00001400000001 /* FluxCutLogoMark.swift */,
 				A1B2C3D41D00000900000001 /* SampleMusic/dream_culture.mp3 */,
@@ -155,6 +158,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				A1B2C3D41E00000300000001 /* AppViewModel.swift in Sources */,
+				A1B2C3D41E00002000000001 /* CaptionTextChunker.swift in Sources */,
 				A1B2C3D41E00001000000001 /* NarrationPreviewBuilder.swift in Sources */,
 				A1B2C3D41E00001100000001 /* SubtitleTimelineEngine.swift in Sources */,
 				A1B2C3D41E00001200000001 /* FluxCutLogoMark.swift in Sources */,

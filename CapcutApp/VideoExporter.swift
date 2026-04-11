@@ -690,7 +690,8 @@ struct VideoExporter {
             ? timedCaptionSegments(
                 from: narrationSegments,
                 utteranceDurations: utteranceDurations,
-                totalDuration: totalDuration
+                totalDuration: totalDuration,
+                voiceIdentifier: voiceIdentifier
             )
             : captionSegments(from: externalCues)
         let resolvedDuration = externalCues.isEmpty
@@ -2351,11 +2352,12 @@ struct VideoExporter {
     private func timedCaptionSegments(
         from texts: [String],
         utteranceDurations: [CMTime],
-        totalDuration: CMTime
+        totalDuration: CMTime,
+        voiceIdentifier: String
     ) -> [CaptionSegment] {
         guard !texts.isEmpty else { return [] }
 
-        let slices = makeCaptionSlices(from: texts)
+        let slices = makeCaptionSlices(from: texts, voiceIdentifier: voiceIdentifier)
         guard !slices.isEmpty else { return [] }
 
         let sourceWeights = sourceSegmentWeights(from: texts)
@@ -2405,57 +2407,11 @@ struct VideoExporter {
         return segments
     }
 
-    private func splitCaptionText(_ text: String) -> [String] {
+    private func splitCaptionText(_ text: String, voiceIdentifier: String) -> [String] {
         let normalized = SpeechVoiceLibrary.normalizedCaptionText(text)
         guard !normalized.isEmpty else { return [] }
-
-        let phraseSeparators = CharacterSet(charactersIn: ",，、")
-        let phrases = normalized.components(separatedBy: phraseSeparators)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        let sourcePhrases = phrases.isEmpty ? [normalized] : phrases
-        return sourcePhrases.flatMap { phrase in
-            if phrase.contains(" ") {
-                return splitWordPhrase(phrase, maxWords: 12)
-            } else {
-                return splitCharacterPhrase(phrase, maxCharacters: 10)
-            }
-        }
-    }
-
-    private func splitWordPhrase(_ phrase: String, maxWords: Int) -> [String] {
-        let words = phrase.split(whereSeparator: \.isWhitespace).map(String.init)
-        guard words.count > maxWords else { return [phrase] }
-
-        var chunks: [String] = []
-        var index = 0
-        while index < words.count {
-            let end = min(index + maxWords, words.count)
-            chunks.append(words[index..<end].joined(separator: " "))
-            index = end
-        }
-        return chunks
-    }
-
-    private func splitCharacterPhrase(_ phrase: String, maxCharacters: Int) -> [String] {
-        guard phrase.count > maxCharacters else { return [phrase] }
-
-        var chunks: [String] = []
-        var current = ""
-        for character in phrase {
-            current.append(character)
-            if current.count >= maxCharacters {
-                chunks.append(current)
-                current = ""
-            }
-        }
-
-        if !current.isEmpty {
-            chunks.append(current)
-        }
-
-        return chunks
+        let tag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
+        return CaptionTextChunker.splitForCaptions(normalizedText: normalized, voiceLanguageTag: tag)
     }
 
     private func formattedCaptionText(_ text: String) -> String {
@@ -2483,9 +2439,9 @@ struct VideoExporter {
         return "\(firstLine)\n\(secondLine)"
     }
 
-    private func makeCaptionSlices(from texts: [String]) -> [CaptionSlice] {
+    private func makeCaptionSlices(from texts: [String], voiceIdentifier: String) -> [CaptionSlice] {
         texts.enumerated().flatMap { index, text in
-            let chunks = splitCaptionText(text)
+            let chunks = splitCaptionText(text, voiceIdentifier: voiceIdentifier)
             return chunks.enumerated().map { chunkIndex, chunk in
                 CaptionSlice(
                     text: chunk,

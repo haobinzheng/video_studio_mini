@@ -68,7 +68,12 @@ struct NarrationPreviewBuilder {
         progressHandler?(0.8, "Combining narration audio.")
         try await mergeAudioFiles(utteranceURLs, outputURL: outputAudioURL)
         progressHandler?(0.92, "Building caption cues.")
-        let cues = buildCues(segments: segments, utteranceDurations: utteranceDurations, totalDuration: measuredDuration)
+        let cues = buildCues(
+            segments: segments,
+            utteranceDurations: utteranceDurations,
+            totalDuration: measuredDuration,
+            voiceIdentifier: voiceIdentifier
+        )
         try writeCues(cues, to: outputJSONURL)
         progressHandler?(1.0, "Narration preview is ready.")
 
@@ -181,12 +186,17 @@ struct NarrationPreviewBuilder {
         }
     }
 
-    private func buildCues(segments: [String], utteranceDurations: [TimeInterval], totalDuration: TimeInterval) -> [SubtitleCue] {
+    private func buildCues(
+        segments: [String],
+        utteranceDurations: [TimeInterval],
+        totalDuration: TimeInterval,
+        voiceIdentifier: String
+    ) -> [SubtitleCue] {
         var cues: [SubtitleCue] = []
         var cursor: TimeInterval = 0
 
         for (index, segment) in segments.enumerated() {
-            let chunks = captionChunks(for: segment)
+            let chunks = captionChunks(for: segment, voiceIdentifier: voiceIdentifier)
             guard !chunks.isEmpty else { continue }
 
             let utteranceDuration = index < utteranceDurations.count ? utteranceDurations[index] : estimatedSeconds(for: segment)
@@ -213,47 +223,27 @@ struct NarrationPreviewBuilder {
         return cues
     }
 
-    private func captionChunks(for segment: String) -> [CueChunk] {
+    private func captionChunks(for segment: String, voiceIdentifier: String) -> [CueChunk] {
         let normalizedSegment = SpeechVoiceLibrary.normalizedCaptionText(segment)
-        let phrases = normalizedSegment
-            .components(separatedBy: CharacterSet(charactersIn: ",，、"))
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        let source = phrases.isEmpty ? [normalizedSegment] : phrases
-        return source.flatMap { phrase in
-            if phrase.contains(" ") {
-                let words = phrase.split(whereSeparator: \.isWhitespace).map(String.init)
-                if words.count <= 12 {
-                    return [CueChunk(text: balancedCaption(phrase), weight: englishWeight(for: phrase))]
-                }
-
-                var chunks: [CueChunk] = []
-                var index = 0
-                while index < words.count {
-                    let end = min(index + 12, words.count)
-                    let chunk = words[index..<end].joined(separator: " ")
-                    chunks.append(CueChunk(text: balancedCaption(chunk), weight: englishWeight(for: chunk)))
-                    index = end
-                }
-                return chunks
+        let tag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
+        let pieces = CaptionTextChunker.splitForCaptions(normalizedText: normalizedSegment, voiceLanguageTag: tag)
+        return pieces.map { piece in
+            let display = displayCaption(for: piece)
+            let weight: Double
+            if SpeechVoiceLibrary.containsCJKContent(in: SpeechVoiceLibrary.normalizedTimingText(piece)) {
+                weight = cjkWeight(for: piece)
             } else {
-                let characters = Array(phrase)
-                if characters.count <= 10 {
-                    return [CueChunk(text: phrase, weight: cjkWeight(for: phrase))]
-                }
-
-                var chunks: [CueChunk] = []
-                var index = 0
-                while index < characters.count {
-                    let end = min(index + 10, characters.count)
-                    let chunk = String(characters[index..<end])
-                    chunks.append(CueChunk(text: chunk, weight: cjkWeight(for: chunk)))
-                    index = end
-                }
-                return chunks
+                weight = englishWeight(for: piece)
             }
+            return CueChunk(text: display, weight: weight)
         }
+    }
+
+    private func displayCaption(for text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = trimmed.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard words.count >= 6 else { return trimmed }
+        return balancedCaption(trimmed)
     }
 
     private func balancedCaption(_ text: String) -> String {
