@@ -430,13 +430,10 @@ Pushed to the remote feature branch.
 Details:
 
 - branch: `story_enhance`
-- tip: `8e9a939`
 - remote: `origin` (`github.com:haobinzheng/video_studio_mini.git`)
+- primary (feature) commit: `a97bd5d` — `Fix narration and caption sync for preview and export`
 
-Commits (in order):
-
-1. `a97bd5d` — `Fix narration and caption sync for preview and export`
-2. `8e9a939` — `docs: log push for caption sync commit a97bd5d`
+Smaller follow-up commits on the same branch may only update this log file; use `git log origin/story_enhance` for the current tip.
 
 **`a97bd5d` — caption sync**
 
@@ -445,6 +442,4 @@ Commits (in order):
 - **Aligned** preview vs export **caption chunking** (`NarrationPreviewBuilder` ↔ `VideoExporter`).
 - **Subtitle lookup** holds the previous cue across **gaps** between cue times; removed unused `index(at:)`.
 
-**`8e9a939` — documentation**
-
-- This file updated to record the caption sync push and branch tip.
+Later commits on the same branch may only touch `docs/GIT_PUSH_LOG.md` to record pushes; see `git log` for the exact tip after those updates.
