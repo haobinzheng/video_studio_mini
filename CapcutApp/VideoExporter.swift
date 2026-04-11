@@ -172,8 +172,9 @@ struct VideoExporter {
         let kind: Kind
     }
 
-    private let captionLagCompensation = CMTime(seconds: 0.30, preferredTimescale: 600)
-    private let narrationDurationBias: Double = 1.90
+    private var captionLagCompensation: CMTime {
+        CMTime(seconds: SubtitleTimelineEngine.displayLeadSeconds, preferredTimescale: 600)
+    }
 
     private struct CaptionSegment {
         let text: String
@@ -684,8 +685,7 @@ struct VideoExporter {
             seconds: estimatedNarrationSeconds(for: narrationSegments),
             preferredTimescale: 600
         )
-        let biasedAudioDuration = CMTimeMultiplyByFloat64(measuredNarrationDuration, multiplier: narrationDurationBias)
-        let totalDuration = max(biasedAudioDuration, estimatedNarrationDuration, CMTime(seconds: 1, preferredTimescale: 600))
+        let totalDuration = max(measuredNarrationDuration, estimatedNarrationDuration, CMTime(seconds: 1, preferredTimescale: 600))
         let captionSegments = externalCues.isEmpty
             ? timedCaptionSegments(
                 from: narrationSegments,
@@ -2369,7 +2369,7 @@ struct VideoExporter {
             guard !group.isEmpty else { continue }
 
             let sourceBudget = sourceIndex < utteranceDurations.count
-                ? CMTimeGetSeconds(utteranceDurations[sourceIndex]) * narrationDurationBias
+                ? CMTimeGetSeconds(utteranceDurations[sourceIndex])
                 : totalSeconds * (sourceWeights[sourceIndex] / totalSourceWeight)
             let groupWeight = max(group.reduce(0.0) { $0 + $1.weight + $1.terminalPauseWeight }, 0.1)
 

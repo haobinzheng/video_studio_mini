@@ -224,14 +224,14 @@ struct NarrationPreviewBuilder {
         return source.flatMap { phrase in
             if phrase.contains(" ") {
                 let words = phrase.split(whereSeparator: \.isWhitespace).map(String.init)
-                if words.count <= 10 {
+                if words.count <= 12 {
                     return [CueChunk(text: balancedCaption(phrase), weight: englishWeight(for: phrase))]
                 }
 
                 var chunks: [CueChunk] = []
                 var index = 0
                 while index < words.count {
-                    let end = min(index + 10, words.count)
+                    let end = min(index + 12, words.count)
                     let chunk = words[index..<end].joined(separator: " ")
                     chunks.append(CueChunk(text: balancedCaption(chunk), weight: englishWeight(for: chunk)))
                     index = end
@@ -239,14 +239,14 @@ struct NarrationPreviewBuilder {
                 return chunks
             } else {
                 let characters = Array(phrase)
-                if characters.count <= 12 {
+                if characters.count <= 10 {
                     return [CueChunk(text: phrase, weight: cjkWeight(for: phrase))]
                 }
 
                 var chunks: [CueChunk] = []
                 var index = 0
                 while index < characters.count {
-                    let end = min(index + 12, characters.count)
+                    let end = min(index + 10, characters.count)
                     let chunk = String(characters[index..<end])
                     chunks.append(CueChunk(text: chunk, weight: cjkWeight(for: chunk)))
                     index = end
@@ -259,11 +259,11 @@ struct NarrationPreviewBuilder {
     private func balancedCaption(_ text: String) -> String {
         let normalizedText = SpeechVoiceLibrary.normalizedCaptionText(text)
         let words = normalizedText.split(whereSeparator: \.isWhitespace).map(String.init)
-        guard words.count >= 8 else { return normalizedText }
+        guard words.count >= 6 else { return normalizedText }
 
         var bestIndex = words.count / 2
         var bestScore = Int.max
-        for index in 3..<(words.count - 2) {
+        for index in 2..<(words.count - 1) {
             let left = words[..<index].joined(separator: " ")
             let right = words[index...].joined(separator: " ")
             let score = abs(left.count - right.count)

@@ -2754,7 +2754,9 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     private func updateNarrationPreviewCaption(for time: Double) {
-        if let cue = narrationTimelineEngine.cue(at: time) {
+        let lead = SubtitleTimelineEngine.displayLeadSeconds
+        let lookupTime = max(0, time - lead)
+        if let cue = narrationTimelineEngine.cue(at: lookupTime) {
             narrationPreviewCaption = cue.text
         } else {
             narrationPreviewCaption = narrationPreviewCues.first?.text ?? "Build a seekable preview to test subtitle sync."
