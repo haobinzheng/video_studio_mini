@@ -384,6 +384,11 @@ struct VideoExporter {
             return false
         }
         let hasMixedStoryMedia = timingMode == .story && hasVideos && hasPhotos
+        /// Story timeline has only video clips (no photos) — always use composition/export instead of per-frame slideshow rendering.
+        let storyVideoOnlyMedia = timingMode == .story && hasVideos && !hasPhotos
+        /// Story + captions needs a caption-burn pass; mixed and video-only use an intermediate file. Photo-only story still uses one-pass slideshow rendering.
+        let storyUsesCaptionIntermediateFile =
+            timingMode == .story && includeCaptions && hasVideos && (hasMixedStoryMedia || !hasPhotos)
 
         let minimumVisualDuration = minimumVisualDuration(for: mediaItems)
         let shouldUseNarration = timingMode != .video
@@ -446,8 +451,8 @@ struct VideoExporter {
 
         let shouldUseSmoothStoryExport =
             timingMode == .story &&
-            renderQuality != .preview &&
-            (!includeCaptions || hasMixedStoryMedia)
+            (storyVideoOnlyMedia
+                || (renderQuality != .preview && (!includeCaptions || hasMixedStoryMedia)))
 
         if timingMode == .realLife || shouldUseSmoothStoryExport {
             progressHandler?(0.24, "Building a real-life composition.")
@@ -459,10 +464,16 @@ struct VideoExporter {
                 fallbackFrameRate: renderProfile.frameRate
             )
             let smoothOutputURL: URL
-            if includeCaptions && (timingMode == .realLife || (timingMode == .story && hasMixedStoryMedia)) {
-                smoothOutputURL = workspace.appendingPathComponent(
-                    timingMode == .realLife ? "slideshow-caption-base.mov" : "story-mixed-base.mov"
-                )
+            if includeCaptions && (timingMode == .realLife || storyUsesCaptionIntermediateFile) {
+                let captionBaseName: String
+                if timingMode == .realLife {
+                    captionBaseName = "slideshow-caption-base.mov"
+                } else if hasMixedStoryMedia {
+                    captionBaseName = "story-mixed-base.mov"
+                } else {
+                    captionBaseName = "story-video-caption-base.mov"
+                }
+                smoothOutputURL = workspace.appendingPathComponent(captionBaseName)
             } else {
                 smoothOutputURL = finalURL
             }
@@ -483,7 +494,7 @@ struct VideoExporter {
                 progressHandler: progressHandler
             )
 
-            if includeCaptions && (timingMode == .realLife || (timingMode == .story && hasMixedStoryMedia)) {
+            if includeCaptions && (timingMode == .realLife || storyUsesCaptionIntermediateFile) {
                 progressHandler?(0.9, timingMode == .realLife
                     ? "Burning captions into the slideshow video."
                     : "Burning captions into the smooth story video.")

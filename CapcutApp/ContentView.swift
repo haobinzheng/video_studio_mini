@@ -1,4 +1,5 @@
 import AVKit
+import Photos
 import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
@@ -600,7 +601,11 @@ struct ContentView: View {
             }
             .safeAreaInset(edge: .bottom) {
                 HStack(spacing: 12) {
-                    PhotosPicker(selection: $selectedMusicVideoItem, matching: .videos) {
+                    PhotosPicker(
+                        selection: $selectedMusicVideoItem,
+                        matching: .videos,
+                        photoLibrary: PHPhotoLibrary.shared()
+                    ) {
                         Label("Extract Soundtracks", systemImage: "film.badge.plus")
                             .font(.subheadline.weight(.semibold))
                             .frame(maxWidth: .infinity)
@@ -739,7 +744,8 @@ struct ContentView: View {
                         selection: $viewModel.selectedPhotoItems,
                         maxSelectionCount: nil,
                         selectionBehavior: .ordered,
-                        matching: .any(of: [.images, .videos])
+                        matching: .any(of: [.images, .videos]),
+                        photoLibrary: PHPhotoLibrary.shared()
                     ) {
                         HStack(spacing: 10) {
                             ZStack {
@@ -968,7 +974,8 @@ struct ContentView: View {
                                 selection: $appendPhotoItems,
                                 maxSelectionCount: nil,
                                 selectionBehavior: .ordered,
-                                matching: .any(of: [.images, .videos])
+                                matching: .any(of: [.images, .videos]),
+                                photoLibrary: PHPhotoLibrary.shared()
                             ) {
                                 mediaAppendThumbnail
                             }
@@ -1008,8 +1015,14 @@ struct ContentView: View {
             Image(uiImage: item.previewImage)
                 .resizable()
                 .scaledToFit()
-        case let .video(url, _):
-            LoopingVideoPreview(url: url, placeholder: item.previewImage, isActive: isActive)
+        case let .video(url, _, _):
+            if let url {
+                LoopingVideoPreview(url: url, placeholder: item.previewImage, isActive: isActive)
+            } else {
+                Image(uiImage: item.previewImage)
+                    .resizable()
+                    .scaledToFit()
+            }
         }
     }
 

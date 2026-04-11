@@ -2,6 +2,7 @@ import AVFoundation
 import CryptoKit
 import CoreTransferable
 import NaturalLanguage
+import Photos
 import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
@@ -14,12 +15,10 @@ private struct PickedMovie: Transferable {
         FileRepresentation(contentType: .movie) { movie in
             SentTransferredFile(movie.url)
         } importing: { received in
-            let fileName = received.file.lastPathComponent.isEmpty
-                ? "picked-movie-\(UUID().uuidString).mov"
-                : received.file.lastPathComponent
+            let originalExtension = received.file.pathExtension.isEmpty ? "mov" : received.file.pathExtension
             let destination = FileManager.default.temporaryDirectory
-                .appendingPathComponent(UUID().uuidString)
-                .appendingPathComponent(fileName)
+                .appendingPathComponent(UUID().uuidString, isDirectory: true)
+                .appendingPathComponent("picked-video-\(UUID().uuidString).\(originalExtension)")
 
             let parent = destination.deletingLastPathComponent()
             try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
@@ -28,9 +27,64 @@ private struct PickedMovie: Transferable {
                 try FileManager.default.removeItem(at: destination)
             }
 
-            try FileManager.default.copyItem(at: received.file, to: destination)
+            try AppViewModelCopyUtilities.copyFileResolvingLargeSources(from: received.file, to: destination)
             return Self(url: destination)
         }
+    }
+}
+
+/// Resolves imported movie files without loading multi‑gigabyte media into RAM (avoids `Data(contentsOf:)` OOM on long 4K clips).
+/// Tries `moveItem` first so picker-provided temp files are adopted in O(1) when on the same volume.
+private enum AppViewModelCopyUtilities {
+    private static let streamChunkSize = 8 * 1024 * 1024
+
+    static func copyFileResolvingLargeSources(from sourceURL: URL, to destinationURL: URL) throws {
+        if FileManager.default.fileExists(atPath: destinationURL.path) {
+            try FileManager.default.removeItem(at: destinationURL)
+        }
+        try FileManager.default.createDirectory(
+            at: destinationURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+
+        do {
+            try FileManager.default.moveItem(at: sourceURL, to: destinationURL)
+            return
+        } catch {
+            // Cross-volume or sandbox quirk: fall back to copy/stream.
+        }
+
+        do {
+            try FileManager.default.copyItem(at: sourceURL, to: destinationURL)
+        } catch {
+            if FileManager.default.fileExists(atPath: destinationURL.path) {
+                try? FileManager.default.removeItem(at: destinationURL)
+            }
+            try copyFileByStreaming(from: sourceURL, to: destinationURL)
+        }
+    }
+
+    private static func copyFileByStreaming(from sourceURL: URL, to destinationURL: URL) throws {
+        guard sourceURL.isFileURL else {
+            throw NSError(
+                domain: "FluxCutFileCopy",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "Cannot stream-copy a non-file URL."]
+            )
+        }
+
+        FileManager.default.createFile(atPath: destinationURL.path, contents: nil)
+        let input = try FileHandle(forReadingFrom: sourceURL)
+        defer { try? input.close() }
+        let output = try FileHandle(forWritingTo: destinationURL)
+        defer { try? output.close() }
+
+        while true {
+            let chunk = try input.read(upToCount: streamChunkSize) ?? Data()
+            if chunk.isEmpty { break }
+            try output.write(contentsOf: chunk)
+        }
+        try output.synchronize()
     }
 }
 
@@ -62,10 +116,36 @@ final class AppViewModel: NSObject, ObservableObject {
         }
     }
 
+    private static let videoPlaceholderImage: UIImage = {
+        let size = CGSize(width: 640, height: 360)
+        let renderer = UIGraphicsImageRenderer(size: size)
+        return renderer.image { context in
+            let bounds = CGRect(origin: .zero, size: size)
+            UIColor(red: 0.10, green: 0.12, blue: 0.18, alpha: 1).setFill()
+            context.fill(bounds)
+
+            let accentRect = CGRect(x: 0, y: size.height * 0.66, width: size.width, height: size.height * 0.34)
+            UIColor(red: 0.17, green: 0.20, blue: 0.28, alpha: 1).setFill()
+            context.fill(accentRect)
+
+            let configuration = UIImage.SymbolConfiguration(pointSize: 120, weight: .medium)
+            let image = UIImage(systemName: "video.fill", withConfiguration: configuration)?
+                .withTintColor(.white.withAlphaComponent(0.9), renderingMode: .alwaysOriginal)
+            let iconSize = CGSize(width: 140, height: 140)
+            let iconRect = CGRect(
+                x: (size.width - iconSize.width) / 2,
+                y: (size.height - iconSize.height) / 2 - 10,
+                width: iconSize.width,
+                height: iconSize.height
+            )
+            image?.draw(in: iconRect)
+        }
+    }()
+
     struct MediaItem: Identifiable, Equatable {
         enum Kind: Equatable {
             case photo
-            case video(url: URL, duration: Double)
+            case video(url: URL?, duration: Double, libraryIdentifier: String?)
         }
 
         let id: UUID
@@ -1170,21 +1250,6 @@ final class AppViewModel: NSObject, ObservableObject {
             ? "Preparing a faster preview render."
             : "Preparing narration, captions, and media for export."
 
-        let exportMediaItems = mediaItems.map { item in
-            let exportKind: VideoExporter.MediaItem.Kind
-
-            switch item.kind {
-            case .photo:
-                exportKind = .photo
-            case let .video(url, duration):
-                exportKind = .video(url: url, duration: CMTime(seconds: duration, preferredTimescale: 600))
-            }
-
-            return VideoExporter.MediaItem(
-                previewImage: item.previewImage,
-                kind: exportKind
-            )
-        }
         let narrationText = normalizedNarrationSourceText
         let backgroundMusicURL = importedMusicURL
         let backgroundMusicVolume = musicVolume
@@ -1235,6 +1300,12 @@ final class AppViewModel: NSObject, ObservableObject {
                         ? "Building a short preview render."
                         : "Rendering your video. This can take a moment."
                 }
+
+                exportProgress = max(exportProgress, 0.24)
+                statusMessage = renderQuality == .preview
+                    ? "Preparing video files for preview."
+                    : "Preparing video files for export."
+                let exportMediaItems = try await resolveExportMediaItems()
 
                 let previewAudioURL = (timingMode == .video || narrationText.isEmpty) ? nil : narrationPreviewAudioURL
                 let previewCues = (timingMode == .video || narrationText.isEmpty) ? [] : narrationPreviewCues
@@ -1363,15 +1434,8 @@ final class AppViewModel: NSObject, ObservableObject {
             return
         }
 
-        var loadedMedia: [MediaItem] = []
-        var loadedPickerMap: [UUID: PhotosPickerItem] = [:]
-        for item in pickerItems {
-            let sourceAssetID = UUID()
-            if let mediaItem = await makeMediaItem(from: item, sourceAssetID: sourceAssetID) {
-                loadedMedia.append(mediaItem)
-                loadedPickerMap[sourceAssetID] = item
-            }
-        }
+        statusMessage = "Importing \(pickerItems.count) item(s)…"
+        let (loadedMedia, loadedPickerMap) = await loadMediaItemsInParallel(from: pickerItems)
 
         pickerItemsBySourceAssetID = loadedPickerMap
         mediaItems = loadedMedia
@@ -1379,12 +1443,46 @@ final class AppViewModel: NSObject, ObservableObject {
         cleanupStaleMediaVideoCopies(from: previousMediaItems, keeping: loadedMedia)
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
-        statusMessage = loadedMedia.isEmpty
-            ? "No valid photos or videos were selected."
-            : "\(loadedMedia.count) media item(s) ready for your project."
+        if loadedMedia.isEmpty {
+            statusMessage = "No valid photos or videos were selected."
+        } else if hasIncompletePickerVideoImports {
+            statusMessage = "Media added. Large videos are still copying into FluxCut…"
+        } else {
+            statusMessage = "\(loadedMedia.count) media item(s) ready for your project."
+        }
     }
 
-    func appendSelectedMedia(from pickerItems: [PhotosPickerItem], combinedSelection: [PhotosPickerItem]) async {
+    /// Builds media entries concurrently (each task suspends on I/O so imports overlap instead of running strictly one-by-one).
+    private func loadMediaItemsInParallel(from pickerItems: [PhotosPickerItem]) async -> ([MediaItem], [UUID: PhotosPickerItem]) {
+        let orderedRows = await withTaskGroup(of: (Int, MediaItem?, UUID).self) { group in
+            for index in pickerItems.indices {
+                group.addTask { @MainActor in
+                    let item = pickerItems[index]
+                    let sourceAssetID = UUID()
+                    let media = await self.makeMediaItem(from: item, sourceAssetID: sourceAssetID)
+                    return (index, media, sourceAssetID)
+                }
+            }
+
+            var rows: [(Int, MediaItem?, UUID)] = []
+            for await row in group {
+                rows.append(row)
+            }
+            rows.sort { $0.0 < $1.0 }
+            return rows
+        }
+
+        var media: [MediaItem] = []
+        var map: [UUID: PhotosPickerItem] = [:]
+        for (index, optionalMedia, sourceAssetID) in orderedRows {
+            guard let mediaItem = optionalMedia else { continue }
+            media.append(mediaItem)
+            map[sourceAssetID] = pickerItems[index]
+        }
+        return (media, map)
+    }
+
+    func appendSelectedMedia(from pickerItems: [PhotosPickerItem], combinedSelection: [PhotosPickerItem]? = nil) async {
         guard !pickerItems.isEmpty else { return }
 
         isLoadingMediaSelection = true
@@ -1393,41 +1491,60 @@ final class AppViewModel: NSObject, ObservableObject {
         }
 
         let previousMediaItems = mediaItems
-        var appendedMedia: [MediaItem] = []
-
-        for item in pickerItems {
-            let sourceAssetID = UUID()
-            if let mediaItem = await makeMediaItem(from: item, sourceAssetID: sourceAssetID) {
-                appendedMedia.append(mediaItem)
-                pickerItemsBySourceAssetID[sourceAssetID] = item
-            }
-        }
+        statusMessage = "Importing \(pickerItems.count) added item(s)…"
+        let (appendedMedia, newPickerEntries) = await loadMediaItemsInParallel(from: pickerItems)
 
         guard !appendedMedia.isEmpty else {
             statusMessage = "No valid photos or videos were selected."
             return
         }
 
-        mediaItems.append(contentsOf: appendedMedia)
-        synchronizePickerSelectionToCombinedSelection(combinedSelection)
-        refreshSelectedPhotoItemsFromMediaItems()
+        for (id, item) in newPickerEntries {
+            pickerItemsBySourceAssetID[id] = item
+        }
+
+        mediaItems = previousMediaItems + appendedMedia
+
+        if let combinedSelection {
+            suppressSelectedPhotoItemsReload = true
+            selectedPhotoItems = combinedSelection
+        } else {
+            refreshSelectedPhotoItemsFromMediaItems()
+        }
+
         cleanupStaleMediaVideoCopies(from: previousMediaItems, keeping: mediaItems)
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
-        statusMessage = "\(appendedMedia.count) media item(s) added to the end of your project."
+        statusMessage = hasIncompletePickerVideoImports
+            ? "Added media. Large videos are still copying into FluxCut…"
+            : "\(appendedMedia.count) media item(s) added to the end of your project."
     }
 
     private func makeMediaItem(from item: PhotosPickerItem, sourceAssetID: UUID) async -> MediaItem? {
         if item.supportedContentTypes.contains(where: { $0.conforms(to: .movie) || $0.conforms(to: .video) }) {
-            if let videoURL = await importedVideoURL(from: item),
-               let previewImage = await makeVideoThumbnail(for: videoURL) {
-                let duration = await videoDuration(for: videoURL)
-                return MediaItem(
-                    previewImage: previewImage,
-                    kind: .video(url: videoURL, duration: duration),
+            if let libraryIdentifier = item.itemIdentifier,
+               let videoAsset = await fetchVideoAsset(withLocalIdentifier: libraryIdentifier) {
+                let media = MediaItem(
+                    previewImage: Self.videoPlaceholderImage,
+                    kind: .video(url: nil, duration: videoAsset.duration, libraryIdentifier: libraryIdentifier),
                     sourceAssetID: sourceAssetID
                 )
+                // Defer + no network for thumbs: keeps bulk import from competing with thumbnail generation.
+                Task(priority: .utility) {
+                    try? await Task.sleep(for: .milliseconds(400))
+                    await self.prefetchVideoThumbnailFromLibrary(sourceAssetID: sourceAssetID, asset: videoAsset)
+                }
+                return media
             }
+
+            // File-backed import can take a long time (multi‑GB). Show the clip immediately; finish copy in the background.
+            let placeholder = MediaItem(
+                previewImage: Self.videoPlaceholderImage,
+                kind: .video(url: nil, duration: 0, libraryIdentifier: nil),
+                sourceAssetID: sourceAssetID
+            )
+            Task { await self.completePickerVideoFileImport(pickerItem: item, sourceAssetID: sourceAssetID) }
+            return placeholder
         } else if let data = try? await item.loadTransferable(type: Data.self),
                   let image = downsampledImage(from: data, maxDimension: 1280) {
             return MediaItem(
@@ -1440,25 +1557,124 @@ final class AppViewModel: NSObject, ObservableObject {
         return nil
     }
 
+    private func fetchVideoAsset(withLocalIdentifier localIdentifier: String) async -> PHAsset? {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.global(qos: .userInitiated).async {
+                let assets = PHAsset.fetchAssets(withLocalIdentifiers: [localIdentifier], options: nil)
+                continuation.resume(returning: assets.firstObject)
+            }
+        }
+    }
+
+    private func makePhotoLibraryVideoThumbnail(for asset: PHAsset, allowNetwork: Bool = false) async -> UIImage? {
+        await withCheckedContinuation { continuation in
+            let options = PHImageRequestOptions()
+            options.deliveryMode = .fastFormat
+            options.resizeMode = .fast
+            options.isSynchronous = false
+            options.isNetworkAccessAllowed = allowNetwork
+
+            PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: CGSize(width: 320, height: 320),
+                contentMode: .aspectFit,
+                options: options
+            ) { image, _ in
+                continuation.resume(returning: image?.normalizedOrientationImage())
+            }
+        }
+    }
+
+    private func resolveExportMediaItems() async throws -> [VideoExporter.MediaItem] {
+        var resolvedItems: [VideoExporter.MediaItem] = []
+        var updatedMediaItems = mediaItems
+
+        for index in mediaItems.indices {
+            let item = mediaItems[index]
+            let exportKind: VideoExporter.MediaItem.Kind
+
+            switch item.kind {
+            case .photo:
+                exportKind = .photo
+            case let .video(existingURL, duration, libraryIdentifier):
+                let resolvedURL = try await resolveVideoURLForRender(
+                    existingURL: existingURL,
+                    libraryIdentifier: libraryIdentifier,
+                    sourceAssetID: item.sourceAssetID
+                )
+                if existingURL == nil {
+                    updatedMediaItems[index] = MediaItem(
+                        id: item.id,
+                        previewImage: item.previewImage,
+                        kind: .video(url: resolvedURL, duration: duration, libraryIdentifier: libraryIdentifier),
+                        sourceAssetID: item.sourceAssetID
+                    )
+                }
+                exportKind = .video(url: resolvedURL, duration: CMTime(seconds: duration, preferredTimescale: 600))
+            }
+
+            resolvedItems.append(
+                VideoExporter.MediaItem(
+                    previewImage: item.previewImage,
+                    kind: exportKind
+                )
+            )
+        }
+
+        mediaItems = updatedMediaItems
+        return resolvedItems
+    }
+
+    private func resolveVideoURLForRender(
+        existingURL: URL?,
+        libraryIdentifier: String?,
+        sourceAssetID: UUID
+    ) async throws -> URL {
+        if let existingURL {
+            return existingURL
+        }
+
+        if let libraryIdentifier,
+           let assetURL = await photoLibraryVideoURL(forLocalIdentifier: libraryIdentifier) {
+            return assetURL
+        }
+
+        if let pickerItem = pickerItemsBySourceAssetID[sourceAssetID],
+           let importedURL = await importedVideoURL(from: pickerItem) {
+            return importedURL
+        }
+
+        throw NSError(
+            domain: "FluxCutMediaImport",
+            code: 11,
+            userInfo: [NSLocalizedDescriptionKey: "FluxCut could not access one of the selected videos for rendering."]
+        )
+    }
+
+    private func photoLibraryVideoURL(forLocalIdentifier localIdentifier: String) async -> URL? {
+        guard let asset = await fetchVideoAsset(withLocalIdentifier: localIdentifier) else { return nil }
+
+        return await withCheckedContinuation { continuation in
+            let options = PHVideoRequestOptions()
+            options.deliveryMode = .automatic
+            options.version = .current
+            options.isNetworkAccessAllowed = true
+
+            PHImageManager.default().requestAVAsset(forVideo: asset, options: options) { avAsset, _, _ in
+                if let urlAsset = avAsset as? AVURLAsset {
+                    continuation.resume(returning: urlAsset.url)
+                } else {
+                    continuation.resume(returning: nil)
+                }
+            }
+        }
+    }
+
     private func cleanupStaleMediaVideoCopies(from previousItems: [MediaItem], keeping currentItems: [MediaItem]) {
         let activeURLs = Set(currentItems.compactMap({ self.mediaVideoURLIfManagedCopy(for: $0) }))
 
         for url in previousItems.compactMap({ self.mediaVideoURLIfManagedCopy(for: $0) }) where !activeURLs.contains(url) {
             try? FileManager.default.removeItem(at: url)
-        }
-    }
-
-    private func synchronizePickerSelectionToCombinedSelection(_ combinedSelection: [PhotosPickerItem]) {
-        guard !combinedSelection.isEmpty else { return }
-
-        let knownSourceCount = mediaItems.map(\.sourceAssetID).reduce(into: Set<UUID>()) { partial, sourceAssetID in
-            partial.insert(sourceAssetID)
-        }.count
-        guard combinedSelection.count >= knownSourceCount else { return }
-
-        let orderedSourceIDs = orderedUniqueSourceAssetIDs()
-        for (pickerItem, sourceAssetID) in zip(combinedSelection, orderedSourceIDs) {
-            pickerItemsBySourceAssetID[sourceAssetID] = pickerItem
         }
     }
 
@@ -1521,20 +1737,12 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     private func mediaVideoURLIfManagedCopy(for item: MediaItem) -> URL? {
-        guard case let .video(url, _) = item.kind else {
+        guard case let .video(url, _, _) = item.kind,
+              let url else {
             return nil
         }
 
-        guard url.lastPathComponent.hasPrefix("picked-video-") else {
-            return nil
-        }
-
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        guard url.deletingLastPathComponent() == documents else {
-            return nil
-        }
-
-        return url
+        return Self.mediaVideoIfManagedCopyURL(for: url)
     }
 
     private func currentProtectedStorageURLs() -> Set<URL> {
@@ -1790,9 +1998,11 @@ final class AppViewModel: NSObject, ObservableObject {
         }
 
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        guard url.deletingLastPathComponent() == documents else {
-            return nil
-        }
+        let temporary = FileManager.default.temporaryDirectory
+        let parent = url.deletingLastPathComponent()
+        let grandparent = parent.deletingLastPathComponent()
+        guard parent.standardizedFileURL == documents.standardizedFileURL
+                || grandparent.standardizedFileURL == temporary.standardizedFileURL else { return nil }
 
         return url
     }
@@ -1830,40 +2040,95 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     nonisolated private static func mediaVideoIfManagedCopyURL(for item: MediaItem) -> URL? {
-        guard case let .video(url, _) = item.kind else {
+        guard case let .video(url, _, _) = item.kind,
+              let url else {
             return nil
         }
         return Self.mediaVideoIfManagedCopyURL(for: url)
     }
 
     private func importedVideoURL(from item: PhotosPickerItem) async -> URL? {
-        if let pickedMovie = try? await item.loadTransferable(type: PickedMovie.self),
-           let copiedURL = try? copyImportedFileToDocuments(pickedMovie.url) {
-            cleanupTemporaryImportSourceIfNeeded(pickedMovie.url)
-            return copiedURL
+        // Prefer a direct file URL when the picker provides one — avoids `PickedMovie`’s full export when possible.
+        if let pickedURL = try? await item.loadTransferable(type: URL.self) {
+            let accessed = pickedURL.startAccessingSecurityScopedResource()
+            defer {
+                if accessed {
+                    pickedURL.stopAccessingSecurityScopedResource()
+                }
+            }
+            if let copiedURL = try? copyImportedVideoFileToManagedTemporaryLocation(pickedURL) {
+                cleanupTemporaryImportSourceIfNeeded(pickedURL)
+                return copiedURL
+            }
         }
 
-        if let pickedURL = try? await item.loadTransferable(type: URL.self),
-           let copiedURL = try? copyImportedFileToDocuments(pickedURL) {
-            cleanupTemporaryImportSourceIfNeeded(pickedURL)
-            return copiedURL
+        if let pickedMovie = try? await item.loadTransferable(type: PickedMovie.self) {
+            return pickedMovie.url
         }
 
-        guard let videoData = try? await item.loadTransferable(type: Data.self) else {
-            return nil
+        // Do not use `Data` for video: long 4K clips can be many GB and loading them spikes RAM until iOS jetsams the app.
+        return nil
+    }
+
+    /// Fills in file URL + duration for a placeholder row created when PhotoKit lookup misses but the picker still has a movie.
+    private func completePickerVideoFileImport(pickerItem: PhotosPickerItem, sourceAssetID: UUID) async {
+        guard let url = await importedVideoURL(from: pickerItem) else {
+            removePendingPickerVideoPlaceholder(sourceAssetID: sourceAssetID)
+            statusMessage = "Could not import a selected video."
+            return
         }
 
-        let videoType = item.supportedContentTypes.first(where: { $0.conforms(to: .movie) || $0.conforms(to: .video) })
-        let preferredExtension = videoType?.preferredFilenameExtension ?? "mov"
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
-        let destination = documents.appendingPathComponent("picked-video-\(UUID().uuidString).\(preferredExtension)")
-
-        do {
-            try videoData.write(to: destination, options: .atomic)
-            return destination
-        } catch {
-            return nil
+        let duration = await videoDuration(for: url)
+        guard let index = mediaItems.firstIndex(where: { $0.sourceAssetID == sourceAssetID }) else { return }
+        let row = mediaItems[index]
+        guard case let .video(existingURL, _, libraryIdentifier) = row.kind,
+              existingURL == nil,
+              libraryIdentifier == nil else {
+            return
         }
+
+        mediaItems[index] = MediaItem(
+            id: row.id,
+            previewImage: row.previewImage,
+            kind: .video(url: url, duration: duration, libraryIdentifier: nil),
+            sourceAssetID: sourceAssetID
+        )
+
+        hasPendingPreviewChanges = true
+        hasPendingFinalVideoChanges = true
+
+        let count = mediaItems.count
+        statusMessage = count == 1 ? "1 media item ready for your project." : "\(count) media item(s) ready for your project."
+    }
+
+    private func removePendingPickerVideoPlaceholder(sourceAssetID: UUID) {
+        guard let index = mediaItems.firstIndex(where: { $0.sourceAssetID == sourceAssetID }) else { return }
+        guard case let .video(url, duration, lib) = mediaItems[index].kind,
+              url == nil,
+              lib == nil,
+              duration == 0 else {
+            return
+        }
+
+        let previous = mediaItems
+        mediaItems.remove(at: index)
+        pickerItemsBySourceAssetID.removeValue(forKey: sourceAssetID)
+        currentSlideIndex = min(currentSlideIndex, max(0, mediaItems.count - 1))
+        cleanupStaleMediaVideoCopies(from: previous, keeping: mediaItems)
+        refreshSelectedPhotoItemsFromMediaItems()
+    }
+
+    private func prefetchVideoThumbnailFromLibrary(sourceAssetID: UUID, asset: PHAsset) async {
+        guard let thumb = await makePhotoLibraryVideoThumbnail(for: asset) else { return }
+        guard let index = mediaItems.firstIndex(where: { $0.sourceAssetID == sourceAssetID }) else { return }
+        let row = mediaItems[index]
+        guard case let .video(url, duration, libraryIdentifier) = row.kind else { return }
+        mediaItems[index] = MediaItem(
+            id: row.id,
+            previewImage: thumb,
+            kind: .video(url: url, duration: duration, libraryIdentifier: libraryIdentifier),
+            sourceAssetID: sourceAssetID
+        )
     }
 
     private func cleanupTemporaryImportSourceIfNeeded(_ url: URL) {
@@ -1973,7 +2238,7 @@ final class AppViewModel: NSObject, ObservableObject {
                 let asset = AVURLAsset(url: url)
                 let generator = AVAssetImageGenerator(asset: asset)
                 generator.appliesPreferredTrackTransform = true
-                generator.maximumSize = CGSize(width: 1280, height: 1280)
+                generator.maximumSize = CGSize(width: 640, height: 640)
                 let time = CMTime(seconds: 0.1, preferredTimescale: 600)
                 if let cgImage = try? generator.copyCGImage(at: time, actualTime: nil) {
                     continuation.resume(returning: UIImage(cgImage: cgImage))
@@ -2012,13 +2277,21 @@ final class AppViewModel: NSObject, ObservableObject {
         let safeName = baseName.isEmpty ? "imported-audio" : baseName
         let destination = documents.appendingPathComponent("\(safeName)-\(UUID().uuidString).\(fileExtension)")
 
-        do {
-            try FileManager.default.copyItem(at: sourceURL, to: destination)
-        } catch {
-            let data = try Data(contentsOf: sourceURL)
-            try data.write(to: destination, options: .atomic)
-        }
+        try AppViewModelCopyUtilities.copyFileResolvingLargeSources(from: sourceURL, to: destination)
         return destination
+    }
+
+    private func copyImportedVideoFileToManagedTemporaryLocation(_ sourceURL: URL) throws -> URL {
+        let fileExtension = sourceURL.pathExtension.isEmpty ? "mov" : sourceURL.pathExtension
+        let destination = managedTemporaryVideoURL(fileExtension: fileExtension)
+        try AppViewModelCopyUtilities.copyFileResolvingLargeSources(from: sourceURL, to: destination)
+        return destination
+    }
+
+    private func managedTemporaryVideoURL(fileExtension: String) -> URL {
+        FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+            .appendingPathComponent("picked-video-\(UUID().uuidString).\(fileExtension)")
     }
 
     private func importMusicAssets(
@@ -2585,8 +2858,9 @@ final class AppViewModel: NSObject, ObservableObject {
             switch item.kind {
             case .photo:
                 kind = .photo
-            case let .video(url, duration):
-                kind = .video(url: url, duration: CMTime(seconds: duration, preferredTimescale: 600))
+            case let .video(url, duration, _):
+                let resolvedURL = url ?? FileManager.default.temporaryDirectory.appendingPathComponent("estimated-video-placeholder.mov")
+                kind = .video(url: resolvedURL, duration: CMTime(seconds: duration, preferredTimescale: 600))
             }
             return VideoExporter.MediaItem(previewImage: item.previewImage, kind: kind)
         }
@@ -2608,8 +2882,29 @@ final class AppViewModel: NSObject, ObservableObject {
         )
     }
 
+    /// Placeholder row for a file-backed video still being copied from the picker (`url` and library id are both nil, duration not yet known).
+    private var hasIncompletePickerVideoImports: Bool {
+        mediaItems.contains {
+            if case let .video(url, duration, lib) = $0.kind {
+                return url == nil && lib == nil && duration == 0
+            }
+            return false
+        }
+    }
+
     var mediaSelectionMetaLine: String {
         guard !mediaItems.isEmpty else { return "No media selected yet." }
+
+        if hasIncompletePickerVideoImports {
+            let finishing = mediaItems.filter {
+                if case let .video(url, duration, lib) = $0.kind {
+                    return url == nil && lib == nil && duration == 0
+                }
+                return false
+            }.count
+            let suffix = finishing == 1 ? "1 video" : "\(finishing) videos"
+            return "Copying \(suffix) into FluxCut…"
+        }
 
         let photoCount = mediaItems.reduce(0) { partial, item in
             switch item.kind {
@@ -2624,7 +2919,7 @@ final class AppViewModel: NSObject, ObservableObject {
             switch item.kind {
             case .photo:
                 return partial
-            case let .video(_, duration):
+            case let .video(_, duration, _):
                 return partial + duration
             }
         }
@@ -2655,6 +2950,7 @@ final class AppViewModel: NSObject, ObservableObject {
 
     var canStartVideoPreviewRender: Bool {
         !isLoadingMediaSelection
+            && !hasIncompletePickerVideoImports
             && hasRenderableMediaForSelectedMode
             && !isExportingVideo
             && !isPreparingVideoPreview
@@ -2665,6 +2961,7 @@ final class AppViewModel: NSObject, ObservableObject {
 
     var canStartFinalVideoRender: Bool {
         !isLoadingMediaSelection
+            && !hasIncompletePickerVideoImports
             && hasRenderableMediaForSelectedMode
             && !isExportingVideo
             && !isPreparingVideoPreview
@@ -2725,7 +3022,7 @@ final class AppViewModel: NSObject, ObservableObject {
             switch item.kind {
             case .photo:
                 return partial
-            case let .video(_, duration):
+            case let .video(_, duration, _):
                 return partial + max(duration, 0)
             }
         }
@@ -2752,7 +3049,7 @@ final class AppViewModel: NSObject, ObservableObject {
             switch item.kind {
             case .photo:
                 return partial
-            case let .video(_, duration):
+            case let .video(_, duration, _):
                 return partial + max(duration, 0)
             }
         }
@@ -2795,7 +3092,7 @@ final class AppViewModel: NSObject, ObservableObject {
             switch item.kind {
             case .photo:
                 return partial
-            case let .video(_, duration):
+            case let .video(_, duration, _):
                 return partial + max(duration, 0)
             }
         }
