@@ -478,14 +478,14 @@ Details:
 
 - branch: `story_enhance`
 - remote: `origin` (`github.com:haobinzheng/video_studio_mini.git`)
-- range on remote: `a9735a6..c6d609e`
-- branch tip after push: `c6d609e`
-- later log-only commits on the same branch may follow; use `git log origin/story_enhance` for the exact tip
+- includes the caption-feature push and doc-only follow-ups through `fd98c80` (see numbered commits below)
+- current branch tip may move later; use `git log origin/story_enhance -1 --oneline` for the latest commit on the remote branch
 
 Commits for this checkpoint:
 
 1. `e952d16` — `Caption look: Normal vs Stylish, two-pass CJK-friendly white fill`
 2. `c6d609e` — `docs: record e952d16 in GIT_PUSH_LOG for caption look push`
+3. `fd98c80` — `docs: expand GIT_PUSH_LOG for 2026-04-12 caption look checkpoint`
 
 **`e952d16` — caption look (feature)**
 
@@ -496,4 +496,8 @@ Commits for this checkpoint:
 
 **`c6d609e`**
 
-- **`GIT_PUSH_LOG.md`:** record primary hash `e952d16` for this push (this entry consolidates the full checkpoint).
+- **`GIT_PUSH_LOG.md`:** record primary hash `e952d16` for the caption look push.
+
+**`fd98c80`**
+
+- **`GIT_PUSH_LOG.md`:** expand the **2026-04-12** entry with numbered commits, remote range, and branch tip.
