@@ -501,3 +501,30 @@ Commits for this checkpoint:
 **`fd98c80`**
 
 - **`GIT_PUSH_LOG.md`:** expand the **2026-04-12** entry with numbered commits, remote range, and branch tip.
+
+### 2026-04-12 (Script cleanup punctuation and ellipsis)
+
+Pushed to the remote feature branch.
+
+Details:
+
+- branch: `story_enhance`
+- remote: `origin` (`github.com:haobinzheng/video_studio_mini.git`)
+- includes the script-cleanup fix and doc updates through the current checkpoint
+
+Commits for this checkpoint:
+
+1. `a298018` — `Fix script cleanup punctuation and ellipsis`
+2. `TBD_LOG_HASH` — `Update git push log`
+
+**`a298018` — script cleanup**
+
+- Script `Clean Up` now treats dot-only lines such as `......`, `……`, and spaced dot runs as removable junk lines.
+- Mid-sentence runs like `...`, `....`, `.....`, `…`, `……`, and mixed dot-like runs are normalized consistently so TTS does not read each period.
+- Dot-run normalization now uses dot-equivalent weight instead of raw character count.
+- Existing paragraph-ending punctuation is preserved without doubling, including cases with trailing spaces.
+- Final-line missing punctuation detection is preserved, and repeated blank lines are removed for cleaner narration/caption timing.
+
+**`TBD_LOG_HASH`**
+
+- `GIT_PUSH_LOG.md`: record the script-cleanup checkpoint and its validated behavior.
