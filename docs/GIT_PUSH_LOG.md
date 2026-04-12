@@ -478,6 +478,7 @@ Details:
 
 - branch: `story_enhance`
 - remote: `origin` (`github.com:haobinzheng/video_studio_mini.git`)
+- primary commit: `e952d16` — `Caption look: Normal vs Stylish, two-pass CJK-friendly white fill`
 - use `git log origin/story_enhance` for the current tip (this section may be followed by log-only commits)
 
 **Caption look**
