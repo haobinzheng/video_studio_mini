@@ -478,12 +478,22 @@ Details:
 
 - branch: `story_enhance`
 - remote: `origin` (`github.com:haobinzheng/video_studio_mini.git`)
-- primary commit: `e952d16` — `Caption look: Normal vs Stylish, two-pass CJK-friendly white fill`
-- use `git log origin/story_enhance` for the current tip (this section may be followed by log-only commits)
+- range on remote: `a9735a6..c6d609e`
+- branch tip after push: `c6d609e`
+- later log-only commits on the same branch may follow; use `git log origin/story_enhance` for the exact tip
 
-**Caption look**
+Commits for this checkpoint:
 
-- **`VideoExporter.CaptionStyle`** (`Normal` / `Stylish`) and **`AppViewModel.captionStyle`**; **Video** tab segmented control + Script **Current Caption** preview styling.
-- **Normal:** semibold white on soft rounded pill (existing YouTube-like look).
-- **Stylish:** ~**1.5×** base size, **SF Rounded bold**, extra line spacing, **tight dim plate** (~40% black) for light backgrounds; **two-pass** outline then **pure white** fill (plus `CATextLayer` pair for burn-in) so CJK does not read grey.
-- Design record: **`docs/DESIGN_NOTES.md`** section **Caption look (Normal vs Stylish)**.
+1. `e952d16` — `Caption look: Normal vs Stylish, two-pass CJK-friendly white fill`
+2. `c6d609e` — `docs: record e952d16 in GIT_PUSH_LOG for caption look push`
+
+**`e952d16` — caption look (feature)**
+
+- **`VideoExporter.CaptionStyle`** (`Normal` / `Stylish`) and **`AppViewModel.captionStyle`**; **Video** tab **Caption look** segmented control + Script **Current Caption** preview styling.
+- **Normal:** semibold white on soft rounded pill (YouTube-like).
+- **Stylish:** ~**1.5×** base size, **SF Rounded bold**, extra line spacing, **tight dim plate** (~40% black) for light backgrounds; **two-pass** outline then **pure white** fill (`drawCaption` + paired **`CATextLayer`** for burn-in) so CJK stays crisp white.
+- **`docs/DESIGN_NOTES.md`:** new section **Caption look (Normal vs Stylish)**.
+
+**`c6d609e`**
+
+- **`GIT_PUSH_LOG.md`:** record primary hash `e952d16` for this push (this entry consolidates the full checkpoint).
