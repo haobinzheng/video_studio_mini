@@ -515,7 +515,7 @@ Details:
 Commits for this checkpoint:
 
 1. `a298018` — `Fix script cleanup punctuation and ellipsis`
-2. `TBD_LOG_HASH` — `Update git push log`
+2. `c9892b1` — `Update git push log`
 
 **`a298018` — script cleanup**
 
@@ -525,6 +525,6 @@ Commits for this checkpoint:
 - Existing paragraph-ending punctuation is preserved without doubling, including cases with trailing spaces.
 - Final-line missing punctuation detection is preserved, and repeated blank lines are removed for cleaner narration/caption timing.
 
-**`TBD_LOG_HASH`**
+**`c9892b1`**
 
 - `GIT_PUSH_LOG.md`: record the script-cleanup checkpoint and its validated behavior.
