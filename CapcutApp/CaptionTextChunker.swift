@@ -20,6 +20,37 @@ enum CaptionTextChunker {
 
     private static let clauseDelimiters: Set<Character> = ["；", ";", "：", ":"]
 
+    /// Comma / enumeration / semicolon: break long “one period” sentences into shorter narration + caption lines (Chinese / Japanese style).
+    private static let lightPauseDelimiters: Set<Character> = ["，", "、", "；", ";", ","]
+
+    /// Below this length, keep one segment even if it contains ， (avoids chopping short phrases).
+    private static let minScriptLengthToSplitOnLightPauses = 24
+
+    /// Merge short leading / middle fragments into the next chunk (e.g. avoid a lone "然而" before a longer clause).
+    private static let minClauseGraphemesBeforeStandalone = 8
+
+    /// Avoid a single TTS call spanning an extremely long string when sentence punctuation is missing.
+    private static let maxSentenceAlignedUtteranceCharacters = 140
+
+    /// Strip from caption **display** only (TTS still uses full punctuation). Applied per line for wrapped captions.
+    private static let trailingDisplayPunctuationCharacters: Set<Character> = Set(
+        ",.;:!?\"'|<>[](){}，。；：！？、「」『』（）【】《》〈〉…·～"
+    )
+
+    /// Removes trailing punctuation from the end of each line (for on-screen subtitles only).
+    static func strippedCaptionForDisplay(_ text: String) -> String {
+        text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map { line -> String in
+                var s = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
+                while let last = s.last, trailingDisplayPunctuationCharacters.contains(last) {
+                    s.removeLast()
+                }
+                return s.trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+            .joined(separator: "\n")
+    }
+
     /// Maps `AVSpeechSynthesisVoice.language` (BCP-47) to an `NLLanguage` for tokenization.
     static func nlLanguage(forVoiceLanguageTag tag: String) -> NLLanguage? {
         let id = tag.lowercased().replacingOccurrences(of: "_", with: "-")
@@ -124,6 +155,130 @@ enum CaptionTextChunker {
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
         return phrases.isEmpty ? [text] : phrases
+    }
+
+    /// TTS segment list for **sentence-aligned** narration (Chinese, Japanese, Lao family): one utterance per sentence when possible.
+    static func sentenceSegmentsForNarration(_ rawText: String) -> [String] {
+        let normalized = SpeechVoiceLibrary.normalizedCaptionText(rawText)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty else { return [] }
+
+        var initial: [String] = []
+        let lines = normalized.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+
+        for line in lines {
+            let majorUnits = splitOnTrailingDelimiters(line, delimiters: majorSentenceEndings)
+            for unit in majorUnits {
+                initial.append(contentsOf: splitMajorUnitIntoClausesForNarration(unit))
+            }
+        }
+        if initial.isEmpty {
+            initial = [normalized]
+        }
+
+        // Join tiny fragments across line / unit boundaries (e.g. "然而，\n如果将…" → one utterance).
+        let bridged = mergeTinyClauseFragments(initial, minGraphemes: minClauseGraphemesBeforeStandalone)
+        let refined = refineSentenceSegmentsForTTSLimits(bridged)
+        return refined.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+    }
+
+    /// After a `。！？` unit, split further at `，` / `、` / `；` so long sentences become several shorter lines (one TTS each).
+    private static func splitMajorUnitIntoClausesForNarration(_ major: String) -> [String] {
+        let trimmed = major.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+
+        let hasLightPause = trimmed.contains(where: lightPauseDelimiters.contains)
+        let longEnough = trimmed.count >= minScriptLengthToSplitOnLightPauses
+        if !hasLightPause || !longEnough {
+            return [trimmed]
+        }
+
+        let clauses = splitOnTrailingDelimiters(trimmed, delimiters: lightPauseDelimiters)
+        guard clauses.count > 1 else { return [trimmed] }
+
+        let pieces = clauses.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }
+        return mergeTinyClauseFragments(pieces, minGraphemes: minClauseGraphemesBeforeStandalone)
+    }
+
+    /// Prefers merging **forward** so a short opener (e.g. "然而，") is not left alone as the first trunk.
+    private static func mergeTinyClauseFragments(_ parts: [String], minGraphemes: Int) -> [String] {
+        guard !parts.isEmpty else { return [] }
+        var out: [String] = []
+        var buffer = ""
+
+        func flushBuffer() {
+            let t = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !t.isEmpty else {
+                buffer = ""
+                return
+            }
+            out.append(t)
+            buffer = ""
+        }
+
+        for part in parts {
+            let t = part.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !t.isEmpty else { continue }
+
+            if buffer.isEmpty {
+                buffer = t
+            } else if buffer.last.map({ majorSentenceEndings.contains($0) }) == true {
+                flushBuffer()
+                buffer = t
+            } else {
+                buffer.append(t)
+            }
+
+            if buffer.count >= minGraphemes {
+                flushBuffer()
+            }
+        }
+
+        if !buffer.isEmpty {
+            let trimmedBuffer = buffer.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmedBuffer.count < minGraphemes, let lastIdx = out.indices.last {
+                let prev = out[lastIdx]
+                if prev.last.map({ majorSentenceEndings.contains($0) }) == true {
+                    out.append(trimmedBuffer)
+                } else {
+                    out[lastIdx] = prev + trimmedBuffer
+                }
+            } else {
+                out.append(trimmedBuffer)
+            }
+        }
+
+        return out
+    }
+
+    private static func refineSentenceSegmentsForTTSLimits(_ pieces: [String]) -> [String] {
+        var result: [String] = []
+        for piece in pieces {
+            let trimmed = piece.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else { continue }
+
+            if trimmed.count <= maxSentenceAlignedUtteranceCharacters {
+                result.append(trimmed)
+                continue
+            }
+
+            let clauses = splitOnTrailingDelimiters(trimmed, delimiters: clauseDelimiters)
+            if clauses.count > 1 {
+                result.append(contentsOf: refineSentenceSegmentsForTTSLimits(clauses))
+                continue
+            }
+
+            let commas = splitOnCommaPhrases(trimmed)
+            if commas.count > 1 {
+                result.append(contentsOf: refineSentenceSegmentsForTTSLimits(commas))
+                continue
+            }
+
+            result.append(contentsOf: SpeechVoiceLibrary.narrationSegments(from: trimmed, optimizeForLongForm: false))
+        }
+        return result
     }
 
     private static func splitPhrase(_ phrase: String, voiceLanguageTag: String) -> [String] {

@@ -3519,6 +3519,14 @@ enum SpeechVoiceLibrary {
         voice(for: identifier)?.language ?? ""
     }
 
+    /// One TTS utterance (and one caption) per sentence for Chinese, Japanese, and Lao family voices only.
+    static func usesSentenceAlignedNarration(voiceLanguageTag: String) -> Bool {
+        let id = voiceLanguageTag.lowercased().replacingOccurrences(of: "_", with: "-")
+        guard !id.isEmpty else { return false }
+        return id.hasPrefix("zh") || id.hasPrefix("yue") || id.hasPrefix("wuu")
+            || id.hasPrefix("ja") || id.hasPrefix("lo")
+    }
+
     static func makeUtterances(
         from text: String,
         voiceIdentifier: String,

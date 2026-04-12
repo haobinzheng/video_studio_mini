@@ -37,7 +37,16 @@ struct NarrationPreviewBuilder {
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws -> PreviewResult {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let allSegments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
+        let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
+        let allSegments: [String]
+        if SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag) {
+            let sentences = CaptionTextChunker.sentenceSegmentsForNarration(normalized)
+            allSegments = sentences.isEmpty
+                ? SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
+                : sentences
+        } else {
+            allSegments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
+        }
         let segments = cappedPreviewSegments(from: allSegments, maximumDuration: maximumDuration)
         guard !segments.isEmpty else {
             throw PreviewError.emptyNarration
@@ -192,6 +201,15 @@ struct NarrationPreviewBuilder {
         totalDuration: TimeInterval,
         voiceIdentifier: String
     ) -> [SubtitleCue] {
+        let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
+        if SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag) {
+            return buildSentenceAlignedCues(
+                segments: segments,
+                utteranceDurations: utteranceDurations,
+                totalDuration: totalDuration
+            )
+        }
+
         var cues: [SubtitleCue] = []
         var cursor: TimeInterval = 0
 
@@ -209,6 +227,43 @@ struct NarrationPreviewBuilder {
                 cues.append(SubtitleCue(text: SpeechVoiceLibrary.normalizedCaptionText(chunk.text), start: start, end: end))
                 cursor = end
             }
+        }
+
+        if let lastIndex = cues.indices.last {
+            cues[lastIndex] = SubtitleCue(
+                id: cues[lastIndex].id,
+                text: cues[lastIndex].text,
+                start: cues[lastIndex].start,
+                end: max(cues[lastIndex].end, totalDuration)
+            )
+        }
+
+        return cues
+    }
+
+    /// One subtitle line per TTS utterance (full sentence); timing follows measured audio per sentence.
+    private func buildSentenceAlignedCues(
+        segments: [String],
+        utteranceDurations: [TimeInterval],
+        totalDuration: TimeInterval
+    ) -> [SubtitleCue] {
+        var cues: [SubtitleCue] = []
+        var cursor: TimeInterval = 0
+
+        for (index, segment) in segments.enumerated() {
+            let utteranceDuration = index < utteranceDurations.count ? utteranceDurations[index] : estimatedSeconds(for: segment)
+            let text = SpeechVoiceLibrary.normalizedCaptionText(segment)
+            if text.isEmpty {
+                cursor = min(cursor + utteranceDuration, totalDuration)
+                continue
+            }
+
+            let safeDuration = max(utteranceDuration, minimumCueDuration(for: text))
+            let start = cursor
+            let end = min(cursor + safeDuration, totalDuration)
+            let shown = CaptionTextChunker.strippedCaptionForDisplay(displayCaption(for: text))
+            cues.append(SubtitleCue(text: shown, start: start, end: end))
+            cursor = end
         }
 
         if let lastIndex = cues.indices.last {

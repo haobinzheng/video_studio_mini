@@ -666,7 +666,16 @@ struct VideoExporter {
             )
         }
 
-        let narrationSegments = SpeechVoiceLibrary.narrationSegments(from: trimmedText, optimizeForLongForm: true)
+        let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
+        let narrationSegments: [String]
+        if SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag) {
+            let sentences = CaptionTextChunker.sentenceSegmentsForNarration(trimmedText)
+            narrationSegments = sentences.isEmpty
+                ? SpeechVoiceLibrary.narrationSegments(from: trimmedText, optimizeForLongForm: true)
+                : sentences
+        } else {
+            narrationSegments = SpeechVoiceLibrary.narrationSegments(from: trimmedText, optimizeForLongForm: true)
+        }
         let utterances = narrationSegments.map {
             SpeechVoiceLibrary.makeUtterance(from: $0, voiceIdentifier: voiceIdentifier)
         }
@@ -2357,6 +2366,15 @@ struct VideoExporter {
     ) -> [CaptionSegment] {
         guard !texts.isEmpty else { return [] }
 
+        let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
+        if SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag) {
+            return sentenceAlignedTimedCaptionSegments(
+                from: texts,
+                utteranceDurations: utteranceDurations,
+                totalDuration: totalDuration
+            )
+        }
+
         let slices = makeCaptionSlices(from: texts, voiceIdentifier: voiceIdentifier)
         guard !slices.isEmpty else { return [] }
 
@@ -2394,6 +2412,61 @@ struct VideoExporter {
 
         if segments.isEmpty {
             return [CaptionSegment(text: formattedCaptionText(texts.joined(separator: " ")), timeRange: CMTimeRange(start: .zero, duration: totalDuration))]
+        }
+
+        if let lastIndex = segments.indices.last {
+            let last = segments[lastIndex]
+            segments[lastIndex] = CaptionSegment(
+                text: last.text,
+                timeRange: CMTimeRange(start: last.timeRange.start, end: totalDuration)
+            )
+        }
+
+        return segments
+    }
+
+    /// One caption per utterance; duration matches each sentence’s synthesized audio (Chinese / Japanese / Lao family only).
+    private func sentenceAlignedTimedCaptionSegments(
+        from texts: [String],
+        utteranceDurations: [CMTime],
+        totalDuration: CMTime
+    ) -> [CaptionSegment] {
+        var segments: [CaptionSegment] = []
+        var cursor = CMTime.zero
+
+        for (index, rawText) in texts.enumerated() {
+            let spoken = index < utteranceDurations.count ? utteranceDurations[index] : CMTime.zero
+            let norm = SpeechVoiceLibrary.normalizedCaptionText(rawText)
+
+            let remaining = totalDuration - cursor
+            if remaining <= .zero { break }
+
+            if norm.isEmpty {
+                let step = CMTimeMinimum(spoken, remaining)
+                cursor = cursor + step
+                continue
+            }
+
+            let minDur = CMTime(seconds: minimumCaptionSeconds(for: norm), preferredTimescale: 600)
+            var pieceDur = CMTimeMaximum(spoken, minDur)
+            if pieceDur > remaining {
+                pieceDur = remaining
+            }
+
+            let end = cursor + pieceDur
+            let timeRange = CMTimeRange(start: cursor, end: end)
+            let displayText = CaptionTextChunker.strippedCaptionForDisplay(formattedCaptionText(norm))
+            segments.append(CaptionSegment(text: displayText, timeRange: timeRange))
+            cursor = end
+        }
+
+        if segments.isEmpty {
+            return [
+                CaptionSegment(
+                    text: CaptionTextChunker.strippedCaptionForDisplay(formattedCaptionText(texts.joined(separator: " "))),
+                    timeRange: CMTimeRange(start: .zero, duration: totalDuration)
+                )
+            ]
         }
 
         if let lastIndex = segments.indices.last {
