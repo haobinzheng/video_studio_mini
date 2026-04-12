@@ -600,3 +600,15 @@ Product framing:
 - duplicate is a timeline tool, not a file-copy tool
 - delete is destructive and should be guarded
 - media management should stay fast, predictable, and sequence-aware
+
+## Default branch and near-final merge
+
+- FluxCut’s integration line is **`main`**. GitHub **`origin/HEAD`** points to **`origin/main`**; this repository does **not** use a **`master`** branch name on the remote.
+- **2026-04-12:** branch **`story_enhance`** was merged into **`main`** and pushed (`Merge branch 'story_enhance' into main (near-final narration/caption work)`). Treat **`main`** as the shipping line for this near-final product phase.
+- For a durable record of “where Git points,” after pulling: **`git rev-parse HEAD`** with **`main`** checked out should match the current tip of **`origin/main`** (see **`docs/GIT_PUSH_LOG.md`** for the merge commit hash recorded at merge time).
+
+## Narration preview vs final export
+
+- **Script → narration preview** builds seekable audio and cues inside **`NarrationPreviewBuilder`**. To keep long scripts responsive, preview may **merge** many small utterances into fewer **`AVSpeechSynthesizer.write`** passes (cap **36** segments after the existing preview duration cap; merged chunk length capped at **4000** characters) and applies a **90 second** timeout per segment so the UI never waits indefinitely on a stuck synthesizer.
+- **Final video export** uses **`VideoExporter`** and the full narration segmentation pipeline: it does **not** apply the preview-only merge batching or the preview synthesis timeout. Caption chunking still shares **`CaptionTextChunker`** / voice tags with preview where designed, but **timing and utterance boundaries** for export follow export rules, not the preview guardrails.
+- **Product intent:** preview is for quick iteration and sync checks; export remains the authoritative render for length, segmentation, and burned captions.

@@ -531,16 +531,18 @@ Commits for this checkpoint:
 
 ### 2026-04-12 (caption display strip + narration preview synthesis guard)
 
-Merged to `main` from `story_enhance` (near-final product checkpoint).
+Merged to **`main`** from **`story_enhance`** and **pushed** to `origin` (near-final product checkpoint).
 
 Details:
 
-- branch: `story_enhance` → `main`
-- feature commit message: `Fix caption trailing soft punctuation; bound narration preview TTS` (inspect exact hashes with `git log main --oneline` after merge)
 - remote: `origin` (`github.com:haobinzheng/video_studio_mini.git`)
+- default branch on remote: **`main`** (`origin/HEAD` → `origin/main`; there is no `master` branch in this repo)
+- merge commit on `main`: **`c277617`** — `Merge branch 'story_enhance' into main (near-final narration/caption work)` — **2026-04-12 15:49:02 -0700**
+- feature-branch tip that was merged (last feature commit before merge): **`cedda2a`** — `Fix caption trailing soft punctuation; bound narration preview TTS` — **2026-04-12 15:48:52 -0700**
+- after a successful push, **`git rev-parse main`** and **`git rev-parse origin/main`** should both match **`c277617`** (until the next commit on `main`)
 
 **Caption + preview (this checkpoint)**
 
 - **`CaptionTextChunker.strippedCaptionForDisplay`:** strip only **soft** single-scalar tails (`, . ; : …` and CJK `，。；：、．` etc.); keep closing `)` `]` `}` `"` `?` `/` and similar; scalar-based matching for reliability (invisible/spaced-dot edge cases covered in earlier script-cleanup work).
 - **`NarrationPreviewBuilder`:** **preview-only** cap on sequential `AVSpeechSynthesizer.write` passes by **merging** adjacent segments when over **36**; **90s** timeout per segment so a stuck synthesizer cannot hang the UI; **final video export** unchanged (no merge/timeout in `VideoExporter`).
-- **`docs/DESIGN_NOTES.md`:** caption trim behavior + preview limits documented.
+- **`docs/DESIGN_NOTES.md`:** caption trim behavior + preview limits + default-branch / preview-vs-export notes documented alongside this push log update.
