@@ -1,25 +1,26 @@
 import AVFoundation
 import UIKit
+import QuartzCore
 
 struct VideoExporter {
     enum TimingMode: String, CaseIterable, Identifiable {
         case video = "Video"
         case story = "Story"
-        case realLife = "Real-Life"
+        case realLife = "Slideshow"
 
         var id: String { rawValue }
     }
 
     enum AspectRatio: String, CaseIterable, Identifiable {
-        case vertical = "9:16"
+        case widescreen = "16:9"
         case classic = "4:3"
 
         var id: String { rawValue }
 
         var renderSize: CGSize {
             switch self {
-            case .vertical:
-                return CGSize(width: 720, height: 1280)
+            case .widescreen:
+                return CGSize(width: 1280, height: 720)
             case .classic:
                 return CGSize(width: 960, height: 720)
             }
@@ -62,16 +63,16 @@ struct VideoExporter {
 
         func renderSize(for aspectRatio: AspectRatio) -> CGSize {
             switch (self, aspectRatio) {
-            case (.preview, .vertical):
-                return CGSize(width: 540, height: 960)
+            case (.preview, .widescreen):
+                return CGSize(width: 960, height: 540)
             case (.preview, .classic):
                 return CGSize(width: 720, height: 540)
-            case (.finalStandard, .vertical):
-                return CGSize(width: 720, height: 1280)
+            case (.finalStandard, .widescreen):
+                return CGSize(width: 1280, height: 720)
             case (.finalStandard, .classic):
                 return CGSize(width: 960, height: 720)
-            case (.finalHigh, .vertical):
-                return CGSize(width: 900, height: 1600)
+            case (.finalHigh, .widescreen):
+                return CGSize(width: 1600, height: 900)
             case (.finalHigh, .classic):
                 return CGSize(width: 1200, height: 900)
             }
@@ -94,6 +95,83 @@ struct VideoExporter {
         }
     }
 
+    enum VideoModeFrameRate: String, CaseIterable, Identifiable {
+        case fps24 = "24"
+        case fps30 = "30"
+        case fps60 = "60"
+
+        var id: String { rawValue }
+
+        var value: Int32 {
+            switch self {
+            case .fps24:
+                return 24
+            case .fps30:
+                return 30
+            case .fps60:
+                return 60
+            }
+        }
+
+        var displayName: String {
+            "\(rawValue) fps"
+        }
+    }
+
+    enum VideoModeResolution: String, CaseIterable, Identifiable {
+        case p720 = "720p"
+        case p1080 = "1080p"
+        case p4k = "4K"
+
+        var id: String { rawValue }
+
+        var renderSize: CGSize {
+            switch self {
+            case .p720:
+                return CGSize(width: 1280, height: 720)
+            case .p1080:
+                return CGSize(width: 1920, height: 1080)
+            case .p4k:
+                return CGSize(width: 3840, height: 2160)
+            }
+        }
+    }
+
+    /// On-screen caption look for story / slideshow exports (final video and caption-burn pass).
+    enum CaptionStyle: String, CaseIterable, Identifiable, Hashable {
+        /// Semibold white on soft dark pill — close to typical YouTube-style readability.
+        case normal = "Normal"
+        /// ~50% larger rounded bold type; tight dim plate + strong outline/shadow for light backgrounds.
+        case stylish = "Stylish"
+
+        var id: String { rawValue }
+    }
+
+    enum VideoModeQuality: String, CaseIterable, Identifiable {
+        case low = "Low"
+        case medium = "Medium"
+        case high = "High"
+
+        var id: String { rawValue }
+
+        var exportPresetName: String {
+            switch self {
+            case .low:
+                return AVAssetExportPresetLowQuality
+            case .medium:
+                return AVAssetExportPresetMediumQuality
+            case .high:
+                return AVAssetExportPresetHighestQuality
+            }
+        }
+    }
+
+    struct VideoModeExportSettings {
+        let frameRate: VideoModeFrameRate
+        let resolution: VideoModeResolution
+        let quality: VideoModeQuality
+    }
+
     struct MediaItem {
         enum Kind {
             case photo
@@ -104,8 +182,9 @@ struct VideoExporter {
         let kind: Kind
     }
 
-    private let captionLagCompensation = CMTime(seconds: 0.30, preferredTimescale: 600)
-    private let narrationDurationBias: Double = 1.90
+    private var captionLagCompensation: CMTime {
+        CMTime(seconds: SubtitleTimelineEngine.displayLeadSeconds, preferredTimescale: 600)
+    }
 
     private struct CaptionSegment {
         let text: String
@@ -149,6 +228,12 @@ struct VideoExporter {
         let timeRange: CMTimeRange
         let preferredTransform: CGAffineTransform
         let naturalSize: CGSize
+    }
+
+    private struct EffectiveSlideshowExportSettings {
+        let frameRate: Int32
+        let renderSize: CGSize
+        let presetName: String
     }
 
     private final class VideoFrameCache {
@@ -227,14 +312,23 @@ struct VideoExporter {
         durationSeconds: Double,
         aspectRatio: AspectRatio,
         finalQuality: FinalExportQuality,
-        timingMode: TimingMode
+        timingMode: TimingMode,
+        includeCaptions: Bool = true,
+        videoModeSettings: VideoModeExportSettings? = nil
     ) -> String {
         if timingMode == .video {
+            if let videoModeSettings {
+                return "\(videoModeSettings.resolution.rawValue) • \(videoModeSettings.frameRate.displayName) • \(videoModeSettings.quality.rawValue) • \(approximateDurationLabel(for: durationSeconds))"
+            }
             return "Original video stitch \(approximateDurationLabel(for: durationSeconds))"
         }
 
         let safeDuration = CMTime(seconds: max(durationSeconds, 1), preferredTimescale: 600)
-        let timelineSegments = estimatedTimelineSegments(for: mediaItems, totalDuration: safeDuration)
+        let timelineSegments = estimatedTimelineSegments(
+            for: mediaItems,
+            totalDuration: safeDuration,
+            timingMode: timingMode
+        )
         let pressure = videoPressure(for: timelineSegments)
         let profile = resolvedRenderProfile(
             for: finalQuality.renderQuality,
@@ -242,7 +336,8 @@ struct VideoExporter {
             duration: safeDuration,
             videoPressure: pressure,
             timingMode: timingMode,
-            mediaItems: mediaItems
+            mediaItems: mediaItems,
+            includeCaptions: includeCaptions
         )
         let width = Int(profile.renderSize.width.rounded())
         let height = Int(profile.renderSize.height.rounded())
@@ -261,8 +356,10 @@ struct VideoExporter {
         timingMode: TimingMode,
         includeCaptions: Bool = true,
         renderQuality: RenderQuality = .finalStandard,
+        videoModeSettings: VideoModeExportSettings? = nil,
         externalCues: [ExternalCue] = [],
         externalNarrationAudioURL: URL? = nil,
+        captionStyle: CaptionStyle = .normal,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws -> URL {
         guard !mediaItems.isEmpty else {
@@ -282,12 +379,28 @@ struct VideoExporter {
                 backgroundMusicVolume: backgroundMusicVolume,
                 videoAudioVolume: videoAudioVolume,
                 maximumDuration: renderQuality.maximumDuration,
+                videoModeSettings: renderQuality == .preview ? nil : videoModeSettings,
                 outputURL: finalURL,
                 progressHandler: progressHandler
             )
             progressHandler?(1.0, "Finalizing exported video.")
             return finalURL
         }
+
+        let hasVideos = mediaItems.contains {
+            if case .video = $0.kind { return true }
+            return false
+        }
+        let hasPhotos = mediaItems.contains {
+            if case .photo = $0.kind { return true }
+            return false
+        }
+        let hasMixedStoryMedia = timingMode == .story && hasVideos && hasPhotos
+        /// Story timeline has only video clips (no photos) — always use composition/export instead of per-frame slideshow rendering.
+        let storyVideoOnlyMedia = timingMode == .story && hasVideos && !hasPhotos
+        /// Story + captions needs a caption-burn pass; mixed and video-only use an intermediate file. Photo-only story still uses one-pass slideshow rendering.
+        let storyUsesCaptionIntermediateFile =
+            timingMode == .story && includeCaptions && hasVideos && (hasMixedStoryMedia || !hasPhotos)
 
         let minimumVisualDuration = minimumVisualDuration(for: mediaItems)
         let shouldUseNarration = timingMode != .video
@@ -310,14 +423,22 @@ struct VideoExporter {
         case .video:
             totalDuration = minimumVisualDuration
         case .realLife:
-            totalDuration = realLifeVisualDuration(for: mediaItems)
+            totalDuration = realLifeDuration(
+                for: mediaItems,
+                narrationDuration: narrationTimeline.duration
+            )
         case .story:
             totalDuration = narrationTimeline.duration > .zero
                 ? narrationTimeline.duration
                 : minimumVisualDuration
         }
         let resolvedDuration = renderQuality.maximumDuration.map { min(totalDuration, $0) } ?? totalDuration
-        let baseTimelineSegments = try await makeTimelineSegments(for: mediaItems, totalDuration: totalDuration)
+        let baseTimelineSegments = try await makeTimelineSegments(
+            for: mediaItems,
+            totalDuration: totalDuration,
+            timingMode: timingMode,
+            includeCaptions: includeCaptions
+        )
         let timelineSegments = resolvedDuration < totalDuration
             ? timelineSegmentsTrimmed(to: resolvedDuration, segments: baseTimelineSegments)
             : baseTimelineSegments
@@ -328,9 +449,11 @@ struct VideoExporter {
             duration: resolvedDuration,
             videoPressure: videoPressure,
             timingMode: timingMode,
-            mediaItems: mediaItems
+            mediaItems: mediaItems,
+            includeCaptions: includeCaptions,
+            videoModeSettings: videoModeSettings
         )
-        let trimmedCaptionSegments = timingMode == .realLife || !includeCaptions
+        let trimmedCaptionSegments = !includeCaptions
             ? []
             : captionSegmentsTrimmed(to: resolvedDuration, segments: narrationTimeline.captionSegments)
         let trimmedNarrationURLs = try await narrationURLsTrimmed(
@@ -338,8 +461,35 @@ struct VideoExporter {
             maxDuration: resolvedDuration
         )
 
-        if timingMode == .realLife {
+        let shouldUseSmoothStoryExport =
+            timingMode == .story &&
+            (storyVideoOnlyMedia
+                || (renderQuality != .preview && (!includeCaptions || hasMixedStoryMedia)))
+
+        if timingMode == .realLife || shouldUseSmoothStoryExport {
             progressHandler?(0.24, "Building a real-life composition.")
+            let effectiveSlideshowSettings = effectiveSlideshowExportSettings(
+                requestedSettings: renderQuality == .preview ? nil : videoModeSettings,
+                mediaItems: mediaItems,
+                narrationDuration: narrationTimeline.duration,
+                fallbackRenderSize: renderProfile.renderSize,
+                fallbackFrameRate: renderProfile.frameRate
+            )
+            let smoothOutputURL: URL
+            if includeCaptions && (timingMode == .realLife || storyUsesCaptionIntermediateFile) {
+                let captionBaseName: String
+                if timingMode == .realLife {
+                    captionBaseName = "slideshow-caption-base.mov"
+                } else if hasMixedStoryMedia {
+                    captionBaseName = "story-mixed-base.mov"
+                } else {
+                    captionBaseName = "story-video-caption-base.mov"
+                }
+                smoothOutputURL = workspace.appendingPathComponent(captionBaseName)
+            } else {
+                smoothOutputURL = finalURL
+            }
+
             try await exportRealLifeComposition(
                 timelineSegments: timelineSegments,
                 narrationURLs: trimmedNarrationURLs,
@@ -350,10 +500,27 @@ struct VideoExporter {
                 totalDuration: resolvedDuration,
                 renderSize: renderProfile.renderSize,
                 frameRate: renderProfile.frameRate,
+                exportPresetName: effectiveSlideshowSettings.presetName,
                 workspace: workspace,
-                outputURL: finalURL,
+                outputURL: smoothOutputURL,
                 progressHandler: progressHandler
             )
+
+            if includeCaptions && (timingMode == .realLife || storyUsesCaptionIntermediateFile) {
+                progressHandler?(0.9, timingMode == .realLife
+                    ? "Burning captions into the slideshow video."
+                    : "Burning captions into the smooth story video.")
+                try await burnCaptionsIntoVideo(
+                    videoURL: smoothOutputURL,
+                    captionSegments: trimmedCaptionSegments,
+                    renderSize: renderProfile.renderSize,
+                    frameRate: renderProfile.frameRate,
+                    captionStyle: captionStyle,
+                    outputURL: finalURL,
+                    progressHandler: progressHandler
+                )
+            }
+
             progressHandler?(1.0, "Finalizing exported video.")
             return finalURL
         }
@@ -367,6 +534,7 @@ struct VideoExporter {
             renderSize: renderProfile.renderSize,
             frameRate: renderProfile.frameRate,
             videoSampleStride: renderProfile.videoSampleStride,
+            captionStyle: captionStyle,
             progressHandler: progressHandler,
             outputURL: slideshowURL
         )
@@ -511,7 +679,16 @@ struct VideoExporter {
             )
         }
 
-        let narrationSegments = SpeechVoiceLibrary.narrationSegments(from: trimmedText, optimizeForLongForm: true)
+        let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
+        let narrationSegments: [String]
+        if SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag) {
+            let sentences = CaptionTextChunker.sentenceSegmentsForNarration(trimmedText)
+            narrationSegments = sentences.isEmpty
+                ? SpeechVoiceLibrary.narrationSegments(from: trimmedText, optimizeForLongForm: true)
+                : sentences
+        } else {
+            narrationSegments = SpeechVoiceLibrary.narrationSegments(from: trimmedText, optimizeForLongForm: true)
+        }
         let utterances = narrationSegments.map {
             SpeechVoiceLibrary.makeUtterance(from: $0, voiceIdentifier: voiceIdentifier)
         }
@@ -530,13 +707,13 @@ struct VideoExporter {
             seconds: estimatedNarrationSeconds(for: narrationSegments),
             preferredTimescale: 600
         )
-        let biasedAudioDuration = CMTimeMultiplyByFloat64(measuredNarrationDuration, multiplier: narrationDurationBias)
-        let totalDuration = max(biasedAudioDuration, estimatedNarrationDuration, CMTime(seconds: 1, preferredTimescale: 600))
+        let totalDuration = max(measuredNarrationDuration, estimatedNarrationDuration, CMTime(seconds: 1, preferredTimescale: 600))
         let captionSegments = externalCues.isEmpty
             ? timedCaptionSegments(
                 from: narrationSegments,
                 utteranceDurations: utteranceDurations,
-                totalDuration: totalDuration
+                totalDuration: totalDuration,
+                voiceIdentifier: voiceIdentifier
             )
             : captionSegments(from: externalCues)
         let resolvedDuration = externalCues.isEmpty
@@ -597,6 +774,7 @@ struct VideoExporter {
         renderSize: CGSize,
         frameRate: Int32,
         videoSampleStride: Int32,
+        captionStyle: CaptionStyle = .normal,
         progressHandler: ((Double, String) -> Void)?,
         outputURL: URL
     ) async throws {
@@ -652,7 +830,7 @@ struct VideoExporter {
                 videoFrameCache: videoFrameCache
             )
             try autoreleasepool {
-                let pixelBuffer = try makePixelBuffer(from: image, caption: caption, renderSize: renderSize)
+                let pixelBuffer = try makePixelBuffer(from: image, caption: caption, renderSize: renderSize, captionStyle: captionStyle)
                 if !adaptor.append(pixelBuffer, withPresentationTime: presentationTime) {
                     throw writer.error ?? ExportError.videoWriterSetupFailed
                 }
@@ -711,7 +889,10 @@ struct VideoExporter {
         var audioMixParameters: [AVMutableAudioMixInputParameters] = []
 
         let resolvedVideoVolume = Float(min(max(videoAudioVolume, 0), 1))
-        if resolvedVideoVolume > 0 {
+        let compositionVideoAudioTrack = resolvedVideoVolume > 0
+            ? composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+            : nil
+        if resolvedVideoVolume > 0, let compositionVideoAudioTrack {
             for segment in timelineSegments {
                 guard case let .video(url, _) = segment.mediaItem.kind else { continue }
 
@@ -719,26 +900,21 @@ struct VideoExporter {
                 guard let clipAudioTrack = try await clipAsset.loadTracks(withMediaType: .audio).first else {
                     continue
                 }
-                guard let compositionClipAudioTrack = composition.addMutableTrack(
-                    withMediaType: .audio,
-                    preferredTrackID: kCMPersistentTrackID_Invalid
-                ) else {
-                    continue
-                }
 
                 let clipDuration = try await clipAsset.load(.duration)
                 let segmentDuration = min(segment.timeRange.duration, clipDuration)
                 guard segmentDuration > .zero else { continue }
 
-                try compositionClipAudioTrack.insertTimeRange(
+                try compositionVideoAudioTrack.insertTimeRange(
                     CMTimeRange(start: .zero, duration: segmentDuration),
                     of: clipAudioTrack,
                     at: segment.timeRange.start
                 )
-                let clipAudioParameters = AVMutableAudioMixInputParameters(track: compositionClipAudioTrack)
-                clipAudioParameters.setVolume(resolvedVideoVolume, at: .zero)
-                audioMixParameters.append(clipAudioParameters)
             }
+
+            let clipAudioParameters = AVMutableAudioMixInputParameters(track: compositionVideoAudioTrack)
+            clipAudioParameters.setVolume(resolvedVideoVolume, at: .zero)
+            audioMixParameters.append(clipAudioParameters)
         }
 
         if !narrationURLs.isEmpty,
@@ -819,6 +995,7 @@ struct VideoExporter {
         backgroundMusicVolume: Double,
         videoAudioVolume: Double,
         maximumDuration: CMTime?,
+        videoModeSettings: VideoModeExportSettings?,
         outputURL: URL,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws {
@@ -845,14 +1022,12 @@ struct VideoExporter {
 
         var audioMixParameters: [AVMutableAudioMixInputParameters] = []
         let resolvedVideoVolume = Float(min(max(videoAudioVolume, 0), 1))
-        let mayAttemptStrictPassthrough = backgroundMusicURL == nil && resolvedVideoVolume >= 0.999
+        let mayAttemptStrictPassthrough = false
         var segmentLayouts: [StitchedVideoSegmentLayout] = []
         let passthroughAudioTrack = mayAttemptStrictPassthrough
             ? composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
             : nil
         var cursor = CMTime.zero
-        var referenceTransform: CGAffineTransform?
-        var referenceNaturalSize: CGSize?
         let cappedDuration = maximumDuration
 
         for (index, item) in videoItems.enumerated() {
@@ -891,11 +1066,6 @@ struct VideoExporter {
                 )
             )
 
-            if referenceTransform == nil {
-                referenceTransform = preferredTransform
-                referenceNaturalSize = naturalSize
-            }
-
             if let sourceAudioTrack = try await asset.loadTracks(withMediaType: .audio).first {
                 if mayAttemptStrictPassthrough, let passthroughAudioTrack {
                     try passthroughAudioTrack.insertTimeRange(
@@ -927,13 +1097,13 @@ struct VideoExporter {
             throw ExportError.noVideos
         }
 
-        let canAttemptStrictPassthrough =
-            backgroundMusicURL == nil &&
-            resolvedVideoVolume >= 0.999 &&
-            segmentLayouts.allSatisfy {
-                guard let referenceTransform, let referenceNaturalSize else { return false }
-                return $0.preferredTransform == referenceTransform && $0.naturalSize == referenceNaturalSize
-            }
+        let videoModeRenderSize = preferredVideoModeRenderSize(
+            for: segmentLayouts,
+            requestedResolution: videoModeSettings?.resolution.renderSize
+        )
+        let canAttemptStrictPassthrough = false
+        let frameRate = videoModeSettings?.frameRate.value ?? 30
+        let presetName = videoModeSettings?.quality.exportPresetName ?? AVAssetExportPresetHighestQuality
 
         if let backgroundMusicURL {
             progressHandler?(0.72, "Mixing background music into the stitched video.")
@@ -974,7 +1144,7 @@ struct VideoExporter {
         do {
             try await exportStitchedComposition(
                 composition,
-                presetName: canAttemptStrictPassthrough ? AVAssetExportPresetPassthrough : AVAssetExportPresetHighestQuality,
+                presetName: canAttemptStrictPassthrough ? AVAssetExportPresetPassthrough : presetName,
                 outputURL: outputURL,
                 audioMixParameters: canAttemptStrictPassthrough ? [] : audioMixParameters,
                 videoComposition: canAttemptStrictPassthrough
@@ -982,7 +1152,10 @@ struct VideoExporter {
                     : makeVideoComposition(
                         for: compositionVideoTrack,
                         segmentLayouts: segmentLayouts,
-                        totalDuration: totalDuration
+                        totalDuration: totalDuration,
+                        targetRenderSize: videoModeRenderSize,
+                        frameRate: frameRate,
+                        preserveSourceScale: true
                     ),
                 progressMessage: canAttemptStrictPassthrough
                     ? "Exporting a passthrough video stitch."
@@ -997,13 +1170,16 @@ struct VideoExporter {
             progressHandler?(0.9, "Passthrough was not supported for these clips. Retrying with a high-quality stitch.")
             try await exportStitchedComposition(
                 composition,
-                presetName: AVAssetExportPresetHighestQuality,
+                presetName: presetName,
                 outputURL: outputURL,
-                audioMixParameters: [],
+                audioMixParameters: audioMixParameters,
                 videoComposition: makeVideoComposition(
                     for: compositionVideoTrack,
                     segmentLayouts: segmentLayouts,
-                    totalDuration: totalDuration
+                    totalDuration: totalDuration,
+                    targetRenderSize: videoModeRenderSize,
+                    frameRate: frameRate,
+                    preserveSourceScale: true
                 ),
                 progressMessage: "Exporting the stitched video.",
                 progressHandler: progressHandler
@@ -1021,6 +1197,7 @@ struct VideoExporter {
         totalDuration: CMTime,
         renderSize: CGSize,
         frameRate: Int32,
+        exportPresetName: String,
         workspace: URL,
         outputURL: URL,
         progressHandler: ((Double, String) -> Void)? = nil
@@ -1036,6 +1213,9 @@ struct VideoExporter {
         var audioMixParameters: [AVMutableAudioMixInputParameters] = []
         var segmentLayouts: [StitchedVideoSegmentLayout] = []
         let resolvedVideoVolume = Float(min(max(videoAudioVolume, 0), 1))
+        let compositionVideoAudioTrack = resolvedVideoVolume > 0
+            ? composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid)
+            : nil
 
         for (index, segment) in timelineSegments.enumerated() {
             let completion = Double(index) / Double(max(timelineSegments.count, 1))
@@ -1099,20 +1279,20 @@ struct VideoExporter {
 
                 if resolvedVideoVolume > 0,
                    let sourceAudioTrack = try await asset.loadTracks(withMediaType: .audio).first,
-                   let compositionAudioTrack = composition.addMutableTrack(
-                    withMediaType: .audio,
-                    preferredTrackID: kCMPersistentTrackID_Invalid
-                   ) {
-                    try compositionAudioTrack.insertTimeRange(
+                   let compositionVideoAudioTrack {
+                    try compositionVideoAudioTrack.insertTimeRange(
                         CMTimeRange(start: .zero, duration: clipDuration),
                         of: sourceAudioTrack,
                         at: segment.timeRange.start
                     )
-                    let clipAudioParameters = AVMutableAudioMixInputParameters(track: compositionAudioTrack)
-                    clipAudioParameters.setVolume(resolvedVideoVolume, at: segment.timeRange.start)
-                    audioMixParameters.append(clipAudioParameters)
                 }
             }
+        }
+
+        if let compositionVideoAudioTrack, resolvedVideoVolume > 0 {
+            let clipAudioParameters = AVMutableAudioMixInputParameters(track: compositionVideoAudioTrack)
+            clipAudioParameters.setVolume(resolvedVideoVolume, at: .zero)
+            audioMixParameters.append(clipAudioParameters)
         }
 
         if !narrationURLs.isEmpty,
@@ -1174,20 +1354,382 @@ struct VideoExporter {
             }
         }
 
+        let realLifeRenderSize = preferredVideoModeRenderSize(
+            for: segmentLayouts,
+            requestedResolution: renderSize
+        )
+
         try await exportStitchedComposition(
             composition,
-            presetName: AVAssetExportPresetHighestQuality,
+            presetName: exportPresetName,
             outputURL: outputURL,
             audioMixParameters: audioMixParameters,
             videoComposition: makeVideoComposition(
                 for: compositionVideoTrack,
                 segmentLayouts: segmentLayouts,
                 totalDuration: totalDuration,
-                targetRenderSize: renderSize
+                targetRenderSize: realLifeRenderSize,
+                frameRate: frameRate,
+                preserveSourceScale: true
             ),
             progressMessage: "Exporting the real-life video.",
             progressHandler: progressHandler
         )
+    }
+
+    private func burnCaptionsIntoVideo(
+        videoURL: URL,
+        captionSegments: [CaptionSegment],
+        renderSize: CGSize,
+        frameRate: Int32,
+        captionStyle: CaptionStyle,
+        outputURL: URL,
+        progressHandler: ((Double, String) -> Void)? = nil
+    ) async throws {
+        if FileManager.default.fileExists(atPath: outputURL.path) {
+            try FileManager.default.removeItem(at: outputURL)
+        }
+
+        let asset = AVURLAsset(url: videoURL)
+        let duration = try await asset.load(.duration)
+        guard let sourceVideoTrack = try await asset.loadTracks(withMediaType: .video).first else {
+            throw ExportError.missingVideoTrack
+        }
+
+        let composition = AVMutableComposition()
+        guard let compositionVideoTrack = composition.addMutableTrack(
+            withMediaType: .video,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+        ) else {
+            throw ExportError.missingVideoTrack
+        }
+
+        try compositionVideoTrack.insertTimeRange(
+            CMTimeRange(start: .zero, duration: duration),
+            of: sourceVideoTrack,
+            at: .zero
+        )
+
+        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+        for audioTrack in audioTracks {
+            guard let compositionAudioTrack = composition.addMutableTrack(
+                withMediaType: .audio,
+                preferredTrackID: kCMPersistentTrackID_Invalid
+            ) else {
+                continue
+            }
+
+            try compositionAudioTrack.insertTimeRange(
+                CMTimeRange(start: .zero, duration: duration),
+                of: audioTrack,
+                at: .zero
+            )
+        }
+
+        let instruction = AVMutableVideoCompositionInstruction()
+        instruction.timeRange = CMTimeRange(start: .zero, duration: duration)
+
+        let layerInstruction = AVMutableVideoCompositionLayerInstruction(assetTrack: compositionVideoTrack)
+        instruction.layerInstructions = [layerInstruction]
+
+        let videoComposition = AVMutableVideoComposition()
+        videoComposition.instructions = [instruction]
+        videoComposition.renderSize = CGSize(
+            width: max(round(renderSize.width / 2) * 2, 2),
+            height: max(round(renderSize.height / 2) * 2, 2)
+        )
+        videoComposition.frameDuration = CMTime(value: 1, timescale: frameRate)
+
+        let parentLayer = CALayer()
+        parentLayer.frame = CGRect(origin: .zero, size: videoComposition.renderSize)
+        parentLayer.masksToBounds = true
+
+        let videoLayer = CALayer()
+        videoLayer.frame = parentLayer.frame
+        parentLayer.addSublayer(videoLayer)
+
+        let captionsLayer = makeCaptionOverlayLayer(
+            for: captionSegments,
+            renderSize: videoComposition.renderSize,
+            captionStyle: captionStyle
+        )
+        parentLayer.addSublayer(captionsLayer)
+
+        videoComposition.animationTool = AVVideoCompositionCoreAnimationTool(
+            postProcessingAsVideoLayer: videoLayer,
+            in: parentLayer
+        )
+
+        try await exportStitchedComposition(
+            composition,
+            presetName: AVAssetExportPresetHighestQuality,
+            outputURL: outputURL,
+            audioMixParameters: [],
+            videoComposition: videoComposition,
+            progressMessage: "Exporting story captions.",
+            progressHandler: progressHandler
+        )
+    }
+
+    private func captionParagraphStyle() -> NSMutableParagraphStyle {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byWordWrapping
+        return paragraph
+    }
+
+    /// Rounded system design reads softer on screen; bold keeps short captions clear without feeling as loud as heavy.
+    private func readerFriendlyStylishFont(size: CGFloat) -> UIFont {
+        let base = UIFont.systemFont(ofSize: size, weight: .bold)
+        if let rounded = base.fontDescriptor.withDesign(.rounded) {
+            return UIFont(descriptor: rounded, size: size)
+        }
+        return base
+    }
+
+    /// Stroke-only pass (clear fill + positive `strokeWidth`) drawn under the fill pass so Chinese text stays pure white.
+    private func stylishOutlineAttributed(text: String, fontSize: CGFloat, paragraph: NSParagraphStyle) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [
+            .font: readerFriendlyStylishFont(size: fontSize),
+            .foregroundColor: UIColor.clear,
+            .strokeColor: UIColor.black.withAlphaComponent(0.9),
+            .strokeWidth: 2.85,
+            .paragraphStyle: paragraph
+        ])
+    }
+
+    private func stylishFillAttributed(text: String, fontSize: CGFloat, paragraph: NSParagraphStyle) -> NSAttributedString {
+        let shadow = NSShadow()
+        shadow.shadowColor = UIColor.black.withAlphaComponent(0.45)
+        shadow.shadowOffset = CGSize(width: 0, height: 2)
+        shadow.shadowBlurRadius = max(4, fontSize * 0.14)
+        return NSAttributedString(string: text, attributes: [
+            .font: readerFriendlyStylishFont(size: fontSize),
+            .foregroundColor: UIColor.white,
+            .paragraphStyle: paragraph,
+            .shadow: shadow
+        ])
+    }
+
+    private func normalCaptionAttributed(text: String, fontSize: CGFloat, paragraph: NSParagraphStyle) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [
+            .font: UIFont.systemFont(ofSize: fontSize, weight: .semibold),
+            .foregroundColor: UIColor.white,
+            .paragraphStyle: paragraph
+        ])
+    }
+
+    private struct CaptionLayoutResult {
+        let textWidth: CGFloat
+        let textHeight: CGFloat
+        let boxPadding: CGFloat
+        let cornerRadius: CGFloat
+        let backgroundAlpha: CGFloat
+        let borderWidth: CGFloat
+        let borderColor: CGColor?
+        let textLayerExtraHeight: CGFloat
+        /// Used when `stylishOutline` / `stylishFill` are nil (Normal).
+        let singleAttributed: NSAttributedString
+        let stylishOutline: NSAttributedString?
+        let stylishFill: NSAttributedString?
+    }
+
+    private func layoutCaptionForVideo(text: String, renderSize: CGSize, style: CaptionStyle) -> CaptionLayoutResult {
+        let widthScale = max(min(renderSize.width / 720, 1.0), 0.5)
+        let paragraph = captionParagraphStyle()
+        if style == .stylish {
+            paragraph.lineSpacing = max(4, 5 * widthScale)
+        }
+        let maxTextWidth = renderSize.width - max(72, 120 * widthScale)
+        let maxTextHeight: CGFloat = style == .stylish
+            ? max(200, 340 * widthScale)
+            : max(140, 240 * widthScale)
+        let minimumFontSize: CGFloat = style == .stylish
+            ? max(15, 21 * widthScale)
+            : max(14, 20 * widthScale)
+        let portrait = renderSize.width < renderSize.height
+        let baseStart: CGFloat = portrait ? max(18, 34 * widthScale) : max(16, 30 * widthScale)
+        var fontSize: CGFloat = style == .stylish ? baseStart * 1.5 : baseStart
+
+        var single = normalCaptionAttributed(text: text, fontSize: fontSize, paragraph: paragraph)
+        var outline: NSAttributedString?
+        var fill: NSAttributedString?
+        var measuredW: CGFloat = 0
+        var measuredH: CGFloat = 0
+
+        while fontSize >= minimumFontSize {
+            if style == .stylish {
+                let o = stylishOutlineAttributed(text: text, fontSize: fontSize, paragraph: paragraph)
+                let f = stylishFillAttributed(text: text, fontSize: fontSize, paragraph: paragraph)
+                let r1 = o.boundingRect(
+                    with: CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                ).integral
+                let r2 = f.boundingRect(
+                    with: CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                ).integral
+                measuredW = max(r1.width, r2.width)
+                measuredH = max(r1.height, r2.height)
+                if measuredH <= maxTextHeight {
+                    outline = o
+                    fill = f
+                    single = f
+                    break
+                }
+            } else {
+                single = normalCaptionAttributed(text: text, fontSize: fontSize, paragraph: paragraph)
+                let r = single.boundingRect(
+                    with: CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                ).integral
+                measuredW = r.width
+                measuredH = r.height
+                if measuredH <= maxTextHeight { break }
+            }
+            fontSize -= 2
+        }
+
+        if style == .stylish, outline == nil || fill == nil {
+            let o = stylishOutlineAttributed(text: text, fontSize: minimumFontSize, paragraph: paragraph)
+            let f = stylishFillAttributed(text: text, fontSize: minimumFontSize, paragraph: paragraph)
+            let r1 = o.boundingRect(
+                with: CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                context: nil
+            ).integral
+            let r2 = f.boundingRect(
+                with: CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                context: nil
+            ).integral
+            outline = o
+            fill = f
+            single = f
+            measuredW = max(r1.width, r2.width)
+            measuredH = max(r1.height, r2.height)
+        }
+
+        let boxPadding: CGFloat = style == .stylish
+            ? max(10, 14 * widthScale)
+            : max(10, 16 * widthScale)
+        let cornerRadius: CGFloat = style == .stylish ? max(12, 18 * widthScale) : 32
+        let backgroundAlpha: CGFloat = style == .stylish ? 0.40 : 0.42
+        let borderWidth: CGFloat = 0
+        let borderColor: CGColor? = nil
+        let textLayerExtraHeight: CGFloat = style == .stylish ? 22 : 4
+
+        return CaptionLayoutResult(
+            textWidth: measuredW,
+            textHeight: measuredH,
+            boxPadding: boxPadding,
+            cornerRadius: cornerRadius,
+            backgroundAlpha: backgroundAlpha,
+            borderWidth: borderWidth,
+            borderColor: borderColor,
+            textLayerExtraHeight: textLayerExtraHeight,
+            singleAttributed: single,
+            stylishOutline: style == .stylish ? outline : nil,
+            stylishFill: style == .stylish ? fill : nil
+        )
+    }
+
+    private func makeCaptionOverlayLayer(
+        for segments: [CaptionSegment],
+        renderSize: CGSize,
+        captionStyle: CaptionStyle
+    ) -> CALayer {
+        let rootLayer = CALayer()
+        rootLayer.frame = CGRect(origin: .zero, size: renderSize)
+
+        for segment in segments where segment.timeRange.duration > .zero {
+            let captionLayer = makeAnimatedCaptionLayer(
+                text: segment.text,
+                renderSize: renderSize,
+                captionStyle: captionStyle
+            )
+            let startSeconds = max(CMTimeGetSeconds(segment.timeRange.start), 0)
+            let durationSeconds = max(CMTimeGetSeconds(segment.timeRange.duration), 0.1)
+
+            let opacityAnimation = CAKeyframeAnimation(keyPath: "opacity")
+            opacityAnimation.values = [0.0, 1.0, 1.0, 0.0]
+            opacityAnimation.keyTimes = [0.0, 0.08, 0.92, 1.0]
+            opacityAnimation.beginTime = AVCoreAnimationBeginTimeAtZero + startSeconds
+            opacityAnimation.duration = durationSeconds
+            opacityAnimation.isRemovedOnCompletion = false
+            opacityAnimation.fillMode = .forwards
+            captionLayer.add(opacityAnimation, forKey: "captionOpacity")
+            rootLayer.addSublayer(captionLayer)
+        }
+
+        return rootLayer
+    }
+
+    private func makeAnimatedCaptionLayer(text: String, renderSize: CGSize, captionStyle: CaptionStyle) -> CALayer {
+        let layout = layoutCaptionForVideo(text: text, renderSize: renderSize, style: captionStyle)
+        let bottomInset = max(renderSize.height * 0.025, 24)
+        let boxRect = CGRect(
+            x: (renderSize.width - layout.textWidth) / 2 - layout.boxPadding,
+            y: bottomInset,
+            width: layout.textWidth + (layout.boxPadding * 2),
+            height: layout.textHeight + (layout.boxPadding * 2)
+        )
+
+        let containerLayer = CALayer()
+        containerLayer.frame = boxRect
+        containerLayer.opacity = 0
+
+        if layout.backgroundAlpha > 0 {
+            let backgroundLayer = CALayer()
+            backgroundLayer.frame = containerLayer.bounds
+            backgroundLayer.backgroundColor = UIColor.black.withAlphaComponent(layout.backgroundAlpha).cgColor
+            backgroundLayer.cornerRadius = layout.cornerRadius
+            backgroundLayer.masksToBounds = true
+            if layout.borderWidth > 0, let borderColor = layout.borderColor {
+                backgroundLayer.borderWidth = layout.borderWidth
+                backgroundLayer.borderColor = borderColor
+            }
+            containerLayer.addSublayer(backgroundLayer)
+        }
+
+        let textFrame = CGRect(
+            x: layout.boxPadding,
+            y: layout.boxPadding,
+            width: layout.textWidth,
+            height: layout.textHeight + layout.textLayerExtraHeight
+        )
+
+        if let outline = layout.stylishOutline, let fill = layout.stylishFill {
+            let outlineLayer = CATextLayer()
+            outlineLayer.frame = textFrame
+            outlineLayer.string = outline
+            outlineLayer.contentsScale = UIScreen.main.scale
+            outlineLayer.alignmentMode = .center
+            outlineLayer.isWrapped = true
+
+            let fillLayer = CATextLayer()
+            fillLayer.frame = textFrame
+            fillLayer.string = fill
+            fillLayer.contentsScale = UIScreen.main.scale
+            fillLayer.alignmentMode = .center
+            fillLayer.isWrapped = true
+
+            containerLayer.addSublayer(outlineLayer)
+            containerLayer.addSublayer(fillLayer)
+        } else {
+            let textLayer = CATextLayer()
+            textLayer.frame = textFrame
+            textLayer.string = layout.singleAttributed
+            textLayer.contentsScale = UIScreen.main.scale
+            textLayer.alignmentMode = .center
+            textLayer.isWrapped = true
+            containerLayer.addSublayer(textLayer)
+        }
+
+        return containerLayer
     }
 
     private func renderPhotoSegmentClip(
@@ -1266,7 +1808,9 @@ struct VideoExporter {
             for: compositionVideoTrack,
             segmentLayouts: segmentLayouts,
             totalDuration: totalDuration,
-            targetRenderSize: nil
+            targetRenderSize: nil,
+            frameRate: 30,
+            preserveSourceScale: false
         )
     }
 
@@ -1274,7 +1818,9 @@ struct VideoExporter {
         for compositionVideoTrack: AVMutableCompositionTrack,
         segmentLayouts: [StitchedVideoSegmentLayout],
         totalDuration: CMTime,
-        targetRenderSize: CGSize?
+        targetRenderSize: CGSize?,
+        frameRate: Int32,
+        preserveSourceScale: Bool
     ) -> AVMutableVideoComposition {
         let renderSize = segmentLayouts.reduce(CGSize.zero) { currentMax, layout in
             let transformedBounds = CGRect(origin: .zero, size: layout.naturalSize)
@@ -1297,7 +1843,8 @@ struct VideoExporter {
             let fittedTransform = fittedTransform(
                 preferredTransform: layout.preferredTransform,
                 naturalSize: layout.naturalSize,
-                renderSize: safeRenderSize
+                renderSize: safeRenderSize,
+                preserveSourceScale: preserveSourceScale
             )
             layerInstruction.setTransform(fittedTransform, at: layout.timeRange.start)
         }
@@ -1309,30 +1856,106 @@ struct VideoExporter {
         let videoComposition = AVMutableVideoComposition()
         videoComposition.instructions = [instruction]
         videoComposition.renderSize = safeRenderSize
-        videoComposition.frameDuration = CMTime(value: 1, timescale: 30)
+        videoComposition.frameDuration = CMTime(value: 1, timescale: frameRate)
         return videoComposition
+    }
+
+    private func preferredVideoModeRenderSize(
+        for segmentLayouts: [StitchedVideoSegmentLayout],
+        requestedResolution: CGSize?
+    ) -> CGSize {
+        let measuredSize = segmentLayouts.reduce(CGSize.zero) { currentMax, layout in
+            let transformedSize = transformedVideoSize(for: layout)
+            return CGSize(
+                width: max(currentMax.width, transformedSize.width),
+                height: max(currentMax.height, transformedSize.height)
+            )
+        }
+
+        let defaultBase = CGSize(
+            width: max(max(measuredSize.width, measuredSize.height), 2),
+            height: max(min(measuredSize.width, measuredSize.height), 2)
+        )
+        var baseSize = requestedResolution ?? defaultBase
+        let dominantOrientation = dominantVideoOrientation(for: segmentLayouts)
+
+        switch dominantOrientation {
+        case .vertical where baseSize.width > baseSize.height:
+            baseSize = CGSize(width: baseSize.height, height: baseSize.width)
+        case .horizontal where baseSize.height > baseSize.width:
+            baseSize = CGSize(width: baseSize.height, height: baseSize.width)
+        default:
+            break
+        }
+
+        return baseSize
     }
 
     private func fittedTransform(
         preferredTransform: CGAffineTransform,
         naturalSize: CGSize,
-        renderSize: CGSize
+        renderSize: CGSize,
+        preserveSourceScale: Bool
     ) -> CGAffineTransform {
         let transformedBounds = CGRect(origin: .zero, size: naturalSize)
             .applying(preferredTransform)
             .standardized
+        let safeWidth = max(transformedBounds.width, 1)
+        let safeHeight = max(transformedBounds.height, 1)
+        let fitScale = min(renderSize.width / safeWidth, renderSize.height / safeHeight)
+        let scale = preserveSourceScale ? min(fitScale, 1) : fitScale
+        let scaledWidth = safeWidth * scale
+        let scaledHeight = safeHeight * scale
         let translationToOrigin = CGAffineTransform(
             translationX: -transformedBounds.minX,
             y: -transformedBounds.minY
         )
+        let scaleTransform = CGAffineTransform(scaleX: scale, y: scale)
         let centeredTranslation = CGAffineTransform(
-            translationX: (renderSize.width - transformedBounds.width) / 2,
-            y: (renderSize.height - transformedBounds.height) / 2
+            translationX: (renderSize.width - scaledWidth) / 2,
+            y: (renderSize.height - scaledHeight) / 2
         )
-        return preferredTransform.concatenating(translationToOrigin).concatenating(centeredTranslation)
+        return preferredTransform
+            .concatenating(translationToOrigin)
+            .concatenating(scaleTransform)
+            .concatenating(centeredTranslation)
     }
 
-    private func makePixelBuffer(from image: UIImage, caption: String?, renderSize: CGSize) throws -> CVPixelBuffer {
+    private enum VideoOrientation {
+        case vertical
+        case horizontal
+    }
+
+    private func dominantVideoOrientation(for segmentLayouts: [StitchedVideoSegmentLayout]) -> VideoOrientation {
+        var verticalSeconds: Double = 0
+        var horizontalSeconds: Double = 0
+
+        for layout in segmentLayouts {
+            let size = transformedVideoSize(for: layout)
+            let seconds = CMTimeGetSeconds(layout.timeRange.duration)
+            if size.height > size.width {
+                verticalSeconds += seconds
+            } else {
+                horizontalSeconds += seconds
+            }
+        }
+
+        return verticalSeconds > horizontalSeconds ? .vertical : .horizontal
+    }
+
+    private func transformedVideoSize(for layout: StitchedVideoSegmentLayout) -> CGSize {
+        let transformedBounds = CGRect(origin: .zero, size: layout.naturalSize)
+            .applying(layout.preferredTransform)
+            .standardized
+        return CGSize(width: transformedBounds.width, height: transformedBounds.height)
+    }
+
+    private func makePixelBuffer(
+        from image: UIImage,
+        caption: String?,
+        renderSize: CGSize,
+        captionStyle: CaptionStyle
+    ) throws -> CVPixelBuffer {
         var pixelBuffer: CVPixelBuffer?
         let attributes = [
             kCVPixelBufferCGImageCompatibilityKey: true,
@@ -1379,15 +2002,23 @@ struct VideoExporter {
         image.draw(in: aspectFitRect)
 
         if let caption, !caption.isEmpty {
-            drawCaption(caption, in: context, renderSize: renderSize)
+            drawCaption(caption, in: context, renderSize: renderSize, captionStyle: captionStyle)
         }
         UIGraphicsPopContext()
 
         return pixelBuffer
     }
 
-    private func estimatedTimelineSegments(for mediaItems: [MediaItem], totalDuration: CMTime) -> [TimelineSegment] {
+    private func estimatedTimelineSegments(
+        for mediaItems: [MediaItem],
+        totalDuration: CMTime,
+        timingMode: TimingMode
+    ) -> [TimelineSegment] {
         guard !mediaItems.isEmpty, totalDuration > .zero else { return [] }
+
+        if timingMode == .realLife {
+            return realLifeTimelineSegments(for: mediaItems, totalDuration: totalDuration)
+        }
 
         let videoItems = mediaItems.filter { if case .video = $0.kind { return true }; return false }
         let photoItems = mediaItems.filter { if case .photo = $0.kind { return true }; return false }
@@ -1451,69 +2082,49 @@ struct VideoExporter {
         return segments
     }
 
-    private func drawCaption(_ caption: String, in context: CGContext, renderSize: CGSize) {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        paragraph.lineBreakMode = .byWordWrapping
-        let widthScale = max(min(renderSize.width / 720, 1.0), 0.5)
-        let maxTextWidth = renderSize.width - max(72, 120 * widthScale)
-        let maxTextHeight: CGFloat = max(140, 240 * widthScale)
-        let minimumFontSize: CGFloat = max(14, 20 * widthScale)
-        var fontSize: CGFloat = renderSize.width < renderSize.height ? max(18, 34 * widthScale) : max(16, 30 * widthScale)
-        var measuredText = CGRect.zero
-        var attributes: [NSAttributedString.Key: Any] = [:]
-
-        while fontSize >= minimumFontSize {
-            attributes = [
-                .font: UIFont.systemFont(ofSize: fontSize, weight: .semibold),
-                .foregroundColor: UIColor.white,
-                .paragraphStyle: paragraph
-            ]
-
-            measuredText = (caption as NSString).boundingRect(
-                with: CGSize(width: maxTextWidth, height: maxTextHeight),
-                options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: attributes,
-                context: nil
-            ).integral
-
-            if measuredText.height <= maxTextHeight {
-                break
-            }
-
-            fontSize -= 2
-        }
-
-        let boxPadding: CGFloat = max(10, 16 * widthScale)
+    private func drawCaption(_ caption: String, in context: CGContext, renderSize: CGSize, captionStyle: CaptionStyle) {
+        let layout = layoutCaptionForVideo(text: caption, renderSize: renderSize, style: captionStyle)
         let bottomInset = max(renderSize.height * 0.025, 24)
         let boxRect = CGRect(
-            x: (renderSize.width - measuredText.width) / 2 - boxPadding,
-            y: renderSize.height - measuredText.height - (boxPadding * 2) - bottomInset,
-            width: measuredText.width + (boxPadding * 2),
-            height: measuredText.height + (boxPadding * 2)
+            x: (renderSize.width - layout.textWidth) / 2 - layout.boxPadding,
+            y: renderSize.height - layout.textHeight - (layout.boxPadding * 2) - bottomInset,
+            width: layout.textWidth + (layout.boxPadding * 2),
+            height: layout.textHeight + (layout.boxPadding * 2)
         )
 
-        let boxPath = UIBezierPath(roundedRect: boxRect, cornerRadius: 32)
-        context.saveGState()
-        context.setFillColor(UIColor.black.withAlphaComponent(0.42).cgColor)
-        context.addPath(boxPath.cgPath)
-        context.fillPath()
-        context.restoreGState()
+        if layout.backgroundAlpha > 0 {
+            let boxPath = UIBezierPath(roundedRect: boxRect, cornerRadius: layout.cornerRadius)
+            context.saveGState()
+            context.setFillColor(UIColor.black.withAlphaComponent(layout.backgroundAlpha).cgColor)
+            context.addPath(boxPath.cgPath)
+            context.fillPath()
+            if layout.borderWidth > 0, let borderCG = layout.borderColor {
+                context.setStrokeColor(borderCG)
+                context.setLineWidth(layout.borderWidth)
+                context.addPath(boxPath.cgPath)
+                context.strokePath()
+            }
+            context.restoreGState()
+        }
 
         let textRect = CGRect(
-            x: (renderSize.width - measuredText.width) / 2,
-            y: boxRect.minY + boxPadding,
-            width: measuredText.width,
-            height: measuredText.height
+            x: (renderSize.width - layout.textWidth) / 2,
+            y: boxRect.minY + layout.boxPadding,
+            width: layout.textWidth,
+            height: layout.textHeight + layout.textLayerExtraHeight
         )
 
         UIGraphicsPushContext(context)
-        (caption as NSString).draw(
-            with: textRect,
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: attributes,
-            context: nil
-        )
+        if let outline = layout.stylishOutline, let fill = layout.stylishFill {
+            outline.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+            fill.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+        } else {
+            layout.singleAttributed.draw(
+                with: textRect,
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                context: nil
+            )
+        }
         UIGraphicsPopContext()
     }
 
@@ -1551,20 +2162,28 @@ struct VideoExporter {
     }
 
     private func realLifeVisualDuration(for mediaItems: [MediaItem]) -> CMTime {
-        let hasVideo = mediaItems.contains {
-            if case .video = $0.kind { return true }
-            return false
-        }
         let photoCount = mediaItems.filter {
             if case .photo = $0.kind { return true }
             return false
         }.count
+        let hasVideo = mediaItems.contains {
+            if case .video = $0.kind { return true }
+            return false
+        }
 
         if !hasVideo && photoCount > 0 {
-            return CMTime(seconds: 300, preferredTimescale: 600)
+            return CMTime(seconds: max(Double(photoCount) * 8.0, 8.0), preferredTimescale: 600)
         }
 
         return minimumVisualDuration(for: mediaItems)
+    }
+
+    private func realLifeDuration(for mediaItems: [MediaItem], narrationDuration: CMTime) -> CMTime {
+        let visualDuration = realLifeVisualDuration(for: mediaItems)
+        guard narrationDuration > .zero else {
+            return visualDuration
+        }
+        return max(visualDuration, narrationDuration)
     }
 
     private func videoOnlyDuration(for mediaItems: [MediaItem]) -> CMTime {
@@ -1578,11 +2197,35 @@ struct VideoExporter {
         }
     }
 
-    private func makeTimelineSegments(for mediaItems: [MediaItem], totalDuration: CMTime) async throws -> [TimelineSegment] {
+    private func makeTimelineSegments(
+        for mediaItems: [MediaItem],
+        totalDuration: CMTime,
+        timingMode: TimingMode,
+        includeCaptions: Bool = true
+    ) async throws -> [TimelineSegment] {
+        if timingMode == .realLife {
+            return realLifeTimelineSegments(for: mediaItems, totalDuration: totalDuration)
+        }
+
+        let hasVideos = mediaItems.contains { if case .video = $0.kind { return true }; return false }
+        let hasPhotos = mediaItems.contains { if case .photo = $0.kind { return true }; return false }
+
+        if timingMode == .story && (!includeCaptions || (hasVideos && hasPhotos)) {
+            return try storyCaptionOffTimelineSegments(
+                for: mediaItems,
+                totalDuration: totalDuration
+            )
+        }
+
+        if timingMode == .story && includeCaptions && hasPhotos && !hasVideos {
+            return storyCaptionOnPhotoOnlyTimelineSegments(
+                for: mediaItems,
+                totalDuration: totalDuration
+            )
+        }
+
         let photoItems = mediaItems.filter { if case .photo = $0.kind { return true }; return false }
         let videoItems = mediaItems.filter { if case .video = $0.kind { return true }; return false }
-        let hasVideos = !videoItems.isEmpty
-        let hasPhotos = !photoItems.isEmpty
         let totalVideoDuration = videoItems.reduce(CMTime.zero) { partial, item in
             switch item.kind {
             case .photo:
@@ -1652,6 +2295,190 @@ struct VideoExporter {
         return segments
     }
 
+    private func storyCaptionOnPhotoOnlyTimelineSegments(
+        for mediaItems: [MediaItem],
+        totalDuration: CMTime
+    ) -> [TimelineSegment] {
+        guard !mediaItems.isEmpty, totalDuration > .zero else { return [] }
+
+        let photoItems = mediaItems.filter { if case .photo = $0.kind { return true }; return false }
+        guard !photoItems.isEmpty else { return [] }
+
+        let rawSecondsPerPhoto = CMTimeGetSeconds(totalDuration) / Double(photoItems.count)
+        let perPhotoDuration = CMTime(seconds: max(rawSecondsPerPhoto, 5.0), preferredTimescale: 600)
+
+        var segments: [TimelineSegment] = []
+        var cursor = CMTime.zero
+
+        for item in photoItems {
+            guard cursor < totalDuration else { break }
+            let remaining = totalDuration - cursor
+            let duration = min(perPhotoDuration, remaining)
+            guard duration > .zero else { break }
+
+            segments.append(
+                TimelineSegment(
+                    mediaItem: item,
+                    timeRange: CMTimeRange(start: cursor, duration: duration)
+                )
+            )
+            cursor = cursor + duration
+        }
+
+        return segments
+    }
+
+    private func storyCaptionOffTimelineSegments(
+        for mediaItems: [MediaItem],
+        totalDuration: CMTime
+    ) throws -> [TimelineSegment] {
+        guard !mediaItems.isEmpty, totalDuration > .zero else { return [] }
+
+        let photoItems = mediaItems.filter { if case .photo = $0.kind { return true }; return false }
+        let videoItems = mediaItems.filter { if case .video = $0.kind { return true }; return false }
+        let hasVideos = !videoItems.isEmpty
+        let hasPhotos = !photoItems.isEmpty
+        let totalVideoDuration = videoItems.reduce(CMTime.zero) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case let .video(_, duration):
+                return partial + duration
+            }
+        }
+
+        let perPhotoDuration: CMTime = {
+            guard hasPhotos else { return .zero }
+            let remainingForPhotos = CMTimeMaximum(.zero, totalDuration - totalVideoDuration)
+            guard remainingForPhotos > .zero else { return .zero }
+            let rawDuration = CMTimeGetSeconds(remainingForPhotos) / Double(photoItems.count)
+            if rawDuration > 20 {
+                return CMTime(seconds: 21, preferredTimescale: 600)
+            }
+            return CMTime(seconds: max(rawDuration, 5), preferredTimescale: 600)
+        }()
+
+        if hasPhotos, CMTimeGetSeconds(perPhotoDuration) > 20 {
+            throw ExportError.storyNeedsMoreMedia
+        }
+
+        var segments: [TimelineSegment] = []
+        var cursor = CMTime.zero
+        var loopIndex = 0
+
+        while cursor < totalDuration {
+            let item = mediaItems[loopIndex % mediaItems.count]
+            let remainingDuration = totalDuration - cursor
+            guard remainingDuration > .zero else { break }
+
+            let intendedDuration: CMTime
+            switch item.kind {
+            case .photo:
+                intendedDuration = perPhotoDuration
+            case let .video(_, videoDuration):
+                intendedDuration = videoDuration
+            }
+
+            if intendedDuration <= .zero {
+                loopIndex += 1
+                if hasPhotos && hasVideos && loopIndex >= mediaItems.count {
+                    break
+                }
+                continue
+            }
+
+            let duration = min(intendedDuration, remainingDuration)
+            guard duration > .zero else {
+                loopIndex += 1
+                continue
+            }
+            segments.append(
+                TimelineSegment(
+                    mediaItem: item,
+                    timeRange: CMTimeRange(start: cursor, duration: duration)
+                )
+            )
+            cursor = cursor + duration
+            loopIndex += 1
+
+            if hasPhotos && hasVideos && loopIndex >= mediaItems.count {
+                break
+            }
+            if !hasVideos && loopIndex >= mediaItems.count {
+                break
+            }
+        }
+
+        return segments
+    }
+
+    private func realLifeTimelineSegments(for mediaItems: [MediaItem], totalDuration: CMTime) -> [TimelineSegment] {
+        guard !mediaItems.isEmpty, totalDuration > .zero else { return [] }
+
+        let hasVideos = mediaItems.contains {
+            if case .video = $0.kind { return true }
+            return false
+        }
+        let photoItems = mediaItems.filter {
+            if case .photo = $0.kind { return true }
+            return false
+        }
+        let photoCount = photoItems.count
+        let hasPhotos = photoCount > 0
+        let baseVisualDuration = realLifeVisualDuration(for: mediaItems)
+        let shouldLoop = totalDuration > baseVisualDuration
+        let allPhotos = !hasVideos && hasPhotos
+        let perPhotoDuration: CMTime = {
+            guard hasPhotos else { return .zero }
+            if allPhotos {
+                return CMTime(seconds: 8.0, preferredTimescale: 600)
+            }
+            return CMTime(seconds: 1.6, preferredTimescale: 600)
+        }()
+
+        var segments: [TimelineSegment] = []
+        var cursor = CMTime.zero
+        var loopIndex = 0
+
+        while cursor < totalDuration {
+            let item = mediaItems[loopIndex % mediaItems.count]
+            let intendedDuration: CMTime
+            switch item.kind {
+            case .photo:
+                intendedDuration = perPhotoDuration
+            case let .video(_, videoDuration):
+                intendedDuration = videoDuration
+            }
+
+            guard intendedDuration > .zero else {
+                loopIndex += 1
+                if !shouldLoop && loopIndex >= mediaItems.count {
+                    break
+                }
+                continue
+            }
+
+            let remaining = totalDuration - cursor
+            let duration = min(intendedDuration, remaining)
+            guard duration > .zero else { break }
+
+            segments.append(
+                TimelineSegment(
+                    mediaItem: item,
+                    timeRange: CMTimeRange(start: cursor, duration: duration)
+                )
+            )
+            cursor = cursor + duration
+            loopIndex += 1
+
+            if !shouldLoop && loopIndex >= mediaItems.count {
+                break
+            }
+        }
+
+        return segments
+    }
+
     private func mediaFrameForTime(
         _ currentTime: CMTime,
         timelineSegments: [TimelineSegment],
@@ -1698,11 +2525,21 @@ struct VideoExporter {
     private func timedCaptionSegments(
         from texts: [String],
         utteranceDurations: [CMTime],
-        totalDuration: CMTime
+        totalDuration: CMTime,
+        voiceIdentifier: String
     ) -> [CaptionSegment] {
         guard !texts.isEmpty else { return [] }
 
-        let slices = makeCaptionSlices(from: texts)
+        let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
+        if SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag) {
+            return sentenceAlignedTimedCaptionSegments(
+                from: texts,
+                utteranceDurations: utteranceDurations,
+                totalDuration: totalDuration
+            )
+        }
+
+        let slices = makeCaptionSlices(from: texts, voiceIdentifier: voiceIdentifier)
         guard !slices.isEmpty else { return [] }
 
         let sourceWeights = sourceSegmentWeights(from: texts)
@@ -1716,7 +2553,7 @@ struct VideoExporter {
             guard !group.isEmpty else { continue }
 
             let sourceBudget = sourceIndex < utteranceDurations.count
-                ? CMTimeGetSeconds(utteranceDurations[sourceIndex]) * narrationDurationBias
+                ? CMTimeGetSeconds(utteranceDurations[sourceIndex])
                 : totalSeconds * (sourceWeights[sourceIndex] / totalSourceWeight)
             let groupWeight = max(group.reduce(0.0) { $0 + $1.weight + $1.terminalPauseWeight }, 0.1)
 
@@ -1752,57 +2589,66 @@ struct VideoExporter {
         return segments
     }
 
-    private func splitCaptionText(_ text: String) -> [String] {
+    /// One caption per utterance; duration matches each sentence’s synthesized audio (Chinese / Japanese / Lao family only).
+    private func sentenceAlignedTimedCaptionSegments(
+        from texts: [String],
+        utteranceDurations: [CMTime],
+        totalDuration: CMTime
+    ) -> [CaptionSegment] {
+        var segments: [CaptionSegment] = []
+        var cursor = CMTime.zero
+
+        for (index, rawText) in texts.enumerated() {
+            let spoken = index < utteranceDurations.count ? utteranceDurations[index] : CMTime.zero
+            let norm = SpeechVoiceLibrary.normalizedCaptionText(rawText)
+
+            let remaining = totalDuration - cursor
+            if remaining <= .zero { break }
+
+            if norm.isEmpty {
+                let step = CMTimeMinimum(spoken, remaining)
+                cursor = cursor + step
+                continue
+            }
+
+            let minDur = CMTime(seconds: minimumCaptionSeconds(for: norm), preferredTimescale: 600)
+            var pieceDur = CMTimeMaximum(spoken, minDur)
+            if pieceDur > remaining {
+                pieceDur = remaining
+            }
+
+            let end = cursor + pieceDur
+            let timeRange = CMTimeRange(start: cursor, end: end)
+            let displayText = CaptionTextChunker.strippedCaptionForDisplay(formattedCaptionText(norm))
+            segments.append(CaptionSegment(text: displayText, timeRange: timeRange))
+            cursor = end
+        }
+
+        if segments.isEmpty {
+            return [
+                CaptionSegment(
+                    text: CaptionTextChunker.strippedCaptionForDisplay(formattedCaptionText(texts.joined(separator: " "))),
+                    timeRange: CMTimeRange(start: .zero, duration: totalDuration)
+                )
+            ]
+        }
+
+        if let lastIndex = segments.indices.last {
+            let last = segments[lastIndex]
+            segments[lastIndex] = CaptionSegment(
+                text: last.text,
+                timeRange: CMTimeRange(start: last.timeRange.start, end: totalDuration)
+            )
+        }
+
+        return segments
+    }
+
+    private func splitCaptionText(_ text: String, voiceIdentifier: String) -> [String] {
         let normalized = SpeechVoiceLibrary.normalizedCaptionText(text)
         guard !normalized.isEmpty else { return [] }
-
-        let phraseSeparators = CharacterSet(charactersIn: ",，、")
-        let phrases = normalized.components(separatedBy: phraseSeparators)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-
-        let sourcePhrases = phrases.isEmpty ? [normalized] : phrases
-        return sourcePhrases.flatMap { phrase in
-            if phrase.contains(" ") {
-                return splitWordPhrase(phrase, maxWords: 12)
-            } else {
-                return splitCharacterPhrase(phrase, maxCharacters: 10)
-            }
-        }
-    }
-
-    private func splitWordPhrase(_ phrase: String, maxWords: Int) -> [String] {
-        let words = phrase.split(whereSeparator: \.isWhitespace).map(String.init)
-        guard words.count > maxWords else { return [phrase] }
-
-        var chunks: [String] = []
-        var index = 0
-        while index < words.count {
-            let end = min(index + maxWords, words.count)
-            chunks.append(words[index..<end].joined(separator: " "))
-            index = end
-        }
-        return chunks
-    }
-
-    private func splitCharacterPhrase(_ phrase: String, maxCharacters: Int) -> [String] {
-        guard phrase.count > maxCharacters else { return [phrase] }
-
-        var chunks: [String] = []
-        var current = ""
-        for character in phrase {
-            current.append(character)
-            if current.count >= maxCharacters {
-                chunks.append(current)
-                current = ""
-            }
-        }
-
-        if !current.isEmpty {
-            chunks.append(current)
-        }
-
-        return chunks
+        let tag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
+        return CaptionTextChunker.splitForCaptions(normalizedText: normalized, voiceLanguageTag: tag)
     }
 
     private func formattedCaptionText(_ text: String) -> String {
@@ -1830,9 +2676,9 @@ struct VideoExporter {
         return "\(firstLine)\n\(secondLine)"
     }
 
-    private func makeCaptionSlices(from texts: [String]) -> [CaptionSlice] {
+    private func makeCaptionSlices(from texts: [String], voiceIdentifier: String) -> [CaptionSlice] {
         texts.enumerated().flatMap { index, text in
-            let chunks = splitCaptionText(text)
+            let chunks = splitCaptionText(text, voiceIdentifier: voiceIdentifier)
             return chunks.enumerated().map { chunkIndex, chunk in
                 CaptionSlice(
                     text: chunk,
@@ -1939,6 +2785,7 @@ struct VideoExporter {
         case missingVideoTrack
         case exportSessionFailed
         case exportFailed
+        case storyNeedsMoreMedia
 
         var errorDescription: String? {
             switch self {
@@ -1956,6 +2803,8 @@ struct VideoExporter {
                 return "Could not create the export session."
             case .exportFailed:
                 return "Video export did not complete."
+            case .storyNeedsMoreMedia:
+                return "Story without captions needs more media. Add more photos or videos so each photo would be 20 seconds or less."
             }
         }
     }
@@ -1966,7 +2815,9 @@ struct VideoExporter {
         duration: CMTime,
         videoPressure: VideoPressure,
         timingMode: TimingMode,
-        mediaItems: [MediaItem]
+        mediaItems: [MediaItem],
+        includeCaptions: Bool = true,
+        videoModeSettings: VideoModeExportSettings? = nil
     ) -> RenderProfile {
         let seconds = CMTimeGetSeconds(duration)
         let baseSize = quality.renderSize(for: aspectRatio)
@@ -1995,9 +2846,9 @@ struct VideoExporter {
                     case .preview:
                         return baseSize
                     case .finalStandard:
-                        return aspectRatio == .vertical ? CGSize(width: 1080, height: 1920) : CGSize(width: 1440, height: 1080)
+                        return aspectRatio == .widescreen ? CGSize(width: 1920, height: 1080) : CGSize(width: 1440, height: 1080)
                     case .finalHigh:
-                        return aspectRatio == .vertical ? CGSize(width: 1440, height: 2560) : CGSize(width: 1920, height: 1440)
+                        return aspectRatio == .widescreen ? CGSize(width: 2560, height: 1440) : CGSize(width: 1920, height: 1440)
                     }
                 }()
                 let maxLongEdge: CGFloat = {
@@ -2023,61 +2874,55 @@ struct VideoExporter {
                     videoSampleStride: 1
                 )
             }
+            let effectiveSettings = effectiveSlideshowExportSettings(
+                requestedSettings: quality == .preview ? nil : videoModeSettings,
+                mediaItems: mediaItems,
+                narrationDuration: duration,
+                fallbackRenderSize: preferredMediaDrivenRenderSize(
+                    for: mediaItems,
+                    aspectRatio: aspectRatio,
+                    minimumSize: baseSize
+                ),
+                fallbackFrameRate: {
+                    switch quality {
+                    case .preview:
+                        return 12
+                    case .finalStandard:
+                        return 24
+                    case .finalHigh:
+                        return 30
+                    }
+                }()
+            )
 
-            if !seconds.isFinite || seconds <= 180 {
-                return RenderProfile(renderSize: baseSize, frameRate: baseRate, longFormOptimized: false, videoSampleStride: 1)
-            }
+            return RenderProfile(
+                renderSize: effectiveSettings.renderSize,
+                frameRate: effectiveSettings.frameRate,
+                longFormOptimized: false,
+                videoSampleStride: 1
+            )
+        }
 
-            switch quality {
-            case .preview:
-                return RenderProfile(renderSize: baseSize, frameRate: baseRate, longFormOptimized: false, videoSampleStride: 1)
-            case .finalStandard:
-                if hasHeavyVideoLoad || seconds > 900 {
-                    return RenderProfile(
-                        renderSize: aspectRatio == .vertical ? CGSize(width: 360, height: 640) : CGSize(width: 480, height: 360),
-                        frameRate: 10,
-                        longFormOptimized: true,
-                        videoSampleStride: 1
-                    )
-                }
-                if seconds > 420 {
-                    return RenderProfile(
-                        renderSize: aspectRatio == .vertical ? CGSize(width: 540, height: 960) : CGSize(width: 720, height: 540),
-                        frameRate: 10,
-                        longFormOptimized: true,
-                        videoSampleStride: 1
-                    )
-                }
-                return RenderProfile(
-                    renderSize: aspectRatio == .vertical ? CGSize(width: 540, height: 960) : CGSize(width: 720, height: 540),
-                    frameRate: baseRate,
-                    longFormOptimized: false,
-                    videoSampleStride: 1
-                )
-            case .finalHigh:
-                if hasHeavyVideoLoad || seconds > 900 {
-                    return RenderProfile(
-                        renderSize: aspectRatio == .vertical ? CGSize(width: 540, height: 960) : CGSize(width: 720, height: 540),
-                        frameRate: 12,
-                        longFormOptimized: true,
-                        videoSampleStride: 1
-                    )
-                }
-                if seconds > 420 {
-                    return RenderProfile(
-                        renderSize: aspectRatio == .vertical ? CGSize(width: 720, height: 1280) : CGSize(width: 960, height: 720),
-                        frameRate: 12,
-                        longFormOptimized: true,
-                        videoSampleStride: 1
-                    )
-                }
-                return RenderProfile(
-                    renderSize: aspectRatio == .vertical ? CGSize(width: 720, height: 1280) : CGSize(width: 960, height: 720),
-                    frameRate: baseRate,
-                    longFormOptimized: false,
-                    videoSampleStride: 1
-                )
-            }
+        if timingMode == .story {
+            return RenderProfile(
+                renderSize: preferredMediaDrivenRenderSize(
+                    for: mediaItems,
+                    aspectRatio: aspectRatio,
+                    minimumSize: baseSize
+                ),
+                frameRate: {
+                    switch quality {
+                    case .preview:
+                        return 12
+                    case .finalStandard:
+                        return 24
+                    case .finalHigh:
+                        return 30
+                    }
+                }(),
+                longFormOptimized: false,
+                videoSampleStride: 1
+            )
         }
 
         guard seconds.isFinite, seconds > 180 else {
@@ -2090,7 +2935,7 @@ struct VideoExporter {
         case .finalStandard:
             if hasHeavyVideoLoad || seconds > 900 {
                 return RenderProfile(
-                    renderSize: aspectRatio == .vertical ? CGSize(width: 360, height: 640) : CGSize(width: 480, height: 360),
+                    renderSize: aspectRatio == .widescreen ? CGSize(width: 640, height: 360) : CGSize(width: 480, height: 360),
                     frameRate: 8,
                     longFormOptimized: true,
                     videoSampleStride: 2
@@ -2098,7 +2943,7 @@ struct VideoExporter {
             }
             if seconds > 420 {
                 return RenderProfile(
-                    renderSize: aspectRatio == .vertical ? CGSize(width: 640, height: 1136) : CGSize(width: 854, height: 640),
+                    renderSize: aspectRatio == .widescreen ? CGSize(width: 1136, height: 640) : CGSize(width: 854, height: 640),
                     frameRate: 6,
                     longFormOptimized: true,
                     videoSampleStride: 4
@@ -2113,7 +2958,7 @@ struct VideoExporter {
         case .finalHigh:
             if hasHeavyVideoLoad || seconds > 900 {
                 return RenderProfile(
-                    renderSize: aspectRatio == .vertical ? CGSize(width: 360, height: 640) : CGSize(width: 480, height: 360),
+                    renderSize: aspectRatio == .widescreen ? CGSize(width: 640, height: 360) : CGSize(width: 480, height: 360),
                     frameRate: 10,
                     longFormOptimized: true,
                     videoSampleStride: 2
@@ -2121,14 +2966,14 @@ struct VideoExporter {
             }
             if seconds > 420 {
                 return RenderProfile(
-                    renderSize: aspectRatio == .vertical ? CGSize(width: 720, height: 1280) : CGSize(width: 960, height: 720),
+                    renderSize: aspectRatio == .widescreen ? CGSize(width: 1280, height: 720) : CGSize(width: 960, height: 720),
                     frameRate: 8,
                     longFormOptimized: true,
                     videoSampleStride: 3
                 )
             }
             return RenderProfile(
-                renderSize: aspectRatio == .vertical ? CGSize(width: 720, height: 1280) : CGSize(width: 960, height: 720),
+                renderSize: aspectRatio == .widescreen ? CGSize(width: 1280, height: 720) : CGSize(width: 960, height: 720),
                 frameRate: 10,
                 longFormOptimized: true,
                 videoSampleStride: 2
@@ -2155,7 +3000,7 @@ struct VideoExporter {
             return minimumSize
         }
 
-        let fitted = AVMakeRect(aspectRatio: aspectRatio == .vertical ? CGSize(width: 9, height: 16) : CGSize(width: 4, height: 3),
+        let fitted = AVMakeRect(aspectRatio: aspectRatio == .widescreen ? CGSize(width: 16, height: 9) : CGSize(width: 4, height: 3),
                                 insideRect: CGRect(origin: .zero, size: largestMediaSize)).size
 
         let resolvedFitted: CGSize = {
@@ -2169,6 +3014,43 @@ struct VideoExporter {
         let width = max(minimumSize.width, round(resolvedFitted.width / 2) * 2)
         let height = max(minimumSize.height, round(resolvedFitted.height / 2) * 2)
         return CGSize(width: width, height: height)
+    }
+
+    private func effectiveSlideshowExportSettings(
+        requestedSettings: VideoModeExportSettings?,
+        mediaItems: [MediaItem],
+        narrationDuration: CMTime,
+        fallbackRenderSize: CGSize,
+        fallbackFrameRate: Int32
+    ) -> EffectiveSlideshowExportSettings {
+        guard let requestedSettings else {
+            return EffectiveSlideshowExportSettings(
+                frameRate: fallbackFrameRate,
+                renderSize: fallbackRenderSize,
+                presetName: AVAssetExportPresetHighestQuality
+            )
+        }
+
+        let mediaDuration = realLifeVisualDuration(for: mediaItems)
+        let narrationIsLonger = narrationDuration > mediaDuration
+        let selectedIsHeavyCombo =
+            requestedSettings.resolution == .p4k &&
+            requestedSettings.frameRate == .fps60 &&
+            requestedSettings.quality == .high
+
+        if narrationIsLonger && selectedIsHeavyCombo {
+            return EffectiveSlideshowExportSettings(
+                frameRate: VideoModeFrameRate.fps30.value,
+                renderSize: VideoModeResolution.p1080.renderSize,
+                presetName: VideoModeQuality.high.exportPresetName
+            )
+        }
+
+        return EffectiveSlideshowExportSettings(
+            frameRate: requestedSettings.frameRate.value,
+            renderSize: requestedSettings.resolution.renderSize,
+            presetName: requestedSettings.quality.exportPresetName
+        )
     }
 
     private func videoPressure(for timelineSegments: [TimelineSegment]) -> VideoPressure {

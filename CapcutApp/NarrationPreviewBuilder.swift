@@ -1,8 +1,55 @@
 import AVFoundation
 import Foundation
 
+/// Preview synthesis is bounded so long scripts (hundreds of sentences) stay responsive and a stuck `AVSpeechSynthesizer` cannot hang the UI indefinitely.
+private enum NarrationPreviewLimits {
+    /// After duration capping, merge adjacent utterances so we never run this many sequential `write` passes for a preview.
+    static let maxSynthesisSegments = 36
+    /// Hard cap per synthesized chunk (merged text) to avoid pathological TTS stalls.
+    static let maxCharactersPerPreviewChunk = 4_000
+    static let perSegmentTimeoutSeconds: TimeInterval = 90
+}
+
 @MainActor
 struct NarrationPreviewBuilder {
+    private final class PreviewSynthesisResumeState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var finished = false
+
+        func resumeSuccess(_ continuation: CheckedContinuation<TimeInterval, Error>, returning value: TimeInterval) {
+            lock.lock()
+            guard !finished else {
+                lock.unlock()
+                return
+            }
+            finished = true
+            lock.unlock()
+            continuation.resume(returning: value)
+        }
+
+        func resumeFailure(_ continuation: CheckedContinuation<TimeInterval, Error>, error: Error) {
+            lock.lock()
+            guard !finished else {
+                lock.unlock()
+                return
+            }
+            finished = true
+            lock.unlock()
+            continuation.resume(throwing: error)
+        }
+
+        func resumeTimeout(_ continuation: CheckedContinuation<TimeInterval, Error>) {
+            lock.lock()
+            guard !finished else {
+                lock.unlock()
+                return
+            }
+            finished = true
+            lock.unlock()
+            continuation.resume(throwing: PreviewError.segmentSynthesisTimedOut)
+        }
+    }
+
     struct SubtitleCue: Codable, Identifiable {
         let id: UUID
         let text: String
@@ -29,10 +76,29 @@ struct NarrationPreviewBuilder {
         let weight: Double
     }
 
-    func buildPreview(text: String, voiceIdentifier: String, maximumDuration: TimeInterval? = nil) async throws -> PreviewResult {
+    func buildPreview(
+        text: String,
+        voiceIdentifier: String,
+        speechRateMultiplier: Double = 1.0,
+        maximumDuration: TimeInterval? = nil,
+        progressHandler: ((Double, String) -> Void)? = nil
+    ) async throws -> PreviewResult {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let allSegments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
-        let segments = cappedPreviewSegments(from: allSegments, maximumDuration: maximumDuration)
+        let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
+        let allSegments: [String]
+        if SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag) {
+            let sentences = CaptionTextChunker.sentenceSegmentsForNarration(normalized)
+            allSegments = sentences.isEmpty
+                ? SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
+                : sentences
+        } else {
+            allSegments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
+        }
+        let capped = cappedPreviewSegments(from: allSegments, maximumDuration: maximumDuration)
+        let merged = Self.mergedPreviewSegments(capped)
+        let segments = merged
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
         guard !segments.isEmpty else {
             throw PreviewError.emptyNarration
         }
@@ -45,7 +111,13 @@ struct NarrationPreviewBuilder {
         var utteranceDurations: [TimeInterval] = []
 
         for (index, segment) in segments.enumerated() {
-            let utterance = SpeechVoiceLibrary.makeUtterance(from: segment, voiceIdentifier: voiceIdentifier)
+            let completion = Double(index) / Double(max(segments.count, 1))
+            progressHandler?(completion * 0.72, "Rendering narration segment \(index + 1) of \(segments.count).")
+            let utterance = SpeechVoiceLibrary.makeUtterance(
+                from: segment,
+                voiceIdentifier: voiceIdentifier,
+                speechRateMultiplier: speechRateMultiplier
+            )
             let utteranceURL = workspace.appendingPathComponent("utterance-preview-\(index).caf")
             let duration = try await renderUtteranceAudio(utterance, outputURL: utteranceURL)
             utteranceURLs.append(utteranceURL)
@@ -53,9 +125,17 @@ struct NarrationPreviewBuilder {
         }
 
         let measuredDuration = max(utteranceDurations.reduce(0, +), 1)
+        progressHandler?(0.8, "Combining narration audio.")
         try await mergeAudioFiles(utteranceURLs, outputURL: outputAudioURL)
-        let cues = buildCues(segments: segments, utteranceDurations: utteranceDurations, totalDuration: measuredDuration)
+        progressHandler?(0.92, "Building caption cues.")
+        let cues = buildCues(
+            segments: segments,
+            utteranceDurations: utteranceDurations,
+            totalDuration: measuredDuration,
+            voiceIdentifier: voiceIdentifier
+        )
         try writeCues(cues, to: outputJSONURL)
+        progressHandler?(1.0, "Narration preview is ready.")
 
         return PreviewResult(
             audioURL: outputAudioURL,
@@ -63,6 +143,27 @@ struct NarrationPreviewBuilder {
             cues: cues,
             duration: measuredDuration
         )
+    }
+
+    /// Merges adjacent segments so preview synthesis stays under `NarrationPreviewLimits.maxSynthesisSegments`.
+    private static func mergedPreviewSegments(_ segments: [String]) -> [String] {
+        guard segments.count > NarrationPreviewLimits.maxSynthesisSegments else { return segments }
+
+        let batch = Int(
+            ceil(Double(segments.count) / Double(NarrationPreviewLimits.maxSynthesisSegments))
+        )
+        var out: [String] = []
+        var i = 0
+        while i < segments.count {
+            let end = min(i + batch, segments.count)
+            var piece = segments[i..<end].joined(separator: " ")
+            if piece.count > NarrationPreviewLimits.maxCharactersPerPreviewChunk {
+                piece = String(piece.prefix(NarrationPreviewLimits.maxCharactersPerPreviewChunk))
+            }
+            out.append(piece)
+            i = end
+        }
+        return out
     }
 
     private func cappedPreviewSegments(from segments: [String], maximumDuration: TimeInterval?) -> [String] {
@@ -95,10 +196,18 @@ struct NarrationPreviewBuilder {
         }
 
         let synthesizer = AVSpeechSynthesizer()
+        let resumeState = PreviewSynthesisResumeState()
 
-        return try await withCheckedThrowingContinuation { continuation in
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<TimeInterval, Error>) in
             var audioFile: AVAudioFile?
-            var finished = false
+
+            let timeoutWorkItem = DispatchWorkItem {
+                resumeState.resumeTimeout(continuation)
+            }
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(
+                deadline: .now() + NarrationPreviewLimits.perSegmentTimeoutSeconds,
+                execute: timeoutWorkItem
+            )
 
             synthesizer.write(utterance) { buffer in
                 guard let pcmBuffer = buffer as? AVAudioPCMBuffer else { return }
@@ -108,10 +217,8 @@ struct NarrationPreviewBuilder {
                         let sampleRate = audioFile?.processingFormat.sampleRate ?? 44_100
                         let length = audioFile?.length ?? 0
                         let duration = sampleRate > 0 ? Double(length) / sampleRate : 0
-                        if !finished {
-                            finished = true
-                            continuation.resume(returning: duration)
-                        }
+                        timeoutWorkItem.cancel()
+                        resumeState.resumeSuccess(continuation, returning: duration)
                         return
                     }
 
@@ -121,10 +228,8 @@ struct NarrationPreviewBuilder {
 
                     try audioFile?.write(from: pcmBuffer)
                 } catch {
-                    if !finished {
-                        finished = true
-                        continuation.resume(throwing: error)
-                    }
+                    timeoutWorkItem.cancel()
+                    resumeState.resumeFailure(continuation, error: error)
                 }
             }
         }
@@ -166,12 +271,26 @@ struct NarrationPreviewBuilder {
         }
     }
 
-    private func buildCues(segments: [String], utteranceDurations: [TimeInterval], totalDuration: TimeInterval) -> [SubtitleCue] {
+    private func buildCues(
+        segments: [String],
+        utteranceDurations: [TimeInterval],
+        totalDuration: TimeInterval,
+        voiceIdentifier: String
+    ) -> [SubtitleCue] {
+        let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
+        if SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag) {
+            return buildSentenceAlignedCues(
+                segments: segments,
+                utteranceDurations: utteranceDurations,
+                totalDuration: totalDuration
+            )
+        }
+
         var cues: [SubtitleCue] = []
         var cursor: TimeInterval = 0
 
         for (index, segment) in segments.enumerated() {
-            let chunks = captionChunks(for: segment)
+            let chunks = captionChunks(for: segment, voiceIdentifier: voiceIdentifier)
             guard !chunks.isEmpty else { continue }
 
             let utteranceDuration = index < utteranceDurations.count ? utteranceDurations[index] : estimatedSeconds(for: segment)
@@ -198,57 +317,74 @@ struct NarrationPreviewBuilder {
         return cues
     }
 
-    private func captionChunks(for segment: String) -> [CueChunk] {
-        let normalizedSegment = SpeechVoiceLibrary.normalizedCaptionText(segment)
-        let phrases = normalizedSegment
-            .components(separatedBy: CharacterSet(charactersIn: ",，、"))
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
+    /// One subtitle line per TTS utterance (full sentence); timing follows measured audio per sentence.
+    private func buildSentenceAlignedCues(
+        segments: [String],
+        utteranceDurations: [TimeInterval],
+        totalDuration: TimeInterval
+    ) -> [SubtitleCue] {
+        var cues: [SubtitleCue] = []
+        var cursor: TimeInterval = 0
 
-        let source = phrases.isEmpty ? [normalizedSegment] : phrases
-        return source.flatMap { phrase in
-            if phrase.contains(" ") {
-                let words = phrase.split(whereSeparator: \.isWhitespace).map(String.init)
-                if words.count <= 10 {
-                    return [CueChunk(text: balancedCaption(phrase), weight: englishWeight(for: phrase))]
-                }
-
-                var chunks: [CueChunk] = []
-                var index = 0
-                while index < words.count {
-                    let end = min(index + 10, words.count)
-                    let chunk = words[index..<end].joined(separator: " ")
-                    chunks.append(CueChunk(text: balancedCaption(chunk), weight: englishWeight(for: chunk)))
-                    index = end
-                }
-                return chunks
-            } else {
-                let characters = Array(phrase)
-                if characters.count <= 12 {
-                    return [CueChunk(text: phrase, weight: cjkWeight(for: phrase))]
-                }
-
-                var chunks: [CueChunk] = []
-                var index = 0
-                while index < characters.count {
-                    let end = min(index + 12, characters.count)
-                    let chunk = String(characters[index..<end])
-                    chunks.append(CueChunk(text: chunk, weight: cjkWeight(for: chunk)))
-                    index = end
-                }
-                return chunks
+        for (index, segment) in segments.enumerated() {
+            let utteranceDuration = index < utteranceDurations.count ? utteranceDurations[index] : estimatedSeconds(for: segment)
+            let text = SpeechVoiceLibrary.normalizedCaptionText(segment)
+            if text.isEmpty {
+                cursor = min(cursor + utteranceDuration, totalDuration)
+                continue
             }
+
+            let safeDuration = max(utteranceDuration, minimumCueDuration(for: text))
+            let start = cursor
+            let end = min(cursor + safeDuration, totalDuration)
+            let shown = CaptionTextChunker.strippedCaptionForDisplay(displayCaption(for: text))
+            cues.append(SubtitleCue(text: shown, start: start, end: end))
+            cursor = end
         }
+
+        if let lastIndex = cues.indices.last {
+            cues[lastIndex] = SubtitleCue(
+                id: cues[lastIndex].id,
+                text: cues[lastIndex].text,
+                start: cues[lastIndex].start,
+                end: max(cues[lastIndex].end, totalDuration)
+            )
+        }
+
+        return cues
+    }
+
+    private func captionChunks(for segment: String, voiceIdentifier: String) -> [CueChunk] {
+        let normalizedSegment = SpeechVoiceLibrary.normalizedCaptionText(segment)
+        let tag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
+        let pieces = CaptionTextChunker.splitForCaptions(normalizedText: normalizedSegment, voiceLanguageTag: tag)
+        return pieces.map { piece in
+            let display = displayCaption(for: piece)
+            let weight: Double
+            if SpeechVoiceLibrary.containsCJKContent(in: SpeechVoiceLibrary.normalizedTimingText(piece)) {
+                weight = cjkWeight(for: piece)
+            } else {
+                weight = englishWeight(for: piece)
+            }
+            return CueChunk(text: display, weight: weight)
+        }
+    }
+
+    private func displayCaption(for text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = trimmed.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard words.count >= 6 else { return trimmed }
+        return balancedCaption(trimmed)
     }
 
     private func balancedCaption(_ text: String) -> String {
         let normalizedText = SpeechVoiceLibrary.normalizedCaptionText(text)
         let words = normalizedText.split(whereSeparator: \.isWhitespace).map(String.init)
-        guard words.count >= 8 else { return normalizedText }
+        guard words.count >= 6 else { return normalizedText }
 
         var bestIndex = words.count / 2
         var bestScore = Int.max
-        for index in 3..<(words.count - 2) {
+        for index in 2..<(words.count - 1) {
             let left = words[..<index].joined(separator: " ")
             let right = words[index...].joined(separator: " ")
             let score = abs(left.count - right.count)
@@ -299,6 +435,7 @@ struct NarrationPreviewBuilder {
         case emptyNarration
         case audioTrackCreationFailed
         case exportFailed
+        case segmentSynthesisTimedOut
 
         var errorDescription: String? {
             switch self {
@@ -308,6 +445,8 @@ struct NarrationPreviewBuilder {
                 return "Could not create the narration preview track."
             case .exportFailed:
                 return "Could not export the narration preview audio."
+            case .segmentSynthesisTimedOut:
+                return "Narration preview stopped waiting for speech output. Try a shorter script, a different voice, or build again."
             }
         }
     }

@@ -31,6 +31,7 @@ struct CapcutApp: App {
 
 private struct LaunchSplashView: View {
     @State private var isContentVisible = false
+    @State private var isLogoFloating = false
 
     var body: some View {
         ZStack {
@@ -58,28 +59,20 @@ private struct LaunchSplashView: View {
                 .offset(x: 120, y: 230)
 
             VStack(spacing: 22) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: 34, style: .continuous)
-                        .fill(
-                            LinearGradient(
-                                colors: [
-                                    Color(red: 1.00, green: 0.66, blue: 0.25),
-                                    Color(red: 0.95, green: 0.34, blue: 0.14)
-                                ],
-                                startPoint: .topLeading,
-                                endPoint: .bottomTrailing
-                            )
-                        )
-                        .frame(width: 108, height: 108)
-                        .shadow(color: Color.black.opacity(0.22), radius: 18, y: 10)
-
-                    Image(systemName: "film.stack.fill")
-                        .font(.system(size: 42, weight: .bold))
-                        .foregroundStyle(.white)
-                }
+                FluxCutLogoMark(size: 108)
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 34, style: .continuous)
+                            .stroke(Color.white.opacity(0.12), lineWidth: 1)
+                            .blur(radius: isLogoFloating ? 7 : 3)
+                            .scaleEffect(isLogoFloating ? 1.045 : 0.985)
+                    }
+                    .shadow(color: Color.black.opacity(0.22), radius: 18, y: 10)
+                    .scaleEffect(isContentVisible ? 1 : 0.82)
+                    .offset(y: isLogoFloating ? -5 : 5)
+                    .rotationEffect(.degrees(isLogoFloating ? 0.9 : -0.9))
 
                 VStack(spacing: 8) {
-                    Text("FluxCut Studio")
+                    Text("FluxCut")
                         .font(.system(size: 32, weight: .bold, design: .rounded))
                         .foregroundStyle(.white)
                 }
@@ -91,6 +84,10 @@ private struct LaunchSplashView: View {
         .onAppear {
             withAnimation(.spring(response: 0.6, dampingFraction: 0.86)) {
                 isContentVisible = true
+            }
+
+            withAnimation(.easeInOut(duration: 3.2).repeatForever(autoreverses: true)) {
+                isLogoFloating = true
             }
         }
     }

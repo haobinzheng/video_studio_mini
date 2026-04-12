@@ -1,9 +1,15 @@
 import AVKit
+import Photos
 import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
 struct ContentView: View {
+    private struct ShareableFile: Identifiable {
+        let id = UUID()
+        let url: URL
+    }
+
     enum StudioStep: String, CaseIterable, Identifiable {
         case narration = "Script"
         case photos = "Media"
@@ -14,13 +20,25 @@ struct ContentView: View {
     }
 
     @ObservedObject var viewModel: AppViewModel
-    @State private var isMusicImporterPresented = false
+    @State private var isMusicLibraryImporterPresented = false
     @State private var selectedMusicVideoItem: PhotosPickerItem?
+    @State private var extractedSoundtrackShareFile: ShareableFile?
     @State private var selectedStep: StudioStep = .narration
-    @State private var isVoiceListExpanded = false
     @State private var draggedMediaItem: AppViewModel.MediaItem?
+    @State private var draggedSoundtrackItem: AppViewModel.SoundtrackItem?
+    @State private var appendPhotoItems: [PhotosPickerItem] = []
     @State private var renderPreviewPlayer = AVPlayer()
     @State private var scriptScrollProxy: ScrollViewProxy?
+    @State private var isSettingsPresented = false
+    @State private var isMusicBrowserPresented = false
+    @State private var isRenderPlayerExpanded = false
+    @State private var voicePendingHide: AppViewModel.VoiceOption?
+    @State private var musicLibrarySearchText = ""
+    @State private var pendingMusicLibraryDeletion: AppViewModel.MusicLibraryItem?
+    @State private var pendingMediaDeletion: AppViewModel.MediaItem?
+    @State private var selectedMusicLibraryItemIDs: Set<String> = []
+    @State private var previewingMusicLibraryItemID: String?
+    @State private var isNarrationPreviewSectionVisible = false
     @FocusState private var isNarrationFocused: Bool
 
     var body: some View {
@@ -52,22 +70,44 @@ struct ContentView: View {
             .background(appBackground)
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
-            .fileImporter(
-                isPresented: $isMusicImporterPresented,
-                allowedContentTypes: [.audio, .mpeg4Audio, .mp3, .wav, .movie, .video, .mpeg4Movie, .quickTimeMovie]
-            ) { result in
-                if case let .success(url) = result {
-                    viewModel.importMusic(from: url)
-                    selectedStep = .music
-                }
+            .sheet(isPresented: $isSettingsPresented) {
+                settingsSheet
+            }
+            .sheet(isPresented: $isMusicBrowserPresented) {
+                musicLibrarySheet
+            }
+            .fullScreenCover(isPresented: $isRenderPlayerExpanded) {
+                expandedRenderPlayerView
+            }
+            .alert(item: $voicePendingHide) { voice in
+                Alert(
+                    title: Text("Hide Voice?"),
+                    message: Text("\(voice.name) will be removed from the narration voice list. Reload iPhone Voices will bring it back."),
+                    primaryButton: .destructive(Text("Hide")) {
+                        viewModel.hideVoice(withId: voice.id)
+                    },
+                    secondaryButton: .cancel()
+                )
+            }
+            .alert(item: $pendingMediaDeletion) { item in
+                Alert(
+                    title: Text("Delete Media?"),
+                    message: Text("This removes \(viewModel.mediaDisplayLabel(for: item.id)) from the current project."),
+                    primaryButton: .destructive(Text("Delete")) {
+                        viewModel.removeMediaItem(withId: item.id)
+                    },
+                    secondaryButton: .cancel()
+                )
             }
             .onChange(of: selectedMusicVideoItem) { _, newValue in
                 guard let newValue else { return }
                 Task {
-                    await viewModel.importMusicVideo(from: newValue)
+                    let extractedURL = await viewModel.extractSoundtrackForExport(from: newValue)
                     await MainActor.run {
                         selectedMusicVideoItem = nil
-                        selectedStep = .music
+                        if let extractedURL {
+                            extractedSoundtrackShareFile = ShareableFile(url: extractedURL)
+                        }
                     }
                 }
             }
@@ -80,8 +120,10 @@ struct ContentView: View {
                     viewModel.stopMusicSilently()
                 }
                 if oldStep == .video && newStep != .video {
-                    renderPreviewPlayer.pause()
-                    renderPreviewPlayer.seek(to: .zero)
+                    pauseRenderPlaybackForTabSwitch()
+                }
+                if newStep == .video {
+                    updateRenderPreviewPlayer(for: activeRenderedVideoURL)
                 }
             }
             .onChange(of: viewModel.videoPreviewURL) { _, newValue in
@@ -89,6 +131,31 @@ struct ContentView: View {
             }
             .onChange(of: viewModel.exportedVideoURL) { _, newValue in
                 updateRenderPreviewPlayer(for: newValue ?? viewModel.videoPreviewURL)
+            }
+            .onChange(of: viewModel.isPreparingVideoPreview) { _, isPreparing in
+                if isPreparing {
+                    deactivateRenderPlaybackForNewRender()
+                }
+            }
+            .onChange(of: viewModel.isExportingVideo) { _, isExporting in
+                if isExporting {
+                    deactivateRenderPlaybackForNewRender()
+                }
+            }
+            .onChange(of: appendPhotoItems) { _, newItems in
+                let existingItems = viewModel.selectedPhotoItems
+                guard !newItems.isEmpty else { return }
+                guard newItems.count > existingItems.count else {
+                    appendPhotoItems = existingItems
+                    return
+                }
+                Task {
+                    let appendedItems = Array(newItems.dropFirst(existingItems.count))
+                    await viewModel.appendSelectedMedia(from: appendedItems, combinedSelection: newItems)
+                    await MainActor.run {
+                        appendPhotoItems = viewModel.selectedPhotoItems
+                    }
+                }
             }
         }
     }
@@ -136,41 +203,520 @@ struct ContentView: View {
     }
 
     private var brandHeader: some View {
-        HStack(spacing: 14) {
-            ZStack {
-                RoundedRectangle(cornerRadius: 20, style: .continuous)
-                    .fill(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.94, green: 0.46, blue: 0.22),
-                                Color(red: 0.79, green: 0.23, blue: 0.10)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        )
-                    )
-                    .frame(width: 56, height: 56)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .top, spacing: 12) {
+                HStack(spacing: 12) {
+                    FluxCutLogoMark(size: 48)
 
-                Image(systemName: "film.stack.fill")
-                    .font(.system(size: 24, weight: .bold))
-                    .foregroundStyle(.white)
+                    Text("FluxCut")
+                        .font(.title3.weight(.bold))
+                        .foregroundStyle(.primary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.85)
+                }
+
+                Spacer(minLength: 8)
+
+                Button {
+                    isNarrationFocused = false
+                    isSettingsPresented = true
+                } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 14, weight: .semibold))
+                        .foregroundStyle(.primary)
+                        .frame(width: 32, height: 32)
+                        .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Settings")
             }
 
-            VStack(alignment: .leading, spacing: 3) {
-                Text("FluxCut Studio")
-                    .font(.title2.weight(.bold))
-                    .foregroundStyle(.primary)
-                Text("Script. Media. Music. All in Flow.")
-                    .font(.subheadline.weight(.semibold))
-                    .foregroundStyle(.secondary)
-            }
-
-            Spacer()
+            Text("Script. Media. Music. All in Flow.")
+                .font(.subheadline.weight(.semibold))
+                .foregroundStyle(.secondary)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 14)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.white.opacity(0.58), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+    }
+
+    private var settingsSheet: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack {
+                        Text("App")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text("FluxCut")
+                    }
+                    HStack {
+                        Text("Version")
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(appVersionLabel)
+                    }
+                    Text("Manage voices, media, music, and exports from one place. Clear unused data here whenever storage grows too much.")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .padding(.vertical, 4)
+                } header: {
+                    Text("About")
+                }
+
+                Section {
+                    NavigationLink {
+                        storageSettingsView
+                    } label: {
+                        HStack(spacing: 12) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(Color.blue.opacity(0.12))
+                                    .frame(width: 34, height: 34)
+                                Image(systemName: "externaldrive.fill.badge.person.crop")
+                                    .font(.system(size: 15, weight: .bold))
+                                    .foregroundStyle(Color.blue.opacity(0.92))
+                            }
+
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Storage")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("Usage, unused data, and current project cleanup")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                    }
+                } header: {
+                    Text("Storage")
+                }
+            }
+            .navigationTitle("Settings")
+            .navigationBarTitleDisplayMode(.inline)
+            .onAppear {
+                viewModel.refreshStorageUsage()
+            }
+            .toolbar {
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button("Done") {
+                        isSettingsPresented = false
+                    }
+                }
+            }
+        }
+    }
+
+    private var storageSettingsView: some View {
+        List {
+            Section {
+                HStack {
+                    Text("Current Usage")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    if viewModel.isRefreshingStorageUsage {
+                        ProgressView()
+                            .controlSize(.small)
+                    } else {
+                        Text(viewModel.formattedStorageSize(viewModel.storageUsage.totalBytes))
+                            .font(.headline.weight(.semibold))
+                    }
+                }
+
+                HStack {
+                    Text("Documents")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(viewModel.formattedStorageSize(viewModel.storageUsage.documentsBytes))
+                }
+
+                HStack {
+                    Text("Caches")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(viewModel.formattedStorageSize(viewModel.storageUsage.cachesBytes))
+                }
+
+                HStack {
+                    Text("Temporary")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(viewModel.formattedStorageSize(viewModel.storageUsage.temporaryBytes))
+                }
+
+                Button {
+                    viewModel.refreshStorageUsage()
+                } label: {
+                    HStack {
+                        if viewModel.isRefreshingStorageUsage {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(viewModel.isRefreshingStorageUsage ? "Refreshing..." : "Refresh Storage")
+                    }
+                }
+                .disabled(viewModel.isRefreshingStorageUsage)
+            } header: {
+                Text("Storage Usage")
+            }
+
+            Section {
+                Text("Clear old rendered videos, narration preview files, extracted cache, and stale imported media copies that are no longer part of the current project.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
+
+                Button(role: .destructive) {
+                    viewModel.clearUnusedDataAndCache()
+                } label: {
+                    HStack {
+                        if viewModel.isClearingUnusedData {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(viewModel.isClearingUnusedData ? "Clearing..." : "Clear Unused Data and Cache")
+                    }
+                }
+                .disabled(viewModel.isClearingUnusedData)
+            } header: {
+                Text("Unused Data")
+            }
+
+            Section {
+                Text("Remove the active project's copied media, selected music working file, current preview, current final video, and narration preview data.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                    .padding(.vertical, 4)
+
+                Button(role: .destructive) {
+                    viewModel.clearCurrentProjectData()
+                } label: {
+                    HStack {
+                        if viewModel.isClearingCurrentProjectData {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                        Text(viewModel.isClearingCurrentProjectData ? "Clearing..." : "Clear Current Project Data")
+                    }
+                }
+                .disabled(viewModel.isClearingCurrentProjectData)
+            } header: {
+                Text("Current Project")
+            }
+
+            if !viewModel.storageCleanupFeedback.isEmpty {
+                Section {
+                    Text(viewModel.storageCleanupFeedback)
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                } header: {
+                    Text("Last Action")
+                }
+            }
+        }
+        .navigationTitle("Storage")
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            viewModel.refreshStorageUsage()
+        }
+    }
+
+    private var musicLibrarySheet: some View {
+        NavigationStack {
+            List {
+                Section {
+                    HStack {
+                        Text("\(filteredMusicLibraryItems.count) tracks available")
+                            .font(.headline.weight(.semibold))
+                        Spacer()
+                        if viewModel.isLoadingMusicLibrary {
+                            ProgressView()
+                                .controlSize(.small)
+                        }
+                    }
+
+                    Button {
+                        viewModel.refreshMusicLibrary()
+                    } label: {
+                        HStack {
+                            if viewModel.isLoadingMusicLibrary {
+                                ProgressView()
+                                    .controlSize(.small)
+                            }
+                            Text(viewModel.isLoadingMusicLibrary ? "Refreshing..." : "Refresh Music Library")
+                        }
+                    }
+                    .disabled(viewModel.isLoadingMusicLibrary)
+
+                    if !viewModel.musicLibraryFeedback.isEmpty {
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .font(.caption.weight(.bold))
+                                .foregroundStyle(Color.blue.opacity(0.92))
+                            Text(viewModel.musicLibraryFeedback)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.primary)
+                        }
+                        .padding(.vertical, 6)
+                    }
+                }
+
+                ForEach(filteredMusicLibraryItems) { item in
+                    Button {
+                        toggleMusicLibrarySelection(for: item)
+                    } label: {
+                        HStack(spacing: 12) {
+                            VStack(alignment: .leading, spacing: 4) {
+                                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                                    Text(item.name)
+                                        .font(.subheadline.weight(.semibold))
+                                        .foregroundStyle(.primary)
+                                        .lineLimit(1)
+
+                                    Spacer(minLength: 8)
+
+                                    Text(viewModel.formattedMusicDuration(item.duration))
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                }
+
+                                if let description = item.description, !description.isEmpty {
+                                    Text(description)
+                                        .font(.caption)
+                                        .foregroundStyle(.secondary)
+                                        .lineLimit(2)
+                                }
+                            }
+
+                            if selectedMusicLibraryItemIDs.contains(item.id) {
+                                Button {
+                                    if previewingMusicLibraryItemID != item.id {
+                                        viewModel.previewMusicLibraryItem(item)
+                                        previewingMusicLibraryItemID = item.id
+                                    }
+                                    if previewingMusicLibraryItemID == item.id, !viewModel.isMusicPlaying {
+                                        viewModel.toggleMusicPlayback()
+                                    } else if previewingMusicLibraryItemID == item.id {
+                                        viewModel.toggleMusicPlayback()
+                                    }
+                                } label: {
+                                    Image(systemName: isActivelyPreviewingMusicLibraryItem(item) ? "pause.fill" : "play.fill")
+                                        .font(.system(size: 14, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .frame(width: 38, height: 38)
+                                        .background(
+                                            LinearGradient(
+                                                colors: [
+                                                    Color(red: 0.30, green: 0.61, blue: 0.85),
+                                                    Color(red: 0.18, green: 0.39, blue: 0.73)
+                                                ],
+                                                startPoint: .topLeading,
+                                                endPoint: .bottomTrailing
+                                            ),
+                                            in: Circle()
+                                        )
+                                }
+                                .buttonStyle(.plain)
+                            }
+                        }
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 10)
+                        .padding(.vertical, 8)
+                        .background(
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .fill(selectedMusicLibraryItemIDs.contains(item.id) ? Color.blue.opacity(0.14) : Color.white.opacity(0.001))
+                        )
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                .stroke(selectedMusicLibraryItemIDs.contains(item.id) ? Color.blue.opacity(0.28) : Color.clear, lineWidth: 1)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                        if item.source == .imported {
+                            Button(role: .destructive) {
+                                pendingMusicLibraryDeletion = item
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
+                }
+            }
+            .navigationTitle("Music Library")
+            .navigationBarTitleDisplayMode(.inline)
+            .fileImporter(
+                isPresented: $isMusicLibraryImporterPresented,
+                allowedContentTypes: [.audio, .mpeg4Audio, .mp3, .wav],
+                allowsMultipleSelection: true
+            ) { result in
+                if case let .success(urls) = result, !urls.isEmpty {
+                    viewModel.importMusicToLibrary(from: urls)
+                    selectedStep = .music
+                }
+            }
+            .searchable(text: $musicLibrarySearchText, prompt: "Search music")
+            .onAppear {
+                viewModel.refreshMusicLibrary()
+            }
+            .alert(item: $pendingMusicLibraryDeletion) { item in
+                Alert(
+                    title: Text("Delete Music?"),
+                    message: Text("\(item.name) will be removed from Music Library."),
+                    primaryButton: .destructive(Text("Delete")) {
+                        viewModel.deleteMusicLibraryItem(item)
+                    },
+                    secondaryButton: .cancel()
+                )
+            }
+            .sheet(item: $extractedSoundtrackShareFile) { file in
+                ShareSheet(items: [file.url])
+            }
+            .onDisappear {
+                selectedMusicLibraryItemIDs = []
+                previewingMusicLibraryItemID = nil
+                musicLibrarySearchText = ""
+                viewModel.restoreProjectMusicAfterLibraryPreview()
+            }
+            .toolbar {
+                ToolbarItem(placement: .navigationBarLeading) {
+                    Button("Exit") {
+                        isMusicBrowserPresented = false
+                    }
+                    .fontWeight(.semibold)
+                }
+                ToolbarItem(placement: .navigationBarTrailing) {
+                    Button {
+                        guard !selectedMusicLibrarySelections.isEmpty else { return }
+                        viewModel.addMusicLibraryItems(selectedMusicLibrarySelections)
+                        selectedMusicLibraryItemIDs = []
+                        isMusicBrowserPresented = false
+                    } label: {
+                        Image(systemName: "plus.circle.fill")
+                            .fontWeight(.semibold)
+                    }
+                    .disabled(selectedMusicLibrarySelections.isEmpty)
+                }
+            }
+            .safeAreaInset(edge: .bottom) {
+                HStack(spacing: 12) {
+                    PhotosPicker(
+                        selection: $selectedMusicVideoItem,
+                        matching: .videos,
+                        photoLibrary: PHPhotoLibrary.shared()
+                    ) {
+                        Label("Extract Soundtracks", systemImage: "film.badge.plus")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.bordered)
+                    .tint(Color(red: 0.44, green: 0.36, blue: 0.78))
+                    .disabled(viewModel.isImportingMusic)
+
+                    Button {
+                        isMusicLibraryImporterPresented = true
+                    } label: {
+                        Label("Import", systemImage: "square.and.arrow.down")
+                            .font(.subheadline.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color(red: 0.19, green: 0.48, blue: 0.82))
+                    .disabled(viewModel.isImportingMusic)
+                }
+                .padding(.horizontal, 16)
+                .padding(.top, 10)
+                .padding(.bottom, 12)
+                .background(.ultraThinMaterial)
+            }
+        }
+    }
+
+    private var filteredMusicLibraryItems: [AppViewModel.MusicLibraryItem] {
+        let query = musicLibrarySearchText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !query.isEmpty else { return viewModel.musicLibraryItems }
+        return viewModel.musicLibraryItems.filter { item in
+            item.name.localizedCaseInsensitiveContains(query)
+                || (item.description?.localizedCaseInsensitiveContains(query) ?? false)
+        }
+    }
+
+    private var selectedMusicLibrarySelections: [AppViewModel.MusicLibraryItem] {
+        viewModel.musicLibraryItems.filter { selectedMusicLibraryItemIDs.contains($0.id) }
+    }
+
+    private func toggleMusicLibrarySelection(for item: AppViewModel.MusicLibraryItem) {
+        if selectedMusicLibraryItemIDs.contains(item.id) {
+            selectedMusicLibraryItemIDs.remove(item.id)
+            if previewingMusicLibraryItemID == item.id {
+                previewingMusicLibraryItemID = nil
+                viewModel.stopMusicSilently()
+            }
+        } else {
+            selectedMusicLibraryItemIDs.insert(item.id)
+        }
+    }
+
+    private func isActivelyPreviewingMusicLibraryItem(_ item: AppViewModel.MusicLibraryItem) -> Bool {
+        previewingMusicLibraryItemID == item.id && viewModel.isMusicPlaying
+    }
+
+    private var expandedRenderPlayerView: some View {
+        ZStack {
+            Color.black.opacity(0.96)
+                .ignoresSafeArea()
+
+            FullscreenPlayerContainer(player: renderPreviewPlayer)
+                .ignoresSafeArea()
+
+            VStack(spacing: 0) {
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(viewModel.exportedVideoURL != nil ? "Final Video" : "Preview Sample")
+                            .font(.headline.weight(.bold))
+                            .foregroundStyle(.white)
+                        Text("Fullscreen playback")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.white.opacity(0.72))
+                    }
+
+                    Spacer()
+
+                    Button {
+                        dismissExpandedRenderPlayer()
+                    } label: {
+                        Image(systemName: "arrow.down.right.and.arrow.up.left")
+                            .font(.system(size: 15, weight: .bold))
+                            .padding(12)
+                            .background(Color.white.opacity(0.14), in: Capsule())
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                }
+                .padding(.horizontal, 20)
+                .padding(.top, 24)
+
+                Spacer()
+            }
+        }
+        .interactiveDismissDisabled(viewModel.isExportingVideo || viewModel.isPreparingVideoPreview)
+    }
+
+    private var appVersionLabel: String {
+        let shortVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String
+        let buildNumber = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String
+
+        switch (shortVersion, buildNumber) {
+        case let (.some(version), .some(build)):
+            return "\(version) (\(build))"
+        case let (.some(version), .none):
+            return version
+        case let (.none, .some(build)):
+            return build
+        default:
+            return "1.0"
+        }
     }
 
     @ViewBuilder
@@ -193,44 +739,47 @@ struct ContentView: View {
                 Text("Media")
                     .font(.title2.weight(.semibold))
                 Spacer()
-                PhotosPicker(
-                    selection: $viewModel.selectedPhotoItems,
-                    maxSelectionCount: nil,
-                    selectionBehavior: .ordered,
-                    matching: .any(of: [.images, .videos])
-                ) {
-                    HStack(spacing: 10) {
-                        ZStack {
-                            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                .fill(.white.opacity(0.18))
-                                .frame(width: 30, height: 30)
-                            Image(systemName: "square.stack.3d.up.fill")
-                                .font(.system(size: 14, weight: .bold))
+                if viewModel.mediaItems.isEmpty {
+                    PhotosPicker(
+                        selection: $viewModel.selectedPhotoItems,
+                        maxSelectionCount: nil,
+                        selectionBehavior: .ordered,
+                        matching: .any(of: [.images, .videos]),
+                        photoLibrary: PHPhotoLibrary.shared()
+                    ) {
+                        HStack(spacing: 10) {
+                            ZStack {
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(.white.opacity(0.18))
+                                    .frame(width: 30, height: 30)
+                                Image(systemName: "square.stack.3d.up.fill")
+                                    .font(.system(size: 14, weight: .bold))
+                            }
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text("Import Media")
+                                    .font(.subheadline.weight(.semibold))
+                                Text("Photos and videos")
+                                    .font(.caption2)
+                                    .foregroundStyle(.white.opacity(0.82))
+                            }
                         }
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Import Media")
-                                .font(.subheadline.weight(.semibold))
-                            Text("Photos and videos")
-                                .font(.caption2)
-                                .foregroundStyle(.white.opacity(0.82))
-                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
                     }
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
+                    .buttonStyle(.plain)
+                    .foregroundStyle(.white)
+                    .background(
+                        LinearGradient(
+                            colors: [
+                                Color(red: 0.94, green: 0.46, blue: 0.22),
+                                Color(red: 0.80, green: 0.26, blue: 0.10)
+                            ],
+                            startPoint: .topLeading,
+                            endPoint: .bottomTrailing
+                        ),
+                        in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+                    )
                 }
-                .buttonStyle(.plain)
-                .foregroundStyle(.white)
-                .background(
-                    LinearGradient(
-                        colors: [
-                            Color(red: 0.94, green: 0.46, blue: 0.22),
-                            Color(red: 0.80, green: 0.26, blue: 0.10)
-                        ],
-                        startPoint: .topLeading,
-                        endPoint: .bottomTrailing
-                    ),
-                    in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-                )
             }
 
             VStack(alignment: .leading, spacing: 10) {
@@ -330,11 +879,6 @@ struct ContentView: View {
                 RoundedRectangle(cornerRadius: 24, style: .continuous)
                     .fill(Color.white.opacity(0.65))
                     .frame(maxHeight: .infinity)
-                    .overlay {
-                        Text("Your selected media will appear here.")
-                            .font(.headline)
-                            .foregroundStyle(.secondary)
-                    }
             } else {
                 VStack(spacing: 14) {
                     TabView(selection: $viewModel.currentSlideIndex) {
@@ -359,9 +903,34 @@ struct ContentView: View {
                                         .padding(14)
                                 }
                             }
+                            .overlay(alignment: .topTrailing) {
+                                if viewModel.currentSlideIndex == index {
+                                    Menu {
+                                        Button {
+                                            viewModel.duplicateMediaItem(withId: item.id)
+                                        } label: {
+                                            Label("Duplicate", systemImage: "plus.square.on.square")
+                                        }
+
+                                        Button(role: .destructive) {
+                                            pendingMediaDeletion = item
+                                        } label: {
+                                            Label("Delete", systemImage: "trash")
+                                        }
+                                    } label: {
+                                        Image(systemName: "ellipsis")
+                                            .font(.caption.weight(.bold))
+                                            .foregroundStyle(.white)
+                                            .frame(width: 30, height: 30)
+                                            .background(Color.black.opacity(0.62), in: Circle())
+                                    }
+                                    .buttonStyle(.plain)
+                                    .padding(14)
+                                }
+                            }
                             .overlay(alignment: .bottomTrailing) {
                                 HStack(spacing: 8) {
-                                    Text("#\(index + 1)")
+                                    Text(viewModel.mediaDisplayLabel(for: item.id))
                                         .font(.caption.weight(.bold))
                                         .padding(.horizontal, 10)
                                         .padding(.vertical, 6)
@@ -400,6 +969,22 @@ struct ContentView: View {
                                         )
                                     )
                             }
+
+                            PhotosPicker(
+                                selection: $appendPhotoItems,
+                                maxSelectionCount: nil,
+                                selectionBehavior: .ordered,
+                                matching: .any(of: [.images, .videos]),
+                                photoLibrary: PHPhotoLibrary.shared()
+                            ) {
+                                mediaAppendThumbnail
+                            }
+                            .buttonStyle(.plain)
+                            .simultaneousGesture(
+                                TapGesture().onEnded {
+                                    appendPhotoItems = viewModel.selectedPhotoItems
+                                }
+                            )
                         }
                         .padding(.vertical, 4)
                     }
@@ -430,8 +1015,14 @@ struct ContentView: View {
             Image(uiImage: item.previewImage)
                 .resizable()
                 .scaledToFit()
-        case let .video(url, _):
-            LoopingVideoPreview(url: url, placeholder: item.previewImage, isActive: isActive)
+        case let .video(url, _, _):
+            if let url {
+                LoopingVideoPreview(url: url, placeholder: item.previewImage, isActive: isActive)
+            } else {
+                Image(uiImage: item.previewImage)
+                    .resizable()
+                    .scaledToFit()
+            }
         }
     }
 
@@ -462,7 +1053,7 @@ struct ContentView: View {
         }
         .frame(width: 78, height: 78)
         .overlay(alignment: .bottomTrailing) {
-            Text("\(index + 1)")
+            Text(viewModel.mediaDisplayLabel(for: item.id))
                 .font(.caption2.weight(.bold))
                 .padding(.horizontal, 7)
                 .padding(.vertical, 4)
@@ -472,6 +1063,25 @@ struct ContentView: View {
         }
         .onTapGesture {
             viewModel.currentSlideIndex = index
+        }
+    }
+
+    private var mediaAppendThumbnail: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.white.opacity(0.72))
+                .frame(width: 78, height: 78)
+                .overlay {
+                    RoundedRectangle(cornerRadius: 18, style: .continuous)
+                        .stroke(
+                            Color.orange.opacity(0.55),
+                            style: StrokeStyle(lineWidth: 2, dash: [6, 4])
+                        )
+                }
+
+            Image(systemName: "plus")
+                .font(.system(size: 22, weight: .bold))
+                .foregroundStyle(Color.orange)
         }
     }
 
@@ -495,7 +1105,7 @@ struct ContentView: View {
                             .foregroundStyle(Color.orange.opacity(0.92))
                     }
                     VStack(alignment: .leading, spacing: 1) {
-                        Text("Voice")
+                        Text("Narration Voice")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         Text(viewModel.selectedVoiceName)
@@ -542,64 +1152,149 @@ struct ContentView: View {
             .padding(.vertical, 7)
             .background(Color.white.opacity(0.72), in: Capsule())
 
-            DisclosureGroup(isExpanded: $isVoiceListExpanded) {
-                ScrollView {
-                    VStack(spacing: 8) {
-                        ForEach(viewModel.availableVoices) { option in
-                            HStack(spacing: 10) {
-                                Button {
-                                    viewModel.selectedVoiceIdentifier = option.id
-                                    isVoiceListExpanded = false
-                                    isNarrationFocused = false
-                                } label: {
-                                    HStack {
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            Text(option.name)
-                                                .font(.headline)
-                                                .foregroundStyle(.primary)
-                                            Text("\(option.qualityLabel) • \(option.languageLabel)\(option.isFallback ? " • Fallback" : "")")
-                                                .font(.caption)
-                                                .foregroundStyle(.secondary)
-                                        }
-                                        Spacer()
-                                        if option.id == viewModel.selectedVoiceIdentifier {
-                                            Image(systemName: "checkmark.circle.fill")
-                                                .foregroundStyle(.orange)
-                                        }
-                                    }
-                                    .padding(12)
-                                    .background(
-                                        Color.white.opacity(option.id == viewModel.selectedVoiceIdentifier ? 0.95 : 0.72),
-                                        in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                    )
-                                }
-                                .buttonStyle(.plain)
-
-                                Button {
-                                    viewModel.hideVoice(withId: option.id)
-                                } label: {
-                                    Image(systemName: "trash.circle.fill")
-                                        .font(.system(size: 20, weight: .semibold))
-                                        .foregroundStyle(viewModel.canHideVoices ? Color.red.opacity(0.88) : Color.gray.opacity(0.55))
-                                }
-                                .buttonStyle(.plain)
-                                .disabled(!viewModel.canHideVoices)
-                            }
-                        }
-                    }
-                    .padding(.top, 8)
+            if let narrationLanguageWarning = viewModel.narrationLanguageWarning {
+                HStack(spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 12, weight: .bold))
+                    Text(narrationLanguageWarning)
+                        .font(.caption.weight(.semibold))
                 }
-                .frame(maxHeight: 180)
-            } label: {
-                HStack {
-                    Text("Selected voice")
+                .foregroundStyle(Color.orange.opacity(0.92))
+                .padding(.horizontal, 10)
+                .padding(.vertical, 7)
+                .background(Color.white.opacity(0.72), in: Capsule())
+            }
+
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 10) {
+                    Text("Language")
                         .font(.subheadline.weight(.semibold))
                     Spacer()
-                    Text(viewModel.selectedVoiceName)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
+                    Menu {
+                        ForEach(viewModel.availableVoiceLanguages) { language in
+                            Button {
+                                viewModel.selectVoiceLanguage(language.id)
+                                isNarrationFocused = false
+                            } label: {
+                                if language.id == viewModel.selectedVoiceLanguage {
+                                    Label("\(language.label) (\(language.voiceCount))", systemImage: "checkmark")
+                                } else {
+                                    Text("\(language.label) (\(language.voiceCount))")
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(viewModel.selectedVoiceLanguageLabel)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(Color.white.opacity(0.82), in: Capsule())
+                    }
+                    .disabled(viewModel.availableVoiceLanguages.isEmpty)
                 }
+
+                HStack(spacing: 10) {
+                    Text("Speed")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Menu {
+                        ForEach(viewModel.narrationSpeedOptions) { option in
+                            Button {
+                                viewModel.selectedNarrationSpeed = option.multiplier
+                                isNarrationFocused = false
+                            } label: {
+                                if option.multiplier == viewModel.selectedNarrationSpeed {
+                                    Label(option.label, systemImage: "checkmark")
+                                } else {
+                                    Text(option.label)
+                                }
+                            }
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            Text(viewModel.selectedNarrationSpeedLabel)
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.primary)
+                            Image(systemName: "chevron.up.chevron.down")
+                                .font(.system(size: 11, weight: .bold))
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 9)
+                        .background(Color.white.opacity(0.82), in: Capsule())
+                    }
+                }
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Voice")
+                        .font(.subheadline.weight(.semibold))
+                    ScrollView {
+                        VStack(spacing: 8) {
+                            ForEach(viewModel.voicesForSelectedLanguage) { option in
+                                HStack(spacing: 10) {
+                                    Button {
+                                        viewModel.selectedVoiceIdentifier = option.id
+                                        isNarrationFocused = false
+                                    } label: {
+                                        HStack(spacing: 12) {
+                                            VStack(alignment: .leading, spacing: 4) {
+                                                Text(option.name)
+                                                    .font(.headline)
+                                                    .foregroundStyle(.primary)
+                                                HStack(spacing: 6) {
+                                                    Text(option.qualityLabel)
+                                                        .font(.caption.weight(.semibold))
+                                                    if option.regionLabel != option.languageLabel {
+                                                        Text(option.regionLabel)
+                                                            .font(.caption)
+                                                    }
+                                                }
+                                                .foregroundStyle(.secondary)
+                                            }
+                                            Spacer()
+                                            if option.id == viewModel.selectedVoiceIdentifier {
+                                                Image(systemName: "checkmark.circle.fill")
+                                                    .foregroundStyle(.orange)
+                                            }
+                                        }
+                                        .padding(12)
+                                        .background(
+                                            Color.white.opacity(option.id == viewModel.selectedVoiceIdentifier ? 0.95 : 0.72),
+                                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                        )
+                                    }
+                                    .buttonStyle(.plain)
+
+                                    Menu {
+                                        Button(role: .destructive) {
+                                            voicePendingHide = option
+                                        } label: {
+                                            Label("Hide Voice", systemImage: "eye.slash")
+                                        }
+                                    } label: {
+                                        Image(systemName: "ellipsis.circle")
+                                            .font(.system(size: 20, weight: .semibold))
+                                            .foregroundStyle(Color.secondary.opacity(0.85))
+                                            .padding(4)
+                                    }
+                                    .disabled(!viewModel.canHideVoices)
+                                }
+                            }
+                        }
+                        .padding(.top, 2)
+                    }
+                    .frame(maxHeight: 180)
+                }
+
+                Text("Use the more button to hide a voice. Reload iPhone Voices brings hidden voices back.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
             }
             .onAppear {
                 viewModel.loadAvailableVoicesIfNeeded()
@@ -689,6 +1384,8 @@ struct ContentView: View {
                 ) {
                     viewModel.playNarration()
                 }
+                .opacity(viewModel.canPlayNarration ? 1 : 0.6)
+                .disabled(!viewModel.canPlayNarration)
 
                 inlineScriptActionButton(title: "Introduction", systemImage: "text.badge.plus") {
                     viewModel.loadSampleNarration()
@@ -697,23 +1394,36 @@ struct ContentView: View {
             .disabled(viewModel.isPreparingNarrationPreview)
 
             HStack(spacing: 10) {
-                scriptJumpButton(title: "Top", systemImage: "arrow.up.to.line") {
+                scriptJumpButton(
+                    title: isNarrationPreviewSectionVisible ? "Hide Preview" : "Preview",
+                    systemImage: isNarrationPreviewSectionVisible ? "eye.slash" : "waveform.path.ecg"
+                ) {
+                    isNarrationFocused = false
                     withAnimation(.easeInOut(duration: 0.25)) {
-                        scriptScrollProxy?.scrollTo("script-top", anchor: .top)
+                        isNarrationPreviewSectionVisible.toggle()
+                    }
+                    if !isNarrationPreviewSectionVisible {
+                        viewModel.stopNarrationPreview()
+                    } else {
+                        DispatchQueue.main.async {
+                            withAnimation(.easeInOut(duration: 0.25)) {
+                                scriptScrollProxy?.scrollTo("script-preview", anchor: .top)
+                            }
+                        }
                     }
                 }
 
-                scriptJumpButton(title: "Preview", systemImage: "waveform.path.ecg") {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        scriptScrollProxy?.scrollTo("script-preview", anchor: .top)
+                scriptJumpButton(title: "Clean Up", systemImage: "wand.and.stars") {
+                    isNarrationFocused = false
+                    viewModel.cleanupNarrationText()
+                    DispatchQueue.main.async {
+                        withAnimation(.easeInOut(duration: 0.25)) {
+                            scriptScrollProxy?.scrollTo("script-top", anchor: .top)
+                        }
                     }
                 }
-
-                scriptJumpButton(title: "Bottom", systemImage: "arrow.down.to.line") {
-                    withAnimation(.easeInOut(duration: 0.25)) {
-                        scriptScrollProxy?.scrollTo("script-bottom", anchor: .bottom)
-                    }
-                }
+                .opacity(viewModel.narrationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? 0.6 : 1)
+                .disabled(viewModel.narrationText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
             }
 
             TextEditor(text: $viewModel.narrationText)
@@ -722,9 +1432,14 @@ struct ContentView: View {
                 .scrollContentBackground(.hidden)
                 .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .focused($isNarrationFocused)
+                .onTapGesture {
+                    isNarrationFocused = true
+                }
 
-            narrationPreviewSection
-                .id("script-preview")
+            if isNarrationPreviewSectionVisible {
+                narrationPreviewSection
+                    .id("script-preview")
+            }
 
             Color.clear
                 .frame(height: 1)
@@ -733,6 +1448,10 @@ struct ContentView: View {
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(Color.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+        .contentShape(Rectangle())
+        .onTapGesture {
+            isNarrationFocused = false
+        }
     }
 
     private var narrationPreviewSection: some View {
@@ -765,7 +1484,8 @@ struct ContentView: View {
             .buttonStyle(.plain)
             .foregroundStyle(.white)
             .background(Color.purple, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .disabled(viewModel.isPreparingNarrationPreview)
+            .opacity(viewModel.canBuildNarrationPreview ? 1 : 0.6)
+            .disabled(!viewModel.canBuildNarrationPreview)
 
             HStack(spacing: 12) {
                 previewControlButton(
@@ -826,8 +1546,7 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
 
                 ScrollView {
-                    Text(viewModel.narrationPreviewCaption)
-                        .font(.body.weight(.semibold))
+                    narrationPreviewCaptionStyledText(viewModel.narrationPreviewCaption, style: viewModel.captionStyle)
                         .lineLimit(nil)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -1028,6 +1747,64 @@ struct ContentView: View {
         )
     }
 
+    private var videoModeExportCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "slider.horizontal.3")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Color.green.opacity(0.92))
+                Text("Video Mode Export")
+                    .font(.subheadline.weight(.bold))
+                    .foregroundStyle(.primary)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Frame Rate")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Picker("Frame Rate", selection: $viewModel.selectedVideoModeFrameRate) {
+                    ForEach(VideoExporter.VideoModeFrameRate.allCases) { option in
+                        Text(option.displayName).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Resolution")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Picker("Resolution", selection: $viewModel.selectedVideoModeResolution) {
+                    ForEach(VideoExporter.VideoModeResolution.allCases) { option in
+                        Text(option.rawValue).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Quality")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Picker("Quality", selection: $viewModel.selectedVideoModeQuality) {
+                    ForEach(VideoExporter.VideoModeQuality.allCases) { option in
+                        Text(option.rawValue).tag(option)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+        }
+        .padding(14)
+        .background(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .fill(Color.green.opacity(0.10))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 18, style: .continuous)
+                .stroke(Color.green.opacity(0.25), lineWidth: 1)
+        )
+    }
+
     private var estimatedExportSpecCard: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Estimated Export Spec")
@@ -1049,150 +1826,16 @@ struct ContentView: View {
                 .font(.title2.weight(.semibold))
 
             VStack(alignment: .leading, spacing: 10) {
-                HStack(spacing: 10) {
-                    ZStack {
-                        Circle()
-                            .fill(Color.blue.opacity(0.14))
-                            .frame(width: 30, height: 30)
-                        Image(systemName: "music.note")
-                            .font(.system(size: 14, weight: .bold))
-                            .foregroundStyle(Color.blue.opacity(0.92))
-                    }
-                    VStack(alignment: .leading, spacing: 1) {
-                        Text("Current Track")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        Text(viewModel.importedMusicName)
-                            .font(.subheadline.weight(.semibold))
-                            .foregroundStyle(.primary)
-                            .lineLimit(2)
-                            .truncationMode(.middle)
-                    }
-                }
-
-                VStack(spacing: 12) {
-                    Button {
-                        isMusicImporterPresented = true
-                    } label: {
-                        HStack(spacing: 10) {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(.white.opacity(0.18))
-                                    .frame(width: 30, height: 30)
-                                Image(systemName: "waveform.badge.plus")
-                                    .font(.system(size: 14, weight: .bold))
-                            }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Import Audio")
-                                    .font(.subheadline.weight(.semibold))
-                            }
-                            Spacer()
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.white)
-                    .background(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.20, green: 0.45, blue: 0.86),
-                                Color(red: 0.12, green: 0.24, blue: 0.62)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    )
-                    .disabled(viewModel.isImportingMusic)
-                    .opacity(viewModel.isImportingMusic ? 0.55 : 1)
-
-                    PhotosPicker(
-                        selection: $selectedMusicVideoItem,
-                        matching: .videos
-                    ) {
-                        HStack(spacing: 10) {
-                            ZStack {
-                                RoundedRectangle(cornerRadius: 10, style: .continuous)
-                                    .fill(.white.opacity(0.18))
-                                    .frame(width: 30, height: 30)
-                                Image(systemName: "film.badge.plus")
-                                    .font(.system(size: 14, weight: .bold))
-                            }
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text("Import Video")
-                                    .font(.subheadline.weight(.semibold))
-                            }
-                            Spacer()
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 10)
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(.white)
-                    .background(
-                        LinearGradient(
-                            colors: [
-                                Color(red: 0.30, green: 0.56, blue: 0.82),
-                                Color(red: 0.13, green: 0.31, blue: 0.52)
-                            ],
-                            startPoint: .topLeading,
-                            endPoint: .bottomTrailing
-                        ),
-                        in: RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    )
-                    .disabled(viewModel.isImportingMusic)
-                    .opacity(viewModel.isImportingMusic ? 0.55 : 1)
-                }
-
+                musicHeaderCard
+                musicActionButtons
                 if viewModel.isImportingMusic {
-                    HStack(spacing: 8) {
-                        ProgressView()
-                            .scaleEffect(0.8)
-                        Text("Preparing soundtrack...")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(Color.blue.opacity(0.9))
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 7)
-                    .background(Color.white.opacity(0.72), in: Capsule())
+                    musicImportingPill
                 }
-
+                if !viewModel.soundtrackItems.isEmpty {
+                    soundtrackQueueCard
+                }
                 if viewModel.hasSelectedMusic {
-                    Button {
-                        viewModel.clearMusicSelection()
-                    } label: {
-                        HStack(spacing: 10) {
-                            ZStack {
-                                Circle()
-                                    .fill(Color.red.opacity(0.14))
-                                    .frame(width: 30, height: 30)
-                                Image(systemName: "trash.fill")
-                                    .font(.system(size: 13, weight: .bold))
-                                    .foregroundStyle(Color.red.opacity(0.92))
-                            }
-                            VStack(alignment: .leading, spacing: 1) {
-                                Text("Clear Music")
-                                    .font(.subheadline.weight(.semibold))
-                                    .foregroundStyle(.primary)
-                                Text("Export with narration only")
-                                    .font(.caption2)
-                                    .foregroundStyle(.secondary)
-                            }
-                            Spacer()
-                            Image(systemName: "arrow.clockwise")
-                                .font(.caption.weight(.bold))
-                                .foregroundStyle(.secondary)
-                        }
-                        .padding(.horizontal, 14)
-                        .padding(.vertical, 11)
-                        .background(Color.white.opacity(0.86), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-                        .overlay {
-                            RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                .stroke(Color.red.opacity(0.12), lineWidth: 1)
-                        }
-                    }
-                    .buttonStyle(.plain)
+                    clearMusicButton
                 }
             }
             .padding(.horizontal, 14)
@@ -1200,21 +1843,8 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(Color.white.opacity(0.58), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Built-In Soundtracks")
-                    .font(.headline)
-                Picker("Demo Track", selection: $viewModel.selectedDemoTrackID) {
-                    ForEach(viewModel.demoTracks) { track in
-                        Text("\(track.name) • \(track.description)").tag(track.id)
-                    }
-                }
-                .pickerStyle(.menu)
-            }
-            .padding(14)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-            .onChange(of: viewModel.selectedDemoTrackID) { _, _ in
-                viewModel.loadSelectedBundledMusic()
+            if viewModel.hasSelectedMusic {
+                soundtrackReviewCard
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -1292,6 +1922,279 @@ struct ContentView: View {
         .background(Color.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
     }
 
+    private var musicHeaderCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(alignment: .center, spacing: 12) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                        .fill(
+                            LinearGradient(
+                                colors: [
+                                    Color(red: 0.20, green: 0.45, blue: 0.86),
+                                    Color(red: 0.12, green: 0.24, blue: 0.62)
+                                ],
+                                startPoint: .topLeading,
+                                endPoint: .bottomTrailing
+                            )
+                        )
+                        .frame(width: 44, height: 44)
+
+                    Image(systemName: "music.note")
+                        .font(.system(size: 18, weight: .bold))
+                        .foregroundStyle(.white)
+                }
+
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Current Music")
+                        .font(.caption.weight(.bold))
+                        .foregroundStyle(Color.white.opacity(0.82))
+                        .textCase(.uppercase)
+                        .tracking(0.6)
+
+                    Text(viewModel.importedMusicName)
+                        .font(.headline.weight(.semibold))
+                        .foregroundStyle(.white)
+                        .lineLimit(2)
+                        .truncationMode(.middle)
+                }
+
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 8) {
+                Image(systemName: viewModel.hasSelectedMusic ? "waveform.circle.fill" : "sparkles")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(Color.white.opacity(0.88))
+                Text(viewModel.hasSelectedMusic ? "Ready for soundtrack mixing" : "No music selected yet")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(Color.white.opacity(0.88))
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            LinearGradient(
+                colors: [
+                    Color(red: 0.22, green: 0.49, blue: 0.86),
+                    Color(red: 0.12, green: 0.27, blue: 0.58)
+                ],
+                startPoint: .topLeading,
+                endPoint: .bottomTrailing
+            ),
+            in: RoundedRectangle(cornerRadius: 20, style: .continuous)
+        )
+        .overlay {
+            RoundedRectangle(cornerRadius: 20, style: .continuous)
+                .stroke(Color.white.opacity(0.14), lineWidth: 1)
+        }
+    }
+
+    private var musicActionButtons: some View {
+        VStack(spacing: 12) {
+            Button {
+                viewModel.refreshMusicLibrary()
+                isMusicBrowserPresented = true
+            } label: {
+                musicActionLabel(title: "Music Library", systemImage: "music.note.list")
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(.white)
+            .background(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.23, green: 0.58, blue: 0.63),
+                        Color(red: 0.11, green: 0.35, blue: 0.39)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                in: RoundedRectangle(cornerRadius: 18, style: .continuous)
+            )
+            .disabled(viewModel.isImportingMusic)
+        }
+    }
+
+    private var musicImportingPill: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .scaleEffect(0.8)
+            Text("Preparing soundtrack...")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.blue.opacity(0.9))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .background(Color.white.opacity(0.72), in: Capsule())
+    }
+
+    private var soundtrackQueueCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Soundtrack Queue")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text("\(viewModel.soundtrackItems.count) track\(viewModel.soundtrackItems.count == 1 ? "" : "s") in order")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                if viewModel.soundtrackItems.count > 1 {
+                    Text("Drag to reorder")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(spacing: 10) {
+                ForEach(viewModel.soundtrackItems) { item in
+                    soundtrackQueueRow(for: item)
+                }
+            }
+        }
+        .padding(14)
+        .background(Color.white.opacity(0.64), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var soundtrackReviewCard: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Soundtrack Review")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("\(viewModel.formattedMusicDuration(viewModel.musicPlaybackCurrentTime)) / \(viewModel.formattedMusicDuration(viewModel.musicPlaybackDuration))")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
+
+            Slider(
+                value: Binding(
+                    get: { viewModel.musicPlaybackCurrentTime },
+                    set: { viewModel.seekMusic(to: $0) }
+                ),
+                in: 0...max(viewModel.musicPlaybackDuration, 0.1)
+            )
+            .tint(.blue)
+            .disabled(viewModel.musicPlaybackDuration <= 0)
+        }
+        .padding(14)
+        .background(Color.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var clearMusicButton: some View {
+        Button {
+            viewModel.clearMusicSelection()
+        } label: {
+            HStack(spacing: 10) {
+                ZStack {
+                    Circle()
+                        .fill(Color.red.opacity(0.14))
+                        .frame(width: 30, height: 30)
+                    Image(systemName: "trash.fill")
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(Color.red.opacity(0.92))
+                }
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Clear Music")
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                    Text("Export with narration only")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Image(systemName: "arrow.clockwise")
+                    .font(.caption.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 11)
+            .background(Color.white.opacity(0.86), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(Color.red.opacity(0.12), lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func musicActionLabel(title: String, systemImage: String) -> some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(.white.opacity(0.18))
+                    .frame(width: 30, height: 30)
+                Image(systemName: systemImage)
+                    .font(.system(size: 14, weight: .bold))
+            }
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title)
+                    .font(.subheadline.weight(.semibold))
+            }
+            Spacer()
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+    }
+
+    private func soundtrackQueueRow(for item: AppViewModel.SoundtrackItem) -> some View {
+        HStack(spacing: 10) {
+            ZStack {
+                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    .fill(Color.blue.opacity(0.12))
+                    .frame(width: 34, height: 34)
+                Image(systemName: "music.note")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(Color.blue.opacity(0.9))
+            }
+
+            VStack(alignment: .leading, spacing: 3) {
+                Text(item.name)
+                    .font(.subheadline.weight(.semibold))
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                Text(viewModel.formattedMusicDuration(item.duration))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Spacer()
+
+            Button {
+                viewModel.removeSoundtrackItem(withId: item.id)
+            } label: {
+                Image(systemName: "minus.circle.fill")
+                    .font(.system(size: 18, weight: .semibold))
+                    .foregroundStyle(Color.red.opacity(0.9))
+            }
+            .buttonStyle(.plain)
+
+            Image(systemName: "line.3.horizontal")
+                .font(.system(size: 14, weight: .semibold))
+                .foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .background(Color.white.opacity(0.88), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay {
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .stroke(Color.black.opacity(0.05), lineWidth: 1)
+        }
+        .onDrag {
+            draggedSoundtrackItem = item
+            return NSItemProvider(object: item.id.uuidString as NSString)
+        }
+        .onDrop(
+            of: [.text],
+            delegate: SoundtrackReorderDropDelegate(
+                targetItem: item,
+                draggedItem: $draggedSoundtrackItem,
+                viewModel: viewModel
+            )
+        )
+    }
+
     private var videoSection: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Video")
@@ -1319,7 +2222,12 @@ struct ContentView: View {
 
                 videoAspectRatioCard
                 videoTimingModeCard
-                videoQualityCard
+                if viewModel.selectedTimingMode == .video || viewModel.selectedTimingMode == .realLife {
+                    videoModeExportCard
+                }
+                if viewModel.selectedTimingMode == .story {
+                    videoQualityCard
+                }
                 estimatedExportSpecCard
             }
             .padding(.horizontal, 14)
@@ -1342,8 +2250,30 @@ struct ContentView: View {
                     }
                 }
                 .toggleStyle(.switch)
-                .disabled(viewModel.selectedTimingMode != .story)
-                .opacity(viewModel.selectedTimingMode == .story ? 1 : 0.45)
+                .disabled(viewModel.selectedTimingMode == .video)
+                .opacity(viewModel.selectedTimingMode == .video ? 0.45 : 1)
+
+                if viewModel.selectedTimingMode != .video, viewModel.includesFinalCaptions {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Caption look")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Picker("Caption look", selection: $viewModel.captionStyle) {
+                            ForEach(VideoExporter.CaptionStyle.allCases) { style in
+                                Text(style.rawValue).tag(style)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        Text(
+                            viewModel.captionStyle == .normal
+                                ? "YouTube-style: semibold white on a soft dark rounded bar."
+                                : "Larger rounded bold white type on a tight dim plate, with outline and soft shadow."
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
 
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Original Video Sound")
@@ -1375,7 +2305,22 @@ struct ContentView: View {
             .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
 
             VStack(spacing: 12) {
+                if viewModel.selectedTimingMode != .video, let narrationLanguageWarning = viewModel.narrationLanguageWarning {
+                    HStack(spacing: 8) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(.system(size: 12, weight: .bold))
+                        Text(narrationLanguageWarning)
+                            .font(.caption.weight(.semibold))
+                    }
+                    .foregroundStyle(Color.orange.opacity(0.94))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.white.opacity(0.76), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+
                 Button {
+                    deactivateRenderPlaybackForNewRender()
                     viewModel.buildVideoPreview()
                 } label: {
                     HStack(spacing: 10) {
@@ -1416,7 +2361,7 @@ struct ContentView: View {
                 .disabled(!viewModel.canStartVideoPreviewRender)
 
                 Button {
-                    renderPreviewPlayer.pause()
+                    deactivateRenderPlaybackForNewRender()
                     viewModel.buildVideo()
                 } label: {
                     HStack(spacing: 10) {
@@ -1549,7 +2494,7 @@ struct ContentView: View {
                 .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
 
-            if let displayedVideoURL = viewModel.exportedVideoURL ?? viewModel.videoPreviewURL {
+            if let displayedVideoURL = activeRenderedVideoURL {
                 VStack(alignment: .leading, spacing: 10) {
                     ZStack(alignment: .topLeading) {
                         VideoPlayer(player: renderPreviewPlayer)
@@ -1563,6 +2508,26 @@ struct ContentView: View {
                             .padding(.vertical, 8)
                             .background(Color.black.opacity(0.68), in: Capsule())
                             .padding(12)
+
+                        VStack {
+                            HStack {
+                                Spacer()
+
+                                Button {
+                                    isRenderPlayerExpanded = true
+                                } label: {
+                                    Image(systemName: "arrow.up.left.and.arrow.down.right")
+                                        .font(.system(size: 14, weight: .bold))
+                                        .foregroundStyle(.white)
+                                        .padding(10)
+                                        .background(Color.black.opacity(0.68), in: Capsule())
+                                }
+                                .buttonStyle(.plain)
+                                .padding(12)
+                            }
+
+                            Spacer()
+                        }
                     }
 
                     HStack(spacing: 10) {
@@ -1614,13 +2579,33 @@ struct ContentView: View {
             Image(systemName: "sparkles.rectangle.stack")
                 .font(.title3)
                 .foregroundStyle(.orange)
-            Text(viewModel.statusMessage)
+            Text(viewModel.activeStatusMessage)
                 .font(.subheadline)
         }
         .padding(18)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .foregroundStyle(.white)
+    }
+
+    @ViewBuilder
+    private func narrationPreviewCaptionStyledText(_ text: String, style: VideoExporter.CaptionStyle) -> some View {
+        switch style {
+        case .normal:
+            Text(text)
+                .font(.body.weight(.semibold))
+                .foregroundStyle(.primary)
+        case .stylish:
+            Text(text)
+                .font(.system(.title2, design: .rounded, weight: .bold))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.55), radius: 4, x: 0, y: 2)
+                .shadow(color: .black.opacity(0.35), radius: 0, x: 0, y: 1)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.black.opacity(0.38), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
     }
 
     private func formatTime(_ seconds: Double) -> String {
@@ -1640,6 +2625,14 @@ struct ContentView: View {
         return formatter.string(fromByteCount: Int64(fileSize))
     }
 
+    private var activeRenderedVideoURL: URL? {
+        guard !viewModel.isExportingVideo, !viewModel.isPreparingVideoPreview else {
+            return nil
+        }
+
+        return viewModel.exportedVideoURL ?? viewModel.videoPreviewURL
+    }
+
     private func updateRenderPreviewPlayer(for url: URL?) {
         renderPreviewPlayer.pause()
         guard let url else {
@@ -1647,9 +2640,29 @@ struct ContentView: View {
             return
         }
 
+        viewModel.prepareVideoPlaybackAudioSession()
         renderPreviewPlayer.allowsExternalPlayback = true
         renderPreviewPlayer.usesExternalPlaybackWhileExternalScreenIsActive = true
+        renderPreviewPlayer.isMuted = false
+        renderPreviewPlayer.volume = 1.0
         renderPreviewPlayer.replaceCurrentItem(with: AVPlayerItem(url: url))
+    }
+
+    private func dismissExpandedRenderPlayer() {
+        isRenderPlayerExpanded = false
+    }
+
+    private func deactivateRenderPlaybackForNewRender() {
+        isRenderPlayerExpanded = false
+        renderPreviewPlayer.pause()
+        renderPreviewPlayer.seek(to: .zero)
+        renderPreviewPlayer.replaceCurrentItem(with: nil)
+    }
+
+    private func pauseRenderPlaybackForTabSwitch() {
+        isRenderPlayerExpanded = false
+        renderPreviewPlayer.pause()
+        renderPreviewPlayer.seek(to: .zero)
     }
 }
 
@@ -1670,6 +2683,57 @@ private struct MediaReorderDropDelegate: DropDelegate {
 
     func dropUpdated(info: DropInfo) -> DropProposal? {
         DropProposal(operation: .move)
+    }
+}
+
+private struct SoundtrackReorderDropDelegate: DropDelegate {
+    let targetItem: AppViewModel.SoundtrackItem
+    @Binding var draggedItem: AppViewModel.SoundtrackItem?
+    let viewModel: AppViewModel
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedItem else { return }
+        viewModel.moveSoundtrackItem(withId: draggedItem.id, before: targetItem.id)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedItem = nil
+        return true
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
+    }
+}
+
+private struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
+}
+
+private struct FullscreenPlayerContainer: UIViewControllerRepresentable {
+    let player: AVPlayer
+
+    func makeUIViewController(context: Context) -> AVPlayerViewController {
+        let controller = AVPlayerViewController()
+        controller.player = player
+        controller.showsPlaybackControls = true
+        controller.entersFullScreenWhenPlaybackBegins = false
+        controller.exitsFullScreenWhenPlaybackEnds = false
+        controller.videoGravity = .resizeAspect
+        controller.view.backgroundColor = .black
+        return controller
+    }
+
+    func updateUIViewController(_ controller: AVPlayerViewController, context: Context) {
+        controller.player = player
+        controller.videoGravity = .resizeAspect
+        controller.view.backgroundColor = .black
     }
 }
 

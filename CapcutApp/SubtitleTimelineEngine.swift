@@ -1,6 +1,9 @@
 import Foundation
 
 struct SubtitleTimelineEngine {
+    /// Matches `VideoExporter.captionLagCompensation`: show captions slightly early so on-screen text lines up with heard speech after encode/render latency.
+    static let displayLeadSeconds: TimeInterval = 0.3
+
     typealias Cue = NarrationPreviewBuilder.SubtitleCue
 
     let cues: [Cue]
@@ -9,39 +12,32 @@ struct SubtitleTimelineEngine {
         self.cues = cues.sorted { $0.start < $1.start }
     }
 
-    func index(at time: TimeInterval) -> Int? {
+    func cue(at time: TimeInterval) -> Cue? {
         guard !cues.isEmpty else { return nil }
 
-        var low = 0
-        var high = cues.count - 1
-
-        while low <= high {
-            let mid = (low + high) / 2
-            let cue = cues[mid]
-
-            if time < cue.start {
-                high = mid - 1
-            } else if time > cue.end {
-                low = mid + 1
-            } else {
-                return mid
-            }
+        var lastStarted: Int?
+        for i in cues.indices where cues[i].start <= time {
+            lastStarted = i
         }
 
-        if let first = cues.first, time < first.start {
-            return 0
+        guard let idx = lastStarted else {
+            return cues.first
         }
 
-        if let lastIndex = cues.indices.last, time >= cues[lastIndex].end {
-            return lastIndex
+        let active = cues[idx]
+        if time <= active.end {
+            return active
         }
 
-        return min(max(low, 0), cues.count - 1)
-    }
+        if idx + 1 < cues.count, time < cues[idx + 1].start {
+            return active
+        }
 
-    func cue(at time: TimeInterval) -> Cue? {
-        guard let index = index(at: time), cues.indices.contains(index) else { return nil }
-        return cues[index]
+        if idx == cues.indices.last {
+            return active
+        }
+
+        return cues[idx + 1]
     }
 
     static func load(from url: URL) throws -> SubtitleTimelineEngine {
