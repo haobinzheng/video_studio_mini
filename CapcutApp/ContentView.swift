@@ -1546,8 +1546,7 @@ struct ContentView: View {
                     .foregroundStyle(.secondary)
 
                 ScrollView {
-                    Text(viewModel.narrationPreviewCaption)
-                        .font(.body.weight(.semibold))
+                    narrationPreviewCaptionStyledText(viewModel.narrationPreviewCaption, style: viewModel.captionStyle)
                         .lineLimit(nil)
                         .multilineTextAlignment(.leading)
                         .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -2254,6 +2253,28 @@ struct ContentView: View {
                 .disabled(viewModel.selectedTimingMode == .video)
                 .opacity(viewModel.selectedTimingMode == .video ? 0.45 : 1)
 
+                if viewModel.selectedTimingMode != .video, viewModel.includesFinalCaptions {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("Caption look")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                        Picker("Caption look", selection: $viewModel.captionStyle) {
+                            ForEach(VideoExporter.CaptionStyle.allCases) { style in
+                                Text(style.rawValue).tag(style)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        Text(
+                            viewModel.captionStyle == .normal
+                                ? "YouTube-style: semibold white on a soft dark rounded bar."
+                                : "Larger rounded bold white type on a tight dim plate, with outline and soft shadow."
+                        )
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
                 VStack(alignment: .leading, spacing: 6) {
                     Text("Original Video Sound")
                         .font(.caption.weight(.semibold))
@@ -2565,6 +2586,26 @@ struct ContentView: View {
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.black.opacity(0.78), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
         .foregroundStyle(.white)
+    }
+
+    @ViewBuilder
+    private func narrationPreviewCaptionStyledText(_ text: String, style: VideoExporter.CaptionStyle) -> some View {
+        switch style {
+        case .normal:
+            Text(text)
+                .font(.body.weight(.semibold))
+                .foregroundStyle(.primary)
+        case .stylish:
+            Text(text)
+                .font(.system(.title2, design: .rounded, weight: .bold))
+                .foregroundStyle(.white)
+                .shadow(color: .black.opacity(0.55), radius: 4, x: 0, y: 2)
+                .shadow(color: .black.opacity(0.35), radius: 0, x: 0, y: 1)
+                .padding(.horizontal, 12)
+                .padding(.vertical, 10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.black.opacity(0.38), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+        }
     }
 
     private func formatTime(_ seconds: Double) -> String {

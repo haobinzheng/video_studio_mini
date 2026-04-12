@@ -469,3 +469,20 @@ Commits for this feature line:
 **`8eb3faf`+**
 
 - **`GIT_PUSH_LOG.md`** updates for this NLTokenizer checkpoint (and any later log-only commits on the same branch).
+
+### 2026-04-12 (Caption look: Normal / Stylish)
+
+Pushed to the remote feature branch.
+
+Details:
+
+- branch: `story_enhance`
+- remote: `origin` (`github.com:haobinzheng/video_studio_mini.git`)
+- use `git log origin/story_enhance` for the current tip (this section may be followed by log-only commits)
+
+**Caption look**
+
+- **`VideoExporter.CaptionStyle`** (`Normal` / `Stylish`) and **`AppViewModel.captionStyle`**; **Video** tab segmented control + Script **Current Caption** preview styling.
+- **Normal:** semibold white on soft rounded pill (existing YouTube-like look).
+- **Stylish:** ~**1.5×** base size, **SF Rounded bold**, extra line spacing, **tight dim plate** (~40% black) for light backgrounds; **two-pass** outline then **pure white** fill (plus `CATextLayer` pair for burn-in) so CJK does not read grey.
+- Design record: **`docs/DESIGN_NOTES.md`** section **Caption look (Normal vs Stylish)**.

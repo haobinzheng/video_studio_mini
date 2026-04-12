@@ -409,6 +409,15 @@ final class AppViewModel: NSObject, ObservableObject {
             }
         }
     }
+
+    @Published var captionStyle: VideoExporter.CaptionStyle = .normal {
+        didSet {
+            if oldValue != captionStyle {
+                markAllVideoRendersDirty(reason: "Caption style updated. Build a new preview or final render to see the change.")
+            }
+        }
+    }
+
     @Published var musicVolume: Double = 0.6 {
         didSet {
             audioPlayer?.volume = Float(musicVolume)
@@ -1261,6 +1270,7 @@ final class AppViewModel: NSObject, ObservableObject {
         let aspectRatio = selectedAspectRatio
         let timingMode = selectedTimingMode
         let includeCaptions = renderQuality == .preview ? false : includesFinalCaptions
+        let captionStyleForExport = includeCaptions ? captionStyle : .normal
         let videoModeSettings = VideoExporter.VideoModeExportSettings(
             frameRate: selectedVideoModeFrameRate,
             resolution: selectedVideoModeResolution,
@@ -1325,6 +1335,7 @@ final class AppViewModel: NSObject, ObservableObject {
                         videoModeSettings: (timingMode == .video || timingMode == .realLife) ? videoModeSettings : nil,
                         externalCues: previewCues,
                         externalNarrationAudioURL: previewAudioURL,
+                        captionStyle: captionStyleForExport,
                         progressHandler: { progress, message in
                             Task { @MainActor in
                                 self.exportProgress = progress

@@ -380,6 +380,41 @@ Product framing:
   - preview them
   - use them in your video
 
+## Caption look (Normal vs Stylish)
+
+User-facing control:
+
+- **Video → Final Mix → Include Captions** must be on (and mode is not pure **Video**).
+- **Caption look** segmented control: **Normal** | **Stylish**.
+- Changing style marks preview/final renders dirty; user rebuilds to see it in the file.
+- **Script → Current Caption** preview approximates the chosen look (Stylish uses a small dim chip behind text so white type is visible on the light script card; **exported video** does not use that chip for Stylish—only the real render pipeline).
+
+Implementation:
+
+- **`VideoExporter.CaptionStyle`**: `normal`, `stylish`.
+- **`AppViewModel.captionStyle`** passed into **`exportVideo(..., captionStyle:)`** for final exports (preview path keeps captions off as today; when captions are off, style is ignored).
+
+### Normal
+
+- **Intent:** YouTube-like, calm, always readable on varied footage.
+- **Type:** system **semibold**, white fill, auto-fit font size from layout (same base scale as before Stylish existed).
+- **Chrome:** semi-transparent **black rounded rectangle** behind the text block (not necessarily full video width—width follows measured text + padding). Corner radius **32** (scaled context).
+
+### Stylish
+
+- **Intent:** Reader-friendly, larger type for social/editorial feel; still legible on **bright** backgrounds.
+- **Type:** **~1.5×** the same **base** font size as Normal (then same shrink-until-fits loop). **SF Rounded + bold** (`UIFontDescriptor.withDesign(.rounded)`), with extra **line spacing** for multi-line comfort.
+- **Chrome:** **Tight** dim plate only behind the caption block (corner radius ~12–18 scaled)—**not** a full-width bar. Plate alpha ~**0.40** black so white type survives light floors/sky.
+- **Outline / fill (important for CJK):** a **single** attributed string with **negative** `strokeWidth` makes strokes eat into glyphs and text reads **grey**. Stylish therefore uses a **two-pass** draw everywhere captions are rasterized:
+  1. **Outline pass:** `foregroundColor` **clear**, **positive** `strokeWidth`, black stroke.
+  2. **Fill pass:** **pure white** fill, no stroke, light `NSShadow`.
+- **Paths:** both **slideshow frame draw** (`drawCaption` → `UIGraphics`) and **caption burn** (`makeAnimatedCaptionLayer` → two **`CATextLayer`** sublayers: outline under fill).
+
+### Product rules
+
+- **Normal** remains the default for users who want the classic pill.
+- **Stylish** trades a bit of minimalism (adds a tight plate) for contrast on white/grey video content; the **fill** stays true white by construction (two-pass), not “dirty white” from combined stroke+fill.
+
 ## Smooth Media And Caption Design
 
 - smooth media composition works

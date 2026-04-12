@@ -137,6 +137,16 @@ struct VideoExporter {
         }
     }
 
+    /// On-screen caption look for story / slideshow exports (final video and caption-burn pass).
+    enum CaptionStyle: String, CaseIterable, Identifiable, Hashable {
+        /// Semibold white on soft dark pill — close to typical YouTube-style readability.
+        case normal = "Normal"
+        /// ~50% larger rounded bold type; tight dim plate + strong outline/shadow for light backgrounds.
+        case stylish = "Stylish"
+
+        var id: String { rawValue }
+    }
+
     enum VideoModeQuality: String, CaseIterable, Identifiable {
         case low = "Low"
         case medium = "Medium"
@@ -349,6 +359,7 @@ struct VideoExporter {
         videoModeSettings: VideoModeExportSettings? = nil,
         externalCues: [ExternalCue] = [],
         externalNarrationAudioURL: URL? = nil,
+        captionStyle: CaptionStyle = .normal,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws -> URL {
         guard !mediaItems.isEmpty else {
@@ -504,6 +515,7 @@ struct VideoExporter {
                     captionSegments: trimmedCaptionSegments,
                     renderSize: renderProfile.renderSize,
                     frameRate: renderProfile.frameRate,
+                    captionStyle: captionStyle,
                     outputURL: finalURL,
                     progressHandler: progressHandler
                 )
@@ -522,6 +534,7 @@ struct VideoExporter {
             renderSize: renderProfile.renderSize,
             frameRate: renderProfile.frameRate,
             videoSampleStride: renderProfile.videoSampleStride,
+            captionStyle: captionStyle,
             progressHandler: progressHandler,
             outputURL: slideshowURL
         )
@@ -761,6 +774,7 @@ struct VideoExporter {
         renderSize: CGSize,
         frameRate: Int32,
         videoSampleStride: Int32,
+        captionStyle: CaptionStyle = .normal,
         progressHandler: ((Double, String) -> Void)?,
         outputURL: URL
     ) async throws {
@@ -816,7 +830,7 @@ struct VideoExporter {
                 videoFrameCache: videoFrameCache
             )
             try autoreleasepool {
-                let pixelBuffer = try makePixelBuffer(from: image, caption: caption, renderSize: renderSize)
+                let pixelBuffer = try makePixelBuffer(from: image, caption: caption, renderSize: renderSize, captionStyle: captionStyle)
                 if !adaptor.append(pixelBuffer, withPresentationTime: presentationTime) {
                     throw writer.error ?? ExportError.videoWriterSetupFailed
                 }
@@ -1368,6 +1382,7 @@ struct VideoExporter {
         captionSegments: [CaptionSegment],
         renderSize: CGSize,
         frameRate: Int32,
+        captionStyle: CaptionStyle,
         outputURL: URL,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws {
@@ -1435,7 +1450,8 @@ struct VideoExporter {
 
         let captionsLayer = makeCaptionOverlayLayer(
             for: captionSegments,
-            renderSize: videoComposition.renderSize
+            renderSize: videoComposition.renderSize,
+            captionStyle: captionStyle
         )
         parentLayer.addSublayer(captionsLayer)
 
@@ -1455,9 +1471,176 @@ struct VideoExporter {
         )
     }
 
+    private func captionParagraphStyle() -> NSMutableParagraphStyle {
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byWordWrapping
+        return paragraph
+    }
+
+    /// Rounded system design reads softer on screen; bold keeps short captions clear without feeling as loud as heavy.
+    private func readerFriendlyStylishFont(size: CGFloat) -> UIFont {
+        let base = UIFont.systemFont(ofSize: size, weight: .bold)
+        if let rounded = base.fontDescriptor.withDesign(.rounded) {
+            return UIFont(descriptor: rounded, size: size)
+        }
+        return base
+    }
+
+    /// Stroke-only pass (clear fill + positive `strokeWidth`) drawn under the fill pass so Chinese text stays pure white.
+    private func stylishOutlineAttributed(text: String, fontSize: CGFloat, paragraph: NSParagraphStyle) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [
+            .font: readerFriendlyStylishFont(size: fontSize),
+            .foregroundColor: UIColor.clear,
+            .strokeColor: UIColor.black.withAlphaComponent(0.9),
+            .strokeWidth: 2.85,
+            .paragraphStyle: paragraph
+        ])
+    }
+
+    private func stylishFillAttributed(text: String, fontSize: CGFloat, paragraph: NSParagraphStyle) -> NSAttributedString {
+        let shadow = NSShadow()
+        shadow.shadowColor = UIColor.black.withAlphaComponent(0.45)
+        shadow.shadowOffset = CGSize(width: 0, height: 2)
+        shadow.shadowBlurRadius = max(4, fontSize * 0.14)
+        return NSAttributedString(string: text, attributes: [
+            .font: readerFriendlyStylishFont(size: fontSize),
+            .foregroundColor: UIColor.white,
+            .paragraphStyle: paragraph,
+            .shadow: shadow
+        ])
+    }
+
+    private func normalCaptionAttributed(text: String, fontSize: CGFloat, paragraph: NSParagraphStyle) -> NSAttributedString {
+        NSAttributedString(string: text, attributes: [
+            .font: UIFont.systemFont(ofSize: fontSize, weight: .semibold),
+            .foregroundColor: UIColor.white,
+            .paragraphStyle: paragraph
+        ])
+    }
+
+    private struct CaptionLayoutResult {
+        let textWidth: CGFloat
+        let textHeight: CGFloat
+        let boxPadding: CGFloat
+        let cornerRadius: CGFloat
+        let backgroundAlpha: CGFloat
+        let borderWidth: CGFloat
+        let borderColor: CGColor?
+        let textLayerExtraHeight: CGFloat
+        /// Used when `stylishOutline` / `stylishFill` are nil (Normal).
+        let singleAttributed: NSAttributedString
+        let stylishOutline: NSAttributedString?
+        let stylishFill: NSAttributedString?
+    }
+
+    private func layoutCaptionForVideo(text: String, renderSize: CGSize, style: CaptionStyle) -> CaptionLayoutResult {
+        let widthScale = max(min(renderSize.width / 720, 1.0), 0.5)
+        let paragraph = captionParagraphStyle()
+        if style == .stylish {
+            paragraph.lineSpacing = max(4, 5 * widthScale)
+        }
+        let maxTextWidth = renderSize.width - max(72, 120 * widthScale)
+        let maxTextHeight: CGFloat = style == .stylish
+            ? max(200, 340 * widthScale)
+            : max(140, 240 * widthScale)
+        let minimumFontSize: CGFloat = style == .stylish
+            ? max(15, 21 * widthScale)
+            : max(14, 20 * widthScale)
+        let portrait = renderSize.width < renderSize.height
+        let baseStart: CGFloat = portrait ? max(18, 34 * widthScale) : max(16, 30 * widthScale)
+        var fontSize: CGFloat = style == .stylish ? baseStart * 1.5 : baseStart
+
+        var single = normalCaptionAttributed(text: text, fontSize: fontSize, paragraph: paragraph)
+        var outline: NSAttributedString?
+        var fill: NSAttributedString?
+        var measuredW: CGFloat = 0
+        var measuredH: CGFloat = 0
+
+        while fontSize >= minimumFontSize {
+            if style == .stylish {
+                let o = stylishOutlineAttributed(text: text, fontSize: fontSize, paragraph: paragraph)
+                let f = stylishFillAttributed(text: text, fontSize: fontSize, paragraph: paragraph)
+                let r1 = o.boundingRect(
+                    with: CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                ).integral
+                let r2 = f.boundingRect(
+                    with: CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                ).integral
+                measuredW = max(r1.width, r2.width)
+                measuredH = max(r1.height, r2.height)
+                if measuredH <= maxTextHeight {
+                    outline = o
+                    fill = f
+                    single = f
+                    break
+                }
+            } else {
+                single = normalCaptionAttributed(text: text, fontSize: fontSize, paragraph: paragraph)
+                let r = single.boundingRect(
+                    with: CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                ).integral
+                measuredW = r.width
+                measuredH = r.height
+                if measuredH <= maxTextHeight { break }
+            }
+            fontSize -= 2
+        }
+
+        if style == .stylish, outline == nil || fill == nil {
+            let o = stylishOutlineAttributed(text: text, fontSize: minimumFontSize, paragraph: paragraph)
+            let f = stylishFillAttributed(text: text, fontSize: minimumFontSize, paragraph: paragraph)
+            let r1 = o.boundingRect(
+                with: CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                context: nil
+            ).integral
+            let r2 = f.boundingRect(
+                with: CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                context: nil
+            ).integral
+            outline = o
+            fill = f
+            single = f
+            measuredW = max(r1.width, r2.width)
+            measuredH = max(r1.height, r2.height)
+        }
+
+        let boxPadding: CGFloat = style == .stylish
+            ? max(10, 14 * widthScale)
+            : max(10, 16 * widthScale)
+        let cornerRadius: CGFloat = style == .stylish ? max(12, 18 * widthScale) : 32
+        let backgroundAlpha: CGFloat = style == .stylish ? 0.40 : 0.42
+        let borderWidth: CGFloat = 0
+        let borderColor: CGColor? = nil
+        let textLayerExtraHeight: CGFloat = style == .stylish ? 22 : 4
+
+        return CaptionLayoutResult(
+            textWidth: measuredW,
+            textHeight: measuredH,
+            boxPadding: boxPadding,
+            cornerRadius: cornerRadius,
+            backgroundAlpha: backgroundAlpha,
+            borderWidth: borderWidth,
+            borderColor: borderColor,
+            textLayerExtraHeight: textLayerExtraHeight,
+            singleAttributed: single,
+            stylishOutline: style == .stylish ? outline : nil,
+            stylishFill: style == .stylish ? fill : nil
+        )
+    }
+
     private func makeCaptionOverlayLayer(
         for segments: [CaptionSegment],
-        renderSize: CGSize
+        renderSize: CGSize,
+        captionStyle: CaptionStyle
     ) -> CALayer {
         let rootLayer = CALayer()
         rootLayer.frame = CGRect(origin: .zero, size: renderSize)
@@ -1465,7 +1648,8 @@ struct VideoExporter {
         for segment in segments where segment.timeRange.duration > .zero {
             let captionLayer = makeAnimatedCaptionLayer(
                 text: segment.text,
-                renderSize: renderSize
+                renderSize: renderSize,
+                captionStyle: captionStyle
             )
             let startSeconds = max(CMTimeGetSeconds(segment.timeRange.start), 0)
             let durationSeconds = max(CMTimeGetSeconds(segment.timeRange.duration), 0.1)
@@ -1484,71 +1668,66 @@ struct VideoExporter {
         return rootLayer
     }
 
-    private func makeAnimatedCaptionLayer(text: String, renderSize: CGSize) -> CALayer {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        paragraph.lineBreakMode = .byWordWrapping
-        let widthScale = max(min(renderSize.width / 720, 1.0), 0.5)
-        let maxTextWidth = renderSize.width - max(72, 120 * widthScale)
-        let maxTextHeight: CGFloat = max(140, 240 * widthScale)
-        let minimumFontSize: CGFloat = max(14, 20 * widthScale)
-        var fontSize: CGFloat = renderSize.width < renderSize.height ? max(18, 34 * widthScale) : max(16, 30 * widthScale)
-        var measuredText = CGRect.zero
-        var attributes: [NSAttributedString.Key: Any] = [:]
-
-        while fontSize >= minimumFontSize {
-            attributes = [
-                .font: UIFont.systemFont(ofSize: fontSize, weight: .semibold),
-                .foregroundColor: UIColor.white,
-                .paragraphStyle: paragraph
-            ]
-
-            measuredText = (text as NSString).boundingRect(
-                with: CGSize(width: maxTextWidth, height: maxTextHeight),
-                options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: attributes,
-                context: nil
-            ).integral
-
-            if measuredText.height <= maxTextHeight {
-                break
-            }
-
-            fontSize -= 2
-        }
-
-        let boxPadding: CGFloat = max(10, 16 * widthScale)
+    private func makeAnimatedCaptionLayer(text: String, renderSize: CGSize, captionStyle: CaptionStyle) -> CALayer {
+        let layout = layoutCaptionForVideo(text: text, renderSize: renderSize, style: captionStyle)
         let bottomInset = max(renderSize.height * 0.025, 24)
         let boxRect = CGRect(
-            x: (renderSize.width - measuredText.width) / 2 - boxPadding,
+            x: (renderSize.width - layout.textWidth) / 2 - layout.boxPadding,
             y: bottomInset,
-            width: measuredText.width + (boxPadding * 2),
-            height: measuredText.height + (boxPadding * 2)
+            width: layout.textWidth + (layout.boxPadding * 2),
+            height: layout.textHeight + (layout.boxPadding * 2)
         )
 
         let containerLayer = CALayer()
         containerLayer.frame = boxRect
         containerLayer.opacity = 0
 
-        let backgroundLayer = CALayer()
-        backgroundLayer.frame = containerLayer.bounds
-        backgroundLayer.backgroundColor = UIColor.black.withAlphaComponent(0.42).cgColor
-        backgroundLayer.cornerRadius = 32
-        backgroundLayer.masksToBounds = true
-        containerLayer.addSublayer(backgroundLayer)
+        if layout.backgroundAlpha > 0 {
+            let backgroundLayer = CALayer()
+            backgroundLayer.frame = containerLayer.bounds
+            backgroundLayer.backgroundColor = UIColor.black.withAlphaComponent(layout.backgroundAlpha).cgColor
+            backgroundLayer.cornerRadius = layout.cornerRadius
+            backgroundLayer.masksToBounds = true
+            if layout.borderWidth > 0, let borderColor = layout.borderColor {
+                backgroundLayer.borderWidth = layout.borderWidth
+                backgroundLayer.borderColor = borderColor
+            }
+            containerLayer.addSublayer(backgroundLayer)
+        }
 
-        let textLayer = CATextLayer()
-        textLayer.frame = CGRect(
-            x: boxPadding,
-            y: boxPadding,
-            width: measuredText.width,
-            height: measuredText.height
+        let textFrame = CGRect(
+            x: layout.boxPadding,
+            y: layout.boxPadding,
+            width: layout.textWidth,
+            height: layout.textHeight + layout.textLayerExtraHeight
         )
-        textLayer.string = NSAttributedString(string: text, attributes: attributes)
-        textLayer.contentsScale = UIScreen.main.scale
-        textLayer.alignmentMode = .center
-        textLayer.isWrapped = true
-        containerLayer.addSublayer(textLayer)
+
+        if let outline = layout.stylishOutline, let fill = layout.stylishFill {
+            let outlineLayer = CATextLayer()
+            outlineLayer.frame = textFrame
+            outlineLayer.string = outline
+            outlineLayer.contentsScale = UIScreen.main.scale
+            outlineLayer.alignmentMode = .center
+            outlineLayer.isWrapped = true
+
+            let fillLayer = CATextLayer()
+            fillLayer.frame = textFrame
+            fillLayer.string = fill
+            fillLayer.contentsScale = UIScreen.main.scale
+            fillLayer.alignmentMode = .center
+            fillLayer.isWrapped = true
+
+            containerLayer.addSublayer(outlineLayer)
+            containerLayer.addSublayer(fillLayer)
+        } else {
+            let textLayer = CATextLayer()
+            textLayer.frame = textFrame
+            textLayer.string = layout.singleAttributed
+            textLayer.contentsScale = UIScreen.main.scale
+            textLayer.alignmentMode = .center
+            textLayer.isWrapped = true
+            containerLayer.addSublayer(textLayer)
+        }
 
         return containerLayer
     }
@@ -1771,7 +1950,12 @@ struct VideoExporter {
         return CGSize(width: transformedBounds.width, height: transformedBounds.height)
     }
 
-    private func makePixelBuffer(from image: UIImage, caption: String?, renderSize: CGSize) throws -> CVPixelBuffer {
+    private func makePixelBuffer(
+        from image: UIImage,
+        caption: String?,
+        renderSize: CGSize,
+        captionStyle: CaptionStyle
+    ) throws -> CVPixelBuffer {
         var pixelBuffer: CVPixelBuffer?
         let attributes = [
             kCVPixelBufferCGImageCompatibilityKey: true,
@@ -1818,7 +2002,7 @@ struct VideoExporter {
         image.draw(in: aspectFitRect)
 
         if let caption, !caption.isEmpty {
-            drawCaption(caption, in: context, renderSize: renderSize)
+            drawCaption(caption, in: context, renderSize: renderSize, captionStyle: captionStyle)
         }
         UIGraphicsPopContext()
 
@@ -1898,69 +2082,49 @@ struct VideoExporter {
         return segments
     }
 
-    private func drawCaption(_ caption: String, in context: CGContext, renderSize: CGSize) {
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        paragraph.lineBreakMode = .byWordWrapping
-        let widthScale = max(min(renderSize.width / 720, 1.0), 0.5)
-        let maxTextWidth = renderSize.width - max(72, 120 * widthScale)
-        let maxTextHeight: CGFloat = max(140, 240 * widthScale)
-        let minimumFontSize: CGFloat = max(14, 20 * widthScale)
-        var fontSize: CGFloat = renderSize.width < renderSize.height ? max(18, 34 * widthScale) : max(16, 30 * widthScale)
-        var measuredText = CGRect.zero
-        var attributes: [NSAttributedString.Key: Any] = [:]
-
-        while fontSize >= minimumFontSize {
-            attributes = [
-                .font: UIFont.systemFont(ofSize: fontSize, weight: .semibold),
-                .foregroundColor: UIColor.white,
-                .paragraphStyle: paragraph
-            ]
-
-            measuredText = (caption as NSString).boundingRect(
-                with: CGSize(width: maxTextWidth, height: maxTextHeight),
-                options: [.usesLineFragmentOrigin, .usesFontLeading],
-                attributes: attributes,
-                context: nil
-            ).integral
-
-            if measuredText.height <= maxTextHeight {
-                break
-            }
-
-            fontSize -= 2
-        }
-
-        let boxPadding: CGFloat = max(10, 16 * widthScale)
+    private func drawCaption(_ caption: String, in context: CGContext, renderSize: CGSize, captionStyle: CaptionStyle) {
+        let layout = layoutCaptionForVideo(text: caption, renderSize: renderSize, style: captionStyle)
         let bottomInset = max(renderSize.height * 0.025, 24)
         let boxRect = CGRect(
-            x: (renderSize.width - measuredText.width) / 2 - boxPadding,
-            y: renderSize.height - measuredText.height - (boxPadding * 2) - bottomInset,
-            width: measuredText.width + (boxPadding * 2),
-            height: measuredText.height + (boxPadding * 2)
+            x: (renderSize.width - layout.textWidth) / 2 - layout.boxPadding,
+            y: renderSize.height - layout.textHeight - (layout.boxPadding * 2) - bottomInset,
+            width: layout.textWidth + (layout.boxPadding * 2),
+            height: layout.textHeight + (layout.boxPadding * 2)
         )
 
-        let boxPath = UIBezierPath(roundedRect: boxRect, cornerRadius: 32)
-        context.saveGState()
-        context.setFillColor(UIColor.black.withAlphaComponent(0.42).cgColor)
-        context.addPath(boxPath.cgPath)
-        context.fillPath()
-        context.restoreGState()
+        if layout.backgroundAlpha > 0 {
+            let boxPath = UIBezierPath(roundedRect: boxRect, cornerRadius: layout.cornerRadius)
+            context.saveGState()
+            context.setFillColor(UIColor.black.withAlphaComponent(layout.backgroundAlpha).cgColor)
+            context.addPath(boxPath.cgPath)
+            context.fillPath()
+            if layout.borderWidth > 0, let borderCG = layout.borderColor {
+                context.setStrokeColor(borderCG)
+                context.setLineWidth(layout.borderWidth)
+                context.addPath(boxPath.cgPath)
+                context.strokePath()
+            }
+            context.restoreGState()
+        }
 
         let textRect = CGRect(
-            x: (renderSize.width - measuredText.width) / 2,
-            y: boxRect.minY + boxPadding,
-            width: measuredText.width,
-            height: measuredText.height
+            x: (renderSize.width - layout.textWidth) / 2,
+            y: boxRect.minY + layout.boxPadding,
+            width: layout.textWidth,
+            height: layout.textHeight + layout.textLayerExtraHeight
         )
 
         UIGraphicsPushContext(context)
-        (caption as NSString).draw(
-            with: textRect,
-            options: [.usesLineFragmentOrigin, .usesFontLeading],
-            attributes: attributes,
-            context: nil
-        )
+        if let outline = layout.stylishOutline, let fill = layout.stylishFill {
+            outline.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+            fill.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+        } else {
+            layout.singleAttributed.draw(
+                with: textRect,
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                context: nil
+            )
+        }
         UIGraphicsPopContext()
     }
 
