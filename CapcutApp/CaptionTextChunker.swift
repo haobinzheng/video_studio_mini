@@ -33,17 +33,28 @@ enum CaptionTextChunker {
     private static let maxSentenceAlignedUtteranceCharacters = 140
 
     /// Strip from caption **display** only (TTS still uses full punctuation). Applied per line for wrapped captions.
-    private static let trailingDisplayPunctuationCharacters: Set<Character> = Set(
-        ",.;:!?\"'|<>[](){}，。；：！？、「」『』（）【】《》〈〉…·～"
-    )
+    /// Removes only *soft* clause/sentence tail marks (comma, period, colon, semicolon, ellipsis, CJK equivalents).
+    /// Does not remove `)` `]` `}` `"` `?` `!` `/` or other paired / syntactic punctuation.
+    private static func isSingleScalarSoftCaptionTail(_ character: Character) -> Bool {
+        let scalars = character.unicodeScalars
+        guard scalars.count == 1, let s = scalars.first else { return false }
+        switch s.value {
+        case 0x002C, 0x002E, 0x003A, 0x003B: return true // , . : ;
+        case 0x2026: return true // …
+        case 0x00B7: return true // ·
+        case 0x007E, 0xFF5E: return true // ~ ～
+        case 0xFF0C, 0x3002, 0xFF1B, 0xFF1A, 0x3001, 0xFF0E, 0xFE52: return true // ，。；：、．﹒
+        default: return false
+        }
+    }
 
-    /// Removes trailing punctuation from the end of each line (for on-screen subtitles only).
+    /// Removes trailing soft punctuation from the end of each line (for on-screen subtitles only).
     static func strippedCaptionForDisplay(_ text: String) -> String {
         text
             .split(separator: "\n", omittingEmptySubsequences: false)
             .map { line -> String in
                 var s = String(line).trimmingCharacters(in: .whitespacesAndNewlines)
-                while let last = s.last, trailingDisplayPunctuationCharacters.contains(last) {
+                while let last = s.last, isSingleScalarSoftCaptionTail(last) {
                     s.removeLast()
                 }
                 return s.trimmingCharacters(in: .whitespacesAndNewlines)

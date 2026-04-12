@@ -39,6 +39,8 @@ Media behavior:
 
 Caption behavior:
 
+- optional **display-only** tail trim removes **soft** terminators (ASCII/CJK `,` `.` `;` `:` `…` and fullwidth `．` etc.) from the **end of each caption line** using single-scalar matching so it stays reliable; it does **not** strip closing `)` `]` `}` `"` `?` `/` or similar, so parentheticals and quotes stay intact
+- **Script narration preview** (`NarrationPreviewBuilder`): caps how many sequential `AVSpeechSynthesizer.write` passes run by **merging** adjacent segments when there would otherwise be too many (long scripts used to feel “stuck”); each pass has a **timeout** so a stuck synthesizer cannot hang the UI forever; **final export** still uses the full segmented pipeline
 - captions are optional for final export
 - if `Include Captions` is on:
   - FluxCut uses the safer classic story renderer

@@ -528,3 +528,19 @@ Commits for this checkpoint:
 **`c9892b1`**
 
 - `GIT_PUSH_LOG.md`: record the script-cleanup checkpoint and its validated behavior.
+
+### 2026-04-12 (caption display strip + narration preview synthesis guard)
+
+Merged to `main` from `story_enhance` (near-final product checkpoint).
+
+Details:
+
+- branch: `story_enhance` → `main`
+- feature commit message: `Fix caption trailing soft punctuation; bound narration preview TTS` (inspect exact hashes with `git log main --oneline` after merge)
+- remote: `origin` (`github.com:haobinzheng/video_studio_mini.git`)
+
+**Caption + preview (this checkpoint)**
+
+- **`CaptionTextChunker.strippedCaptionForDisplay`:** strip only **soft** single-scalar tails (`, . ; : …` and CJK `，。；：、．` etc.); keep closing `)` `]` `}` `"` `?` `/` and similar; scalar-based matching for reliability (invisible/spaced-dot edge cases covered in earlier script-cleanup work).
+- **`NarrationPreviewBuilder`:** **preview-only** cap on sequential `AVSpeechSynthesizer.write` passes by **merging** adjacent segments when over **36**; **90s** timeout per segment so a stuck synthesizer cannot hang the UI; **final video export** unchanged (no merge/timeout in `VideoExporter`).
+- **`docs/DESIGN_NOTES.md`:** caption trim behavior + preview limits documented.

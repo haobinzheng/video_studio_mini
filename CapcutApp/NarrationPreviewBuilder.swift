@@ -1,8 +1,55 @@
 import AVFoundation
 import Foundation
 
+/// Preview synthesis is bounded so long scripts (hundreds of sentences) stay responsive and a stuck `AVSpeechSynthesizer` cannot hang the UI indefinitely.
+private enum NarrationPreviewLimits {
+    /// After duration capping, merge adjacent utterances so we never run this many sequential `write` passes for a preview.
+    static let maxSynthesisSegments = 36
+    /// Hard cap per synthesized chunk (merged text) to avoid pathological TTS stalls.
+    static let maxCharactersPerPreviewChunk = 4_000
+    static let perSegmentTimeoutSeconds: TimeInterval = 90
+}
+
 @MainActor
 struct NarrationPreviewBuilder {
+    private final class PreviewSynthesisResumeState: @unchecked Sendable {
+        private let lock = NSLock()
+        private var finished = false
+
+        func resumeSuccess(_ continuation: CheckedContinuation<TimeInterval, Error>, returning value: TimeInterval) {
+            lock.lock()
+            guard !finished else {
+                lock.unlock()
+                return
+            }
+            finished = true
+            lock.unlock()
+            continuation.resume(returning: value)
+        }
+
+        func resumeFailure(_ continuation: CheckedContinuation<TimeInterval, Error>, error: Error) {
+            lock.lock()
+            guard !finished else {
+                lock.unlock()
+                return
+            }
+            finished = true
+            lock.unlock()
+            continuation.resume(throwing: error)
+        }
+
+        func resumeTimeout(_ continuation: CheckedContinuation<TimeInterval, Error>) {
+            lock.lock()
+            guard !finished else {
+                lock.unlock()
+                return
+            }
+            finished = true
+            lock.unlock()
+            continuation.resume(throwing: PreviewError.segmentSynthesisTimedOut)
+        }
+    }
+
     struct SubtitleCue: Codable, Identifiable {
         let id: UUID
         let text: String
@@ -47,7 +94,11 @@ struct NarrationPreviewBuilder {
         } else {
             allSegments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
         }
-        let segments = cappedPreviewSegments(from: allSegments, maximumDuration: maximumDuration)
+        let capped = cappedPreviewSegments(from: allSegments, maximumDuration: maximumDuration)
+        let merged = Self.mergedPreviewSegments(capped)
+        let segments = merged
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
         guard !segments.isEmpty else {
             throw PreviewError.emptyNarration
         }
@@ -94,6 +145,27 @@ struct NarrationPreviewBuilder {
         )
     }
 
+    /// Merges adjacent segments so preview synthesis stays under `NarrationPreviewLimits.maxSynthesisSegments`.
+    private static func mergedPreviewSegments(_ segments: [String]) -> [String] {
+        guard segments.count > NarrationPreviewLimits.maxSynthesisSegments else { return segments }
+
+        let batch = Int(
+            ceil(Double(segments.count) / Double(NarrationPreviewLimits.maxSynthesisSegments))
+        )
+        var out: [String] = []
+        var i = 0
+        while i < segments.count {
+            let end = min(i + batch, segments.count)
+            var piece = segments[i..<end].joined(separator: " ")
+            if piece.count > NarrationPreviewLimits.maxCharactersPerPreviewChunk {
+                piece = String(piece.prefix(NarrationPreviewLimits.maxCharactersPerPreviewChunk))
+            }
+            out.append(piece)
+            i = end
+        }
+        return out
+    }
+
     private func cappedPreviewSegments(from segments: [String], maximumDuration: TimeInterval?) -> [String] {
         guard let maximumDuration else { return segments }
         var selected: [String] = []
@@ -124,10 +196,18 @@ struct NarrationPreviewBuilder {
         }
 
         let synthesizer = AVSpeechSynthesizer()
+        let resumeState = PreviewSynthesisResumeState()
 
-        return try await withCheckedThrowingContinuation { continuation in
+        return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<TimeInterval, Error>) in
             var audioFile: AVAudioFile?
-            var finished = false
+
+            let timeoutWorkItem = DispatchWorkItem {
+                resumeState.resumeTimeout(continuation)
+            }
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(
+                deadline: .now() + NarrationPreviewLimits.perSegmentTimeoutSeconds,
+                execute: timeoutWorkItem
+            )
 
             synthesizer.write(utterance) { buffer in
                 guard let pcmBuffer = buffer as? AVAudioPCMBuffer else { return }
@@ -137,10 +217,8 @@ struct NarrationPreviewBuilder {
                         let sampleRate = audioFile?.processingFormat.sampleRate ?? 44_100
                         let length = audioFile?.length ?? 0
                         let duration = sampleRate > 0 ? Double(length) / sampleRate : 0
-                        if !finished {
-                            finished = true
-                            continuation.resume(returning: duration)
-                        }
+                        timeoutWorkItem.cancel()
+                        resumeState.resumeSuccess(continuation, returning: duration)
                         return
                     }
 
@@ -150,10 +228,8 @@ struct NarrationPreviewBuilder {
 
                     try audioFile?.write(from: pcmBuffer)
                 } catch {
-                    if !finished {
-                        finished = true
-                        continuation.resume(throwing: error)
-                    }
+                    timeoutWorkItem.cancel()
+                    resumeState.resumeFailure(continuation, error: error)
                 }
             }
         }
@@ -359,6 +435,7 @@ struct NarrationPreviewBuilder {
         case emptyNarration
         case audioTrackCreationFailed
         case exportFailed
+        case segmentSynthesisTimedOut
 
         var errorDescription: String? {
             switch self {
@@ -368,6 +445,8 @@ struct NarrationPreviewBuilder {
                 return "Could not create the narration preview track."
             case .exportFailed:
                 return "Could not export the narration preview audio."
+            case .segmentSynthesisTimedOut:
+                return "Narration preview stopped waiting for speech output. Try a shorter script, a different voice, or build again."
             }
         }
     }
