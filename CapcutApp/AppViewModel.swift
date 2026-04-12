@@ -3267,11 +3267,119 @@ final class AppViewModel: NSObject, ObservableObject {
         return finalLines.joined(separator: "\n")
     }
 
+    /// Strips characters that often hide inside pasted text (NBSP, BOM, ZWSP, bidi marks) so dot-only detection matches what the user sees.
+    private static func stringByRemovingNarrationInvisibleScalars(_ line: String) -> String {
+        String(line.unicodeScalars.filter { !isNarrationInvisibleFormattingScalar($0) })
+    }
+
+    private static func isNarrationInvisibleFormattingScalar(_ scalar: UnicodeScalar) -> Bool {
+        switch scalar.value {
+        case 0xFEFF, 0x00A0:
+            return true
+        case 0x200B...0x200F, 0x202A...0x202E, 0x2060, 0x2066...0x2069:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// True when the line has no letters or digits—only dot-like punctuation (any length), including Unicode ellipses and CJK full stops.
+    /// Spacing between dots (e.g. `. . .` from formatted paste) still counts as a dot-only line.
+    private static func isLineComposedOnlyOfDotLikeCharacters(_ line: String) -> Bool {
+        let trimmed = line.trimmingCharacters(in: narrationTrimCharacterSet)
+        guard !trimmed.isEmpty else { return true }
+        let visibleOnly = stringByRemovingNarrationInvisibleScalars(trimmed)
+        guard !visibleOnly.isEmpty else { return true }
+        let withoutWhitespace = visibleOnly.unicodeScalars.filter { !narrationTrimCharacterSet.contains($0) }
+        guard !withoutWhitespace.isEmpty else { return true }
+        return withoutWhitespace.allSatisfy(isDotLikeNarrationScalar)
+    }
+
+    private static func isDotLikeNarrationScalar(_ scalar: UnicodeScalar) -> Bool {
+        switch scalar.value {
+        case 0x002E, 0xFF0E, 0x3002, 0xFF61, 0x2026, 0x22EF, 0x2025:
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Replaces runs of dots / ellipsis characters (etc.) with `, ` so TTS does not read each period; skips runs touching digits (decimals).
+    private static func normalizeMidSentenceEllipsisRunsToComma(_ line: String) -> String {
+        let scalars = Array(line.unicodeScalars)
+        guard !scalars.isEmpty else { return line }
+
+        var rebuilt = String.UnicodeScalarView()
+        var index = 0
+
+        while index < scalars.count {
+            let scalar = scalars[index]
+
+            guard isDotLikeNarrationScalar(scalar) else {
+                rebuilt.append(scalar)
+                index += 1
+                continue
+            }
+
+            let runStart = index
+            var runEnd = index
+            while runEnd < scalars.count, isDotLikeNarrationScalar(scalars[runEnd]) {
+                runEnd += 1
+            }
+
+            let dotEquivalentCount = scalars[runStart..<runEnd].reduce(into: 0) { partial, runScalar in
+                partial += dotEquivalentWeight(for: runScalar)
+            }
+            let previousScalar = runStart > 0 ? scalars[runStart - 1] : nil
+            let nextScalar = runEnd < scalars.count ? scalars[runEnd] : nil
+            let touchesDigit = previousScalar.map(isNarrationDigitScalar) == true
+                || nextScalar.map(isNarrationDigitScalar) == true
+
+            if dotEquivalentCount >= 3, !touchesDigit {
+                rebuilt.append(contentsOf: ", ".unicodeScalars)
+            } else {
+                for dotScalar in scalars[runStart..<runEnd] {
+                    rebuilt.append(dotScalar)
+                }
+            }
+
+            index = runEnd
+        }
+
+        var result = String(rebuilt)
+        for _ in 0..<6 {
+            let collapsed = result.replacingOccurrences(of: #",\s*,"#, with: ", ", options: .regularExpression)
+            if collapsed == result { break }
+            result = collapsed
+        }
+        return result
+    }
+
+    private static func isNarrationDigitScalar(_ scalar: UnicodeScalar) -> Bool {
+        CharacterSet.decimalDigits.contains(scalar)
+    }
+
+    private static func dotEquivalentWeight(for scalar: UnicodeScalar) -> Int {
+        switch scalar.value {
+        case 0x2026: // …
+            return 3
+        case 0x2025, 0x22EF: // ‥, ⋯
+            return 2
+        default:
+            return 1
+        }
+    }
+
     private static func cleanupNarrationLine(_ line: String) -> String {
         var cleaned = line.trimmingCharacters(in: narrationTrimCharacterSet)
         guard !cleaned.isEmpty else { return "" }
 
+        if isLineComposedOnlyOfDotLikeCharacters(cleaned) {
+            return ""
+        }
+
         cleaned = trimmedLeadingNarrationJunk(from: cleaned)
+        guard !cleaned.isEmpty else { return "" }
 
         cleaned = cleaned.replacingOccurrences(
             of: #"^[\(\uff08]?\d+[\)\uff09]?[.)\uff0e\uff09](?=\s*[\p{L}\p{N}])\s*"#,
@@ -3291,13 +3399,20 @@ final class AppViewModel: NSObject, ObservableObject {
             options: .regularExpression
         )
 
+        cleaned = normalizeMidSentenceEllipsisRunsToComma(cleaned)
+
         cleaned = cleaned.replacingOccurrences(
             of: #"\s+"#,
             with: " ",
             options: .regularExpression
         )
 
-        return cleaned.trimmingCharacters(in: narrationTrimCharacterSet)
+        cleaned = cleaned.trimmingCharacters(in: narrationTrimCharacterSet)
+        // Catch dot-only lines again after edits (e.g. invisible characters no longer masking the run).
+        if isLineComposedOnlyOfDotLikeCharacters(cleaned) {
+            return ""
+        }
+        return cleaned
     }
 
     private static func trimmedLeadingNarrationJunk(from text: String) -> String {

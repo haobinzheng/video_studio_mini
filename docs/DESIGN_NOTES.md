@@ -498,6 +498,12 @@ Current cleanup targets:
 - Chinese outline prefixes such as `一、`, `二、`, `甲、`
 - repeated blank lines
 - extra spaces inside a line
+- lines that are only dot-like characters (any length), such as `......` or `……`, removed entirely (including spaced dots like `. . .` and NBSP/ZWSP/BOM from paste)
+- in-sentence runs of three or more `.` / `．`, or runs of Unicode ellipsis characters (`…` `⋯` `‥`), replaced with `, ` (with comma collapse when a comma already precedes the run); runs touching digits on both sides are left alone for decimals
+- dot-run normalization uses dot-equivalent weight rather than raw character count, so visually equivalent forms such as `...`, `....`, `.....`, `…`, `……`, and mixed dot-like runs are handled consistently
+- existing paragraph-ending punctuation must not be doubled, even when trailing spaces are present
+- the final sentence of the article should receive a terminal punctuation mark if it is missing one
+- repeated blank lines between paragraphs are removed so script structure stays cleaner for narration and caption timing
 
 Pause behavior:
 
