@@ -69,6 +69,8 @@ struct NarrationPreviewBuilder {
         let subtitleJSONURL: URL
         let cues: [SubtitleCue]
         let duration: TimeInterval
+        /// Wall-clock [start, end) per TTS utterance, aligned with `cues` timing source; used to sync Media carousel to Edit Story blocks.
+        let paragraphPlaybackRanges: [(start: TimeInterval, end: TimeInterval)]
     }
 
     private struct CueChunk {
@@ -81,24 +83,65 @@ struct NarrationPreviewBuilder {
         voiceIdentifier: String,
         speechRateMultiplier: Double = 1.0,
         maximumDuration: TimeInterval? = nil,
+        forcedParagraphSegments: [String]? = nil,
+        storyBlockTexts: [String]? = nil,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws -> PreviewResult {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
-        let allSegments: [String]
-        if SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag) {
-            let sentences = CaptionTextChunker.sentenceSegmentsForNarration(normalized)
-            allSegments = sentences.isEmpty
-                ? SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
-                : sentences
+        let segments: [String]
+        /// Per Edit block: how many TTS utterances belong to that block (preview only).
+        var storyBlockUtteranceCounts: [Int]? = nil
+        if let blockTexts = storyBlockTexts {
+            let trimmedBlocks = blockTexts
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            guard !trimmedBlocks.isEmpty else {
+                throw PreviewError.emptyNarration
+            }
+            let cappedBlocks = cappedPreviewSegments(from: trimmedBlocks, maximumDuration: maximumDuration)
+            var flat: [String] = []
+            var counts: [Int] = []
+            for blockText in cappedBlocks {
+                var subs = StoryScriptPartition.narrationSegmentsWholeScriptStyle(
+                    blockText: blockText,
+                    voiceIdentifier: voiceIdentifier
+                )
+                if subs.isEmpty {
+                    subs = [" "]
+                }
+                counts.append(subs.count)
+                flat.append(contentsOf: subs)
+            }
+            segments = flat
+            storyBlockUtteranceCounts = counts
+        } else if let forced = forcedParagraphSegments {
+            let trimmed = forced
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            guard !trimmed.isEmpty else {
+                throw PreviewError.emptyNarration
+            }
+            segments = cappedPreviewSegments(from: trimmed, maximumDuration: maximumDuration)
         } else {
-            allSegments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
+            guard !normalized.isEmpty else {
+                throw PreviewError.emptyNarration
+            }
+            let allSegments: [String]
+            if SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag) {
+                let sentences = CaptionTextChunker.sentenceSegmentsForNarration(normalized)
+                allSegments = sentences.isEmpty
+                    ? SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
+                    : sentences
+            } else {
+                allSegments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
+            }
+            let capped = cappedPreviewSegments(from: allSegments, maximumDuration: maximumDuration)
+            let merged = Self.mergedPreviewSegments(capped)
+            segments = merged
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
         }
-        let capped = cappedPreviewSegments(from: allSegments, maximumDuration: maximumDuration)
-        let merged = Self.mergedPreviewSegments(capped)
-        let segments = merged
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
         guard !segments.isEmpty else {
             throw PreviewError.emptyNarration
         }
@@ -125,6 +168,27 @@ struct NarrationPreviewBuilder {
         }
 
         let measuredDuration = max(utteranceDurations.reduce(0, +), 1)
+        var playbackCursor: TimeInterval = 0
+        var paragraphPlaybackRanges: [(start: TimeInterval, end: TimeInterval)] = []
+        if let counts = storyBlockUtteranceCounts {
+            var u = 0
+            for c in counts {
+                let blockDur = (u..<(u + c)).reduce(0.0) { partial, j in
+                    partial + utteranceDurations[j]
+                }
+                u += c
+                let end = playbackCursor + blockDur
+                paragraphPlaybackRanges.append((start: playbackCursor, end: end))
+                playbackCursor = end
+            }
+        } else {
+            paragraphPlaybackRanges.reserveCapacity(utteranceDurations.count)
+            for d in utteranceDurations {
+                let end = playbackCursor + d
+                paragraphPlaybackRanges.append((start: playbackCursor, end: end))
+                playbackCursor = end
+            }
+        }
         progressHandler?(0.8, "Combining narration audio.")
         try await mergeAudioFiles(utteranceURLs, outputURL: outputAudioURL)
         progressHandler?(0.92, "Building caption cues.")
@@ -141,7 +205,8 @@ struct NarrationPreviewBuilder {
             audioURL: outputAudioURL,
             subtitleJSONURL: outputJSONURL,
             cues: cues,
-            duration: measuredDuration
+            duration: measuredDuration,
+            paragraphPlaybackRanges: paragraphPlaybackRanges
         )
     }
 

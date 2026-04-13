@@ -47,7 +47,17 @@ struct ContentView: View {
     @State private var assignSheetSlideIndex = 0
     @State private var assignSheetBlockOrdinal = 1
     @State private var previewingStorySoundtrackItemID: UUID?
+    @State private var draggedAssignSheetMediaID: UUID?
     @FocusState private var isNarrationFocused: Bool
+
+    private var assignSheetBlockScriptText: String {
+        guard let range = assignSheetRange else { return "" }
+        let paras = viewModel.storyScriptParagraphs
+        guard !paras.isEmpty,
+              range.lowerBound >= 0,
+              range.upperBound < paras.count else { return "" }
+        return paras[range.lowerBound...range.upperBound].joined(separator: "\n\n")
+    }
 
     private var visibleStudioSteps: [StudioStep] {
         StudioStep.allCases.filter { step in
@@ -807,6 +817,15 @@ struct ContentView: View {
         }
     }
 
+    private func moveAssignSheetDraftMedia(draggedId: UUID, before targetId: UUID) {
+        guard draggedId != targetId,
+              let sourceIndex = assignSheetDraftMediaIDs.firstIndex(of: draggedId),
+              assignSheetDraftMediaIDs.contains(targetId) else { return }
+        assignSheetDraftMediaIDs.remove(at: sourceIndex)
+        let destinationIndex = assignSheetDraftMediaIDs.firstIndex(of: targetId) ?? 0
+        assignSheetDraftMediaIDs.insert(draggedId, at: destinationIndex)
+    }
+
     private func openStoryBlockAssignSheet() {
         guard contiguousStoryParagraphSelection, !selectedStoryParagraphIndices.isEmpty else { return }
         let sorted = selectedStoryParagraphIndices.sorted()
@@ -824,6 +843,7 @@ struct ContentView: View {
             assignSheetSlideIndex = min(assignSheetSlideIndex, viewModel.mediaItems.count - 1)
             assignSheetSlideIndex = max(0, assignSheetSlideIndex)
         }
+        draggedAssignSheetMediaID = nil
         isStoryBlockAssignSheetPresented = true
     }
 
@@ -833,6 +853,7 @@ struct ContentView: View {
         isStoryBlockAssignSheetPresented = false
         assignSheetRange = nil
         assignSheetDraftMediaIDs = []
+        draggedAssignSheetMediaID = nil
         selectedStoryParagraphIndices = []
     }
 
@@ -840,6 +861,7 @@ struct ContentView: View {
         isStoryBlockAssignSheetPresented = false
         assignSheetRange = nil
         assignSheetDraftMediaIDs = []
+        draggedAssignSheetMediaID = nil
     }
 
     private func blockAssignPoolThumbnail(item: AppViewModel.MediaItem, index: Int) -> some View {
@@ -916,8 +938,11 @@ struct ContentView: View {
                         HStack(spacing: 8) {
                             Image(systemName: "text.bubble.fill")
                                 .font(.system(size: 12, weight: .bold))
-                            Text(viewModel.estimatedNarrationMetaLine)
-                                .font(.caption.weight(.semibold))
+                            Text(
+                                assignSheetRange.map { viewModel.blockNarrationEstimateMetaLine(paragraphRange: $0) }
+                                    ?? viewModel.estimatedNarrationMetaLine
+                            )
+                            .font(.caption.weight(.semibold))
                         }
                         .foregroundStyle(Color(red: 0.63, green: 0.24, blue: 0.10))
                         .padding(.horizontal, 10)
@@ -973,10 +998,14 @@ struct ContentView: View {
                             Text("Assigned to this block (order)")
                                 .font(.caption.weight(.semibold))
                                 .foregroundStyle(.secondary)
+                            Text("Drag thumbnails to reorder play order (same as the Media tab).")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
                             ScrollView(.horizontal, showsIndicators: false) {
                                 HStack(spacing: 10) {
-                                    ForEach(Array(assignSheetDraftMediaIDs.enumerated()), id: \.offset) { position, mediaID in
-                                        if let item = viewModel.mediaItems.first(where: { $0.id == mediaID }) {
+                                    ForEach(assignSheetDraftMediaIDs, id: \.self) { mediaID in
+                                        if let item = viewModel.mediaItems.first(where: { $0.id == mediaID }),
+                                           let position = assignSheetDraftMediaIDs.firstIndex(of: mediaID) {
                                             VStack(spacing: 4) {
                                                 Image(uiImage: item.previewImage)
                                                     .resizable()
@@ -987,6 +1016,18 @@ struct ContentView: View {
                                                     .font(.caption2.weight(.bold))
                                                     .foregroundStyle(.secondary)
                                             }
+                                            .onDrag {
+                                                draggedAssignSheetMediaID = mediaID
+                                                return NSItemProvider(object: mediaID.uuidString as NSString)
+                                            }
+                                            .onDrop(
+                                                of: [UTType.text],
+                                                delegate: AssignSheetDraftReorderDropDelegate(
+                                                    targetId: mediaID,
+                                                    draggedId: $draggedAssignSheetMediaID,
+                                                    onReorder: moveAssignSheetDraftMedia
+                                                )
+                                            )
                                         }
                                     }
                                 }
@@ -1106,6 +1147,24 @@ struct ContentView: View {
                                 .padding(.vertical, 4)
                             }
 
+                            if !assignSheetBlockScriptText.isEmpty {
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("Block script")
+                                        .font(.caption.weight(.semibold))
+                                        .foregroundStyle(.secondary)
+                                    ScrollView {
+                                        Text(assignSheetBlockScriptText)
+                                            .font(.subheadline)
+                                            .foregroundStyle(.primary)
+                                            .frame(maxWidth: .infinity, alignment: .leading)
+                                    }
+                                    .frame(minHeight: 72, maxHeight: 160)
+                                }
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(14)
+                                .background(Color.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                            }
+
                             VStack(alignment: .leading, spacing: 6) {
                                 Text("Studio Tip")
                                     .font(.caption.weight(.semibold))
@@ -1196,7 +1255,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Toggle("Use block timeline (Story mode)", isOn: $viewModel.storyUsesBlockTimeline)
                     .font(.subheadline.weight(.semibold))
-                Text("Paragraphs (blank-line separated) map to media. Export uses paragraph-aligned narration and per-block visuals when the layout is valid.")
+                Text("Paragraphs (blank-line separated in Script) map to media. Script → Clean Up normalizes text and blank-line boundaries for assigning blocks.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Button("Reset to one block (all paragraphs, all media)") {
@@ -1294,7 +1353,7 @@ struct ContentView: View {
                     .disabled(!viewModel.storyUsesBlockTimeline || viewModel.storyEditBlocks.isEmpty)
                 }
                 if viewModel.storyScriptParagraphs.isEmpty {
-                    Text("No paragraphs yet—add text in Script with blank lines between ideas.")
+                    Text("No paragraphs yet—add Script text with blank lines between ideas, or run Clean Up on pasted text.")
                         .font(.subheadline)
                         .foregroundStyle(.secondary)
                 } else {
@@ -1683,6 +1742,9 @@ struct ContentView: View {
 
             Text("Script")
                 .font(.title2.weight(.semibold))
+            Text("Edit Story treats a paragraph as text between blank lines. Use an empty line between ideas, or tap Clean Up to insert breaks when pasted text only has single line breaks.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
 
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
@@ -3267,6 +3329,26 @@ struct ContentView: View {
         isRenderPlayerExpanded = false
         renderPreviewPlayer.pause()
         renderPreviewPlayer.seek(to: .zero)
+    }
+}
+
+private struct AssignSheetDraftReorderDropDelegate: DropDelegate {
+    let targetId: UUID
+    @Binding var draggedId: UUID?
+    let onReorder: (UUID, UUID) -> Void
+
+    func dropEntered(info: DropInfo) {
+        guard let draggedId else { return }
+        onReorder(draggedId, targetId)
+    }
+
+    func performDrop(info: DropInfo) -> Bool {
+        draggedId = nil
+        return true
+    }
+
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        DropProposal(operation: .move)
     }
 }
 

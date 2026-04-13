@@ -19,6 +19,19 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-12 — Edit Story preview duration + export guard
+
+- **VideoExporter**: Edit Story block exports in **preview** quality cap at **180s** measured narration instead of **20s**, so block/photo sync is visible on long scripts.
+- **AppViewModel**: if **Use block timeline** is on, Story mode, validation passes, but the block descriptor fails to build, abort before `exportVideo` with a message (removed mismatched `usesEditStoryBlockTimeline` flag that threw when the toggle was on but the descriptor was nil).
+
+### 2026-04-12 — Edit Story: require block plan when toggle on
+
+- (Superseded by guard above; removed `usesEditStoryBlockTimeline` / `storyBlockExportPlanMissing` from `VideoExporter`.)
+
+### 2026-04-12 — Edit Story block A/V sync (measured narration only)
+
+- `VideoExporter`: for block-timeline story export, narration timeline length and `composeStoryBlockTimelineSegments` use **measured** utterance sums only (no estimated padding / drift on last segment); **invalidStoryBlockPlan** if block mode would fall back to generic story timeline.
+
 ### 2026-04-12 — Edit Story tab and block export
 
 - Added **Edit Story** studio step: media pool, music queue preview, script paragraphs with block badges, staged multi-clip assign to a contiguous paragraph range.

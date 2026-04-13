@@ -76,8 +76,9 @@ Implemented in the **Edit Story** tab (optional; Settings → **Show Edit Story 
 - **Paragraphs** match `StoryScriptPartition.nonEmptyParagraphs`: split on blank lines (`\n\n+`); whitespace-only chunks dropped.
 - **Blocks** are stored as `AppViewModel.StoryEditBlock` (paragraph index range, ordered `mediaItemIDs`, optional `soundtrackItemID` for future use). Not embedded in the script string.
 - **Export** when **Use block timeline** is on, Story mode is selected, and validation passes:
-  - Narration is synthesized **one utterance per paragraph** (forced segment list), so block durations align with measured TTS per paragraph.
-  - `VideoExporter` builds a global visual timeline by concatenating per-block segments: **photos only** → even split across the block; **mixed or all video** → cycle user media order with **up to 10s** per photo visit and natural clip length per video visit, filling the block’s narration duration.
+  - Narration uses **whole-script-style** segmentation **per block** (`StoryScriptPartition.narrationSegmentsWholeScriptStyle`), then measured utterance lengths; timeline length and block composition use **measured TTS only** (no `max(measured, estimated)` inflation) so slideshow frames stay aligned with audio.
+  - `VideoExporter` builds a global visual timeline by concatenating per-block segments: **photos only** → even split across the block; **mixed or all video** → cycle user media order with **up to 10s** per photo visit and natural clip length per video visit, filling the block’s narration duration. If block composition cannot run while block mode is on, export fails fast instead of falling back to caption-off “split pool across whole story” pacing.
+  - If **Use block timeline** is on and validation passes but `makeStoryBlockExportDescriptor()` fails, **AppViewModel** aborts before export with a clear message (avoids legacy pool-wide story pacing). **Preview** with Edit Story blocks uses up to **180s** of measured narration (not the default **20s** preview cap) so multi-block photo timing can be checked.
   - **Background music** remains the combined mix from the Music tab in v1 (per-block music is UI/metadata only until a later mix pass).
 - **Validation**: every non-empty paragraph must lie in exactly one block; each block needs ≥1 pool medium; pool IDs must resolve. Failures set `isStoryBlockExportBlocking` and disable Preview/Create Video.
 - **Script edits**: `reconcileStoryEditBlocksWithScript()` clamps block ranges when paragraph count changes (user may need to re-partition).
@@ -511,14 +512,15 @@ Current cleanup targets:
 - stray leading punctuation such as a leading `.`
 - leading numbering such as `1.`, `1)`, `(1)`
 - Chinese outline prefixes such as `一、`, `二、`, `甲、`
-- repeated blank lines
+- runs of extra newlines collapsed to a single blank-line paragraph separator (`\n\n`)
 - extra spaces inside a line
 - lines that are only dot-like characters (any length), such as `......` or `……`, removed entirely (including spaced dots like `. . .` and NBSP/ZWSP/BOM from paste)
 - in-sentence runs of three or more `.` / `．`, or runs of Unicode ellipsis characters (`…` `⋯` `‥`), replaced with `, ` (with comma collapse when a comma already precedes the run); runs touching digits on both sides are left alone for decimals
 - dot-run normalization uses dot-equivalent weight rather than raw character count, so visually equivalent forms such as `...`, `....`, `.....`, `…`, `……`, and mixed dot-like runs are handled consistently
 - existing paragraph-ending punctuation must not be doubled, even when trailing spaces are present
 - the final sentence of the article should receive a terminal punctuation mark if it is missing one
-- repeated blank lines between paragraphs are removed so script structure stays cleaner for narration and caption timing
+- **Edit Story / `StoryScriptPartition.nonEmptyParagraphs`**: paragraphs are delimited by **blank lines** (`\n\n`). Cleanup normalizes line endings, turns whitespace-only lines into paragraph breaks, collapses runs of three or more newlines to `\n\n`, and **if the script already has blank-line paragraph breaks**, keeps each chunk as one paragraph (single newlines inside a chunk remain line breaks within that paragraph). **If there are no blank-line breaks** (e.g. hard-wrapped paste with only `\n`), each cleaned non-empty line becomes its own paragraph (`\n\n` between lines) so blocks can be assigned.
+- after cleanup, `reconcileStoryEditBlocksWithScript()` runs so block ranges stay valid when paragraph count changes
 
 Pause behavior:
 
@@ -539,9 +541,8 @@ UI behavior:
 
 Important scope note:
 
-- cleanup is conservative
-- it normalizes common TTS-breaking patterns
-- it is not intended to paraphrase, translate, or structurally rewrite the script
+- cleanup is conservative for wording (no paraphrase or translation)
+- it normalizes common TTS-breaking patterns and **paragraph boundaries** for Edit Story as above
 
 ## Script Preview Controls
 

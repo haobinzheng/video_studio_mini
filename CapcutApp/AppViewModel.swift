@@ -498,6 +498,10 @@ final class AppViewModel: NSObject, ObservableObject {
     private var importedMusicURL: URL?
     private var narrationPreviewAudioURL: URL?
     private var narrationPreviewCues: [NarrationPreviewBuilder.SubtitleCue] = []
+    /// Populated when preview TTS uses one utterance per script paragraph (Edit Story block mode).
+    private var narrationPreviewParagraphPlaybackRanges: [(start: Double, end: Double)] = []
+    private var narrationPreviewParagraphRangesAreScriptAligned = false
+    private var narrationPreviewStorySyncFingerprintAtBuild = ""
     private var narrationTimelineEngine = SubtitleTimelineEngine(cues: [])
     private var previewSourceText = ""
     private var previewSourceVoiceIdentifier = ""
@@ -739,7 +743,8 @@ final class AppViewModel: NSObject, ObservableObject {
 
         stopLiveNarrationPlayback()
         narrationText = cleanedText
-        statusMessage = "Script cleaned for narration."
+        reconcileStoryEditBlocksWithScript()
+        statusMessage = "Script cleaned. Paragraphs are separated by a blank line for Edit Story blocks."
     }
 
     private func stopLiveNarrationPlayback(reason: String? = nil) {
@@ -1313,20 +1318,32 @@ final class AppViewModel: NSObject, ObservableObject {
             quality: selectedVideoModeQuality
         )
 
-        let paragraphSegmentsForExport: [String]?
         let storyBlockDescriptorForExport: VideoExporter.StoryBlockExportDescriptor?
-        let bypassNarrationPreviewAudio: Bool
+        let paragraphSegmentsForExport: [String]?
         if storyUsesBlockTimeline,
            selectedTimingMode == .story,
            storyBlockValidationErrors().isEmpty,
            let descriptor = makeStoryBlockExportDescriptor() {
-            paragraphSegmentsForExport = storyScriptParagraphs
             storyBlockDescriptorForExport = descriptor
-            bypassNarrationPreviewAudio = true
+            paragraphSegmentsForExport = storyScriptParagraphs
         } else {
-            paragraphSegmentsForExport = nil
             storyBlockDescriptorForExport = nil
-            bypassNarrationPreviewAudio = false
+            paragraphSegmentsForExport = nil
+        }
+        let bypassNarrationPreviewAudio = storyBlockDescriptorForExport != nil
+
+        if storyUsesBlockTimeline,
+           selectedTimingMode == .story,
+           storyBlockValidationErrors().isEmpty,
+           storyBlockDescriptorForExport == nil {
+            statusMessage = "Could not build Edit Story blocks for export. Open Edit Story and assign pool media to every paragraph block, then try again."
+            exportProgress = 0
+            if renderQuality == .preview {
+                isPreparingVideoPreview = false
+            } else {
+                isExportingVideo = false
+            }
+            return
         }
 
         Task {
@@ -2229,6 +2246,23 @@ final class AppViewModel: NSObject, ObservableObject {
             || previewSourceVoiceIdentifier != voiceIdentifier
             || abs(previewSourceSpeechRate - speechRateMultiplier) > 0.0001
             || (requireFullLength && !narrationPreviewIsFullLength)
+            || narrationPreviewNeedsStoryFingerprintRefresh()
+    }
+
+    private func currentStoryNarrationPreviewFingerprint() -> String {
+        let blocks = storyEditBlocks.sorted { $0.firstParagraphIndex < $1.firstParagraphIndex }
+        let body = blocks.map { b in
+            let mids = b.mediaItemIDs.map(\.uuidString).joined(separator: ",")
+            return "\(b.firstParagraphIndex)-\(b.lastParagraphIndex):\(mids)"
+        }.joined(separator: "|")
+        return "\(storyScriptParagraphs.count)|\(body)"
+    }
+
+    private func narrationPreviewNeedsStoryFingerprintRefresh() -> Bool {
+        guard storyUsesBlockTimeline, storyBlockValidationErrors().isEmpty, !storyScriptParagraphs.isEmpty else {
+            return false
+        }
+        return narrationPreviewStorySyncFingerprintAtBuild != currentStoryNarrationPreviewFingerprint()
     }
 
     private func prepareNarrationPreview(
@@ -2249,11 +2283,24 @@ final class AppViewModel: NSObject, ObservableObject {
             isPreparingNarrationPreview = false
         }
 
+        let useStoryBlockPreview = storyUsesBlockTimeline
+            && storyBlockValidationErrors().isEmpty
+            && !storyScriptParagraphs.isEmpty
+        let storyBlockPreviewScripts: [String]? = useStoryBlockPreview
+            ? storyEditBlocks
+                .sorted { $0.firstParagraphIndex < $1.firstParagraphIndex }
+                .map { block in
+                    storyScriptParagraphs[block.firstParagraphIndex...block.lastParagraphIndex]
+                        .joined(separator: "\n\n")
+                }
+            : nil
         let preview = try await narrationPreviewBuilder.buildPreview(
             text: text,
             voiceIdentifier: voiceIdentifier,
             speechRateMultiplier: speechRateMultiplier,
             maximumDuration: maximumDuration,
+            forcedParagraphSegments: nil,
+            storyBlockTexts: storyBlockPreviewScripts,
             progressHandler: progressHandler
         )
         narrationPreviewPlayer = try AVAudioPlayer(contentsOf: preview.audioURL)
@@ -2262,6 +2309,9 @@ final class AppViewModel: NSObject, ObservableObject {
         narrationPreviewDuration = preview.duration
         narrationPreviewCurrentTime = 0
         narrationPreviewCues = preview.cues
+        narrationPreviewParagraphPlaybackRanges = preview.paragraphPlaybackRanges
+        narrationPreviewParagraphRangesAreScriptAligned = useStoryBlockPreview
+        narrationPreviewStorySyncFingerprintAtBuild = useStoryBlockPreview ? currentStoryNarrationPreviewFingerprint() : ""
         narrationTimelineEngine = SubtitleTimelineEngine(cues: narrationPreviewCues)
         narrationPreviewCaption = preview.cues.first?.text ?? "Preview ready."
         previewSourceText = text
@@ -2283,6 +2333,9 @@ final class AppViewModel: NSObject, ObservableObject {
         narrationPreviewDuration = 0
         narrationPreviewCurrentTime = 0
         narrationPreviewCues = []
+        narrationPreviewParagraphPlaybackRanges = []
+        narrationPreviewParagraphRangesAreScriptAligned = false
+        narrationPreviewStorySyncFingerprintAtBuild = ""
         narrationTimelineEngine = SubtitleTimelineEngine(cues: [])
         previewSourceText = ""
         previewSourceVoiceIdentifier = ""
@@ -2830,6 +2883,35 @@ final class AppViewModel: NSObject, ObservableObject {
         } else {
             narrationPreviewCaption = narrationPreviewCues.first?.text ?? "Build a seekable preview to test subtitle sync."
         }
+        syncCurrentSlideWithStoryNarrationPreview(at: time)
+    }
+
+    /// While Edit Story blocks are valid, keep the Media carousel on the first clip of the active **block** (ranges follow per-block narration).
+    private func syncCurrentSlideWithStoryNarrationPreview(at time: Double) {
+        guard narrationPreviewParagraphRangesAreScriptAligned,
+              !narrationPreviewParagraphPlaybackRanges.isEmpty,
+              !storyEditBlocks.isEmpty,
+              !mediaItems.isEmpty else { return }
+
+        let ranges = narrationPreviewParagraphPlaybackRanges
+        let blockIndex: Int = {
+            if let i = ranges.firstIndex(where: { time >= $0.start && time < $0.end }) {
+                return i
+            }
+            if time >= (ranges.last?.end ?? 0) {
+                return max(0, ranges.count - 1)
+            }
+            return 0
+        }()
+
+        let sortedBlocks = storyEditBlocks.sorted { $0.firstParagraphIndex < $1.firstParagraphIndex }
+        guard blockIndex < sortedBlocks.count,
+              let firstID = sortedBlocks[blockIndex].mediaItemIDs.first,
+              let idx = mediaItems.firstIndex(where: { $0.id == firstID }) else { return }
+
+        if currentSlideIndex != idx {
+            currentSlideIndex = idx
+        }
     }
 
     private func downsampledImage(from data: Data, maxDimension: CGFloat) -> UIImage? {
@@ -3073,7 +3155,36 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     private var estimatedNarrationDurationSeconds: Double {
-        let normalized = normalizedNarrationSourceText
+        Self.estimateNarrationDurationSeconds(
+            forScript: normalizedNarrationSourceText,
+            speechRateMultiplier: selectedNarrationSpeed
+        )
+    }
+
+    /// Same pacing heuristic as full-script `estimatedNarrationMetaLine`, for one block’s paragraph range (Edit Story assign sheet).
+    func blockNarrationEstimateMetaLine(paragraphRange range: ClosedRange<Int>) -> String {
+        let paras = storyScriptParagraphs
+        guard !paras.isEmpty,
+              range.lowerBound >= 0,
+              range.upperBound < paras.count,
+              range.lowerBound <= range.upperBound else {
+            return "Block narration length: —"
+        }
+        let chunk = paras[range.lowerBound...range.upperBound].joined(separator: "\n\n")
+        let trimmed = chunk.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            return "Block narration length: —"
+        }
+        let seconds = Self.estimateNarrationDurationSeconds(
+            forScript: trimmed,
+            speechRateMultiplier: selectedNarrationSpeed
+        )
+        let chars = trimmed.count
+        return "Block narration length: \(formatPreviewTime(seconds)) (estimate) · \(chars) characters"
+    }
+
+    private static func estimateNarrationDurationSeconds(forScript text: String, speechRateMultiplier: Double) -> Double {
+        let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !normalized.isEmpty else { return 0 }
 
         let segments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
@@ -3085,7 +3196,7 @@ final class AppViewModel: NSObject, ObservableObject {
             let words = timingText.split(whereSeparator: \.isWhitespace)
             return partial + max(Double(words.count) / 2.4, 0.8)
         }, 1)
-        return max(baseEstimate / max(SpeechVoiceLibrary.effectiveSpeechRateMultiplier(for: selectedNarrationSpeed), 0.1), 1)
+        return max(baseEstimate / max(SpeechVoiceLibrary.effectiveSpeechRateMultiplier(for: speechRateMultiplier), 0.1), 1)
     }
 
     private var estimatedMediaOnlyDurationSeconds: Double {
@@ -3147,6 +3258,12 @@ final class AppViewModel: NSObject, ObservableObject {
     var storyCaptionOffPlanningWarning: String? {
         guard selectedTimingMode == .story,
               !includesFinalCaptions else { return nil }
+
+        // Legacy pool-wide check: caption-off story spreads time across *all* pool photos.
+        // Block timeline composes per block; average time per pool photo is meaningless here.
+        if storyUsesBlockTimeline {
+            return nil
+        }
 
         let narrationSeconds = estimatedNarrationDurationSeconds
         guard narrationSeconds > 0 else { return nil }
@@ -3303,8 +3420,29 @@ final class AppViewModel: NSObject, ObservableObject {
         return ""
     }
 
-    private static func cleanedNarrationText(from text: String) -> String {
-        let rawLines = text.components(separatedBy: .newlines)
+    /// Normalizes newlines and blank lines so `StoryScriptPartition.nonEmptyParagraphs` can split on `\n\n`.
+    private static func normalizeNarrationNewlinesForParagraphs(_ text: String) -> String {
+        var s = text
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .replacingOccurrences(of: "\r", with: "\n")
+        // Whitespace-only lines act as paragraph breaks (same as an empty line).
+        s = s.replacingOccurrences(
+            of: #"\n[ \t\u{00A0}\u{3000}]*\n"#,
+            with: "\n\n",
+            options: .regularExpression
+        )
+        while s.contains("\n\n\n") {
+            s = s.replacingOccurrences(of: "\n\n\n", with: "\n\n")
+        }
+        return s
+    }
+
+    /// True when the user already marked paragraph boundaries with a blank line (or whitespace-only line).
+    private static func narrationHasExplicitParagraphBreaks(_ normalized: String) -> Bool {
+        normalized.range(of: #"\n\s*\n"#, options: .regularExpression) != nil
+    }
+
+    private static func pauseAndCleanupLineSequence(rawLines: [String]) -> [String] {
         let cleanedLines = rawLines
             .map(cleanupNarrationLine)
             .filter { !$0.isEmpty }
@@ -3324,7 +3462,34 @@ final class AppViewModel: NSObject, ObservableObject {
             }
         }
 
-        return finalLines.joined(separator: "\n")
+        return finalLines
+    }
+
+    /// Cleans pasted/script text for TTS and ensures **paragraph breaks are blank lines** (`\n\n`), matching `StoryScriptPartition.nonEmptyParagraphs` for Edit Story.
+    /// - If the script already has blank-line paragraph breaks, those boundaries are kept; single newlines inside a paragraph stay as line breaks within that paragraph.
+    /// - If there are **no** blank-line breaks (only single `\n`, e.g. hard-wrapped paste), each non-empty line becomes its own paragraph so you can assign blocks.
+    private static func cleanedNarrationText(from text: String) -> String {
+        let normalized = normalizeNarrationNewlinesForParagraphs(text)
+        let trimmedAll = normalized.trimmingCharacters(in: narrationTrimCharacterSet)
+        guard !trimmedAll.isEmpty else { return "" }
+
+        let explicitParagraphs = narrationHasExplicitParagraphBreaks(normalized)
+
+        if explicitParagraphs {
+            let chunks = normalized
+                .components(separatedBy: "\n\n")
+                .map { $0.trimmingCharacters(in: narrationTrimCharacterSet) }
+                .filter { !$0.isEmpty }
+            let paragraphs: [String] = chunks.map { chunk in
+                let rawLines = chunk.components(separatedBy: "\n")
+                return pauseAndCleanupLineSequence(rawLines: rawLines).joined(separator: "\n")
+            }.filter { !$0.isEmpty }
+            return paragraphs.joined(separator: "\n\n")
+        }
+
+        let rawLines = normalized.components(separatedBy: "\n")
+        let linesOut = pauseAndCleanupLineSequence(rawLines: rawLines)
+        return linesOut.joined(separator: "\n\n")
     }
 
     /// Strips characters that often hide inside pasted text (NBSP, BOM, ZWSP, bidi marks) so dot-only detection matches what the user sees.

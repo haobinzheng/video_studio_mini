@@ -209,6 +209,8 @@ struct VideoExporter {
         let captionSegments: [CaptionSegment]
         let utteranceAudioURLs: [URL]
         let utteranceDurations: [CMTime]
+        /// Edit Story: utterance index ranges per block (blocks sorted by `firstParagraphIndex`). Nil when not using per-block whole-script narration.
+        let storyBlockUtteranceRanges: [Range<Int>]?
     }
 
     private struct CaptionSlice {
@@ -426,16 +428,61 @@ struct VideoExporter {
         let narrationTimeline: NarrationTimeline
         if shouldUseNarration {
             progressHandler?(0.16, "Preparing narration and captions.")
+            let storyBlockScripts: [String]?
+            if useStoryBlocks,
+               let paras = paragraphNarrationSegments,
+               let desc = storyBlockDescriptor {
+                let sortedBlocks = desc.blocks.sorted { $0.firstParagraphIndex < $1.firstParagraphIndex }
+                storyBlockScripts = sortedBlocks.map { block in
+                    paras[block.firstParagraphIndex...block.lastParagraphIndex].joined(separator: "\n\n")
+                }
+            } else {
+                storyBlockScripts = nil
+            }
             narrationTimeline = try await synthesizeNarrationIfNeeded(
                 text: narrationText,
                 voiceIdentifier: voiceIdentifier,
                 workspace: workspace,
                 externalCues: externalCues,
                 externalNarrationAudioURL: externalNarrationAudioURL,
-                forcedParagraphSegments: useStoryBlocks ? paragraphNarrationSegments : nil
+                forcedParagraphSegments: nil,
+                storyBlockNarrationSegments: storyBlockScripts
             )
+            if useStoryBlocks, narrationTimeline.storyBlockUtteranceRanges == nil {
+                throw ExportError.invalidStoryBlockPlan
+            }
         } else {
-            narrationTimeline = NarrationTimeline(duration: .zero, captionSegments: [], utteranceAudioURLs: [], utteranceDurations: [])
+            narrationTimeline = NarrationTimeline(
+                duration: .zero,
+                captionSegments: [],
+                utteranceAudioURLs: [],
+                utteranceDurations: [],
+                storyBlockUtteranceRanges: nil
+            )
+        }
+
+        /// Per-utterance lengths from files (when available) so audio mux matches frame schedule.
+        var utteranceDurationsForCompose = narrationTimeline.utteranceDurations
+        if !narrationTimeline.utteranceAudioURLs.isEmpty,
+           narrationTimeline.utteranceAudioURLs.count == narrationTimeline.utteranceDurations.count {
+            let fromFiles = try await utteranceDurationsFromAssetFiles(urls: narrationTimeline.utteranceAudioURLs)
+            if fromFiles.count == narrationTimeline.utteranceDurations.count {
+                utteranceDurationsForCompose = fromFiles
+            }
+        }
+
+        let blockNarrationDurations: [CMTime]?
+        if useStoryBlocks, let ranges = narrationTimeline.storyBlockUtteranceRanges {
+            guard ranges.allSatisfy({ $0.lowerBound >= 0 && $0.upperBound <= utteranceDurationsForCompose.count }) else {
+                throw ExportError.invalidStoryBlockPlan
+            }
+            blockNarrationDurations = ranges.map { range in
+                range.reduce(CMTime.zero) { partial, index in
+                    CMTimeAdd(partial, utteranceDurationsForCompose[index])
+                }
+            }
+        } else {
+            blockNarrationDurations = nil
         }
 
         let totalDuration: CMTime
@@ -448,20 +495,42 @@ struct VideoExporter {
                 narrationDuration: narrationTimeline.duration
             )
         case .story:
-            totalDuration = narrationTimeline.duration > .zero
-                ? narrationTimeline.duration
-                : minimumVisualDuration
+            if useStoryBlocks {
+                let sumUtterance = utteranceDurationsForCompose.reduce(CMTime.zero, +)
+                totalDuration = sumUtterance > .zero ? sumUtterance : minimumVisualDuration
+            } else {
+                totalDuration = narrationTimeline.duration > .zero
+                    ? narrationTimeline.duration
+                    : minimumVisualDuration
+            }
         }
-        let resolvedDuration = renderQuality.maximumDuration.map { min(totalDuration, $0) } ?? totalDuration
+        /// Default preview cap is 20s — too short to judge Edit Story block/photo sync on ~1min+ scripts.
+        let resolvedDuration: CMTime
+        if renderQuality == .preview, useStoryBlocks {
+            let storyBlockPreviewMax = CMTime(seconds: 180, preferredTimescale: 600)
+            resolvedDuration = CMTimeMinimum(totalDuration, storyBlockPreviewMax)
+        } else if let previewCap = renderQuality.maximumDuration {
+            resolvedDuration = CMTimeMinimum(totalDuration, previewCap)
+        } else {
+            resolvedDuration = totalDuration
+        }
         let baseTimelineSegments: [TimelineSegment]
-        if let descriptor = storyBlockDescriptor, timingMode == .story {
+        if let descriptor = storyBlockDescriptor,
+           timingMode == .story,
+           let blockDurs = blockNarrationDurations,
+           let paras = paragraphNarrationSegments {
+            let sumUtterance = utteranceDurationsForCompose.reduce(CMTime.zero, +)
             baseTimelineSegments = try composeStoryBlockTimelineSegments(
                 mediaItems: mediaItems,
                 descriptor: descriptor,
-                utteranceDurations: narrationTimeline.utteranceDurations,
-                totalNarrationDuration: totalDuration
+                scriptParagraphCount: paras.count,
+                blockNarrationDurations: blockDurs,
+                totalNarrationDuration: sumUtterance
             )
         } else {
+            if useStoryBlocks {
+                throw ExportError.invalidStoryBlockPlan
+            }
             baseTimelineSegments = try await makeTimelineSegments(
                 for: mediaItems,
                 totalDuration: totalDuration,
@@ -663,6 +732,17 @@ struct VideoExporter {
         return trimmedURLs
     }
 
+    private func utteranceDurationsFromAssetFiles(urls: [URL]) async throws -> [CMTime] {
+        var result: [CMTime] = []
+        result.reserveCapacity(urls.count)
+        for url in urls {
+            let asset = AVURLAsset(url: url)
+            let duration = try await asset.load(.duration)
+            result.append(duration)
+        }
+        return result
+    }
+
     private func trimmedAudioCopy(from sourceURL: URL, duration: CMTime) async throws -> URL {
         let asset = AVURLAsset(url: sourceURL)
         guard let exportSession = AVAssetExportSession(asset: asset, presetName: AVAssetExportPresetAppleM4A) else {
@@ -706,11 +786,18 @@ struct VideoExporter {
         workspace: URL,
         externalCues: [ExternalCue],
         externalNarrationAudioURL: URL?,
-        forcedParagraphSegments: [String]? = nil
+        forcedParagraphSegments: [String]? = nil,
+        storyBlockNarrationSegments: [String]? = nil
     ) async throws -> NarrationTimeline {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmedText.isEmpty || !externalCues.isEmpty else {
-            return NarrationTimeline(duration: .zero, captionSegments: [], utteranceAudioURLs: [], utteranceDurations: [])
+        guard !trimmedText.isEmpty || !externalCues.isEmpty || !(storyBlockNarrationSegments?.isEmpty ?? true) else {
+            return NarrationTimeline(
+                duration: .zero,
+                captionSegments: [],
+                utteranceAudioURLs: [],
+                utteranceDurations: [],
+                storyBlockUtteranceRanges: nil
+            )
         }
 
         if let externalNarrationAudioURL, !externalCues.isEmpty {
@@ -722,21 +809,45 @@ struct VideoExporter {
                 duration: resolvedDuration,
                 captionSegments: captionSegments(from: externalCues),
                 utteranceAudioURLs: [externalNarrationAudioURL],
-                utteranceDurations: [resolvedDuration]
+                utteranceDurations: [resolvedDuration],
+                storyBlockUtteranceRanges: nil
             )
         }
 
         let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
         let narrationSegments: [String]
-        if let forced = forcedParagraphSegments, !forced.isEmpty {
+        let storyBlockUtteranceRanges: [Range<Int>]?
+        if let blockScripts = storyBlockNarrationSegments, !blockScripts.isEmpty {
+            var flat: [String] = []
+            var ranges: [Range<Int>] = []
+            var u = 0
+            for blockScript in blockScripts {
+                var subs = StoryScriptPartition.narrationSegmentsWholeScriptStyle(
+                    blockText: blockScript,
+                    voiceIdentifier: voiceIdentifier
+                )
+                if subs.isEmpty {
+                    subs = [" "]
+                }
+                let start = u
+                flat.append(contentsOf: subs)
+                u += subs.count
+                ranges.append(start..<u)
+            }
+            narrationSegments = flat
+            storyBlockUtteranceRanges = ranges
+        } else if let forced = forcedParagraphSegments, !forced.isEmpty {
             narrationSegments = forced
+            storyBlockUtteranceRanges = nil
         } else if SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag) {
             let sentences = CaptionTextChunker.sentenceSegmentsForNarration(trimmedText)
             narrationSegments = sentences.isEmpty
                 ? SpeechVoiceLibrary.narrationSegments(from: trimmedText, optimizeForLongForm: true)
                 : sentences
+            storyBlockUtteranceRanges = nil
         } else {
             narrationSegments = SpeechVoiceLibrary.narrationSegments(from: trimmedText, optimizeForLongForm: true)
+            storyBlockUtteranceRanges = nil
         }
         let utterances = narrationSegments.map {
             SpeechVoiceLibrary.makeUtterance(from: $0, voiceIdentifier: voiceIdentifier)
@@ -756,7 +867,14 @@ struct VideoExporter {
             seconds: estimatedNarrationSeconds(for: narrationSegments),
             preferredTimescale: 600
         )
-        let totalDuration = max(measuredNarrationDuration, estimatedNarrationDuration, CMTime(seconds: 1, preferredTimescale: 600))
+        // Edit Story blocks: drive length from real TTS samples only. Bumping to estimated here
+        // stretched the slideshow (or drift-padded the last segment) while audio stayed measured.
+        let totalDuration: CMTime
+        if storyBlockUtteranceRanges != nil {
+            totalDuration = max(measuredNarrationDuration, CMTime(seconds: 1, preferredTimescale: 600))
+        } else {
+            totalDuration = max(measuredNarrationDuration, estimatedNarrationDuration, CMTime(seconds: 1, preferredTimescale: 600))
+        }
         let captionSegments = externalCues.isEmpty
             ? timedCaptionSegments(
                 from: narrationSegments,
@@ -773,7 +891,8 @@ struct VideoExporter {
             duration: resolvedDuration,
             captionSegments: captionSegments,
             utteranceAudioURLs: utteranceAudioURLs,
-            utteranceDurations: utteranceDurations
+            utteranceDurations: utteranceDurations,
+            storyBlockUtteranceRanges: storyBlockUtteranceRanges
         )
     }
 
@@ -833,10 +952,16 @@ struct VideoExporter {
         }
 
         let writer = try AVAssetWriter(outputURL: outputURL, fileType: .mov)
+        // All keyframes: scene changes stay in sync with audio on decode (default GOP can hold the prior image briefly).
+        let compression: [String: Any] = [
+            AVVideoMaxKeyFrameIntervalKey: 1,
+            AVVideoAllowFrameReorderingKey: false
+        ]
         let settings: [String: Any] = [
             AVVideoCodecKey: AVVideoCodecType.h264,
             AVVideoWidthKey: renderSize.width,
-            AVVideoHeightKey: renderSize.height
+            AVVideoHeightKey: renderSize.height,
+            AVVideoCompressionPropertiesKey: compression
         ]
         let writerInput = AVAssetWriterInput(mediaType: .video, outputSettings: settings)
         writerInput.expectsMediaDataInRealTime = false
@@ -862,7 +987,10 @@ struct VideoExporter {
             renderSize: renderSize,
             sampleStride: videoSampleStride
         )
-        
+
+        let orderedTimelineSegments = timelineSegments.sorted {
+            CMTimeCompare($0.timeRange.start, $1.timeRange.start) < 0
+        }
 
         let totalFrames = max(Int(ceil(CMTimeGetSeconds(totalDuration) * Double(frameRate))), timelineSegments.count)
 
@@ -876,7 +1004,7 @@ struct VideoExporter {
             let presentationTime = CMTime(value: CMTimeValue(frameIndex), timescale: frameRate)
             let image = try await mediaFrameForTime(
                 currentTime,
-                timelineSegments: timelineSegments,
+                timelineSegments: orderedTimelineSegments,
                 videoFrameCache: videoFrameCache
             )
             try autoreleasepool {
@@ -2250,20 +2378,22 @@ struct VideoExporter {
     private func composeStoryBlockTimelineSegments(
         mediaItems: [MediaItem],
         descriptor: StoryBlockExportDescriptor,
-        utteranceDurations: [CMTime],
+        scriptParagraphCount: Int,
+        blockNarrationDurations: [CMTime],
         totalNarrationDuration: CMTime
     ) throws -> [TimelineSegment] {
-        let paragraphCount = utteranceDurations.count
-        guard paragraphCount > 0 else { throw ExportError.invalidStoryBlockPlan }
+        guard scriptParagraphCount > 0, !blockNarrationDurations.isEmpty else { throw ExportError.invalidStoryBlockPlan }
 
         var covered = Set<Int>()
         let sortedBlocks = descriptor.blocks.sorted { $0.firstParagraphIndex < $1.firstParagraphIndex }
+        guard sortedBlocks.count == blockNarrationDurations.count else { throw ExportError.invalidStoryBlockPlan }
+
         for block in sortedBlocks {
             guard !block.mediaIndices.isEmpty,
                   block.mediaIndices.allSatisfy({ $0 >= 0 && $0 < mediaItems.count }),
                   block.firstParagraphIndex >= 0,
                   block.lastParagraphIndex >= block.firstParagraphIndex,
-                  block.lastParagraphIndex < paragraphCount else {
+                  block.lastParagraphIndex < scriptParagraphCount else {
                 throw ExportError.invalidStoryBlockPlan
             }
             for idx in block.firstParagraphIndex...block.lastParagraphIndex {
@@ -2271,21 +2401,18 @@ struct VideoExporter {
                 covered.insert(idx)
             }
         }
-        guard covered.count == paragraphCount else { throw ExportError.invalidStoryBlockPlan }
+        guard covered.count == scriptParagraphCount else { throw ExportError.invalidStoryBlockPlan }
 
         var output: [TimelineSegment] = []
         var offset = CMTime.zero
 
-        for block in sortedBlocks {
+        for (block, blockDuration) in zip(sortedBlocks, blockNarrationDurations) {
             let blockMedia = block.mediaIndices.map { mediaItems[$0] }
-            var blockDuration = CMTime.zero
-            for p in block.firstParagraphIndex...block.lastParagraphIndex where p < utteranceDurations.count {
-                blockDuration = blockDuration + utteranceDurations[p]
+            var effectiveDuration = blockDuration
+            if effectiveDuration <= .zero {
+                effectiveDuration = CMTime(seconds: 0.1, preferredTimescale: 600)
             }
-            if blockDuration <= .zero {
-                blockDuration = CMTime(seconds: 0.1, preferredTimescale: 600)
-            }
-            let localSegments = timelineSegmentsForEditStoryBlock(mediaItems: blockMedia, blockDuration: blockDuration)
+            let localSegments = timelineSegmentsForEditStoryBlock(mediaItems: blockMedia, blockDuration: effectiveDuration)
             for seg in localSegments {
                 let shiftedStart = CMTimeAdd(offset, seg.timeRange.start)
                 output.append(
@@ -2295,7 +2422,7 @@ struct VideoExporter {
                     )
                 )
             }
-            offset = CMTimeAdd(offset, blockDuration)
+            offset = CMTimeAdd(offset, effectiveDuration)
         }
 
         let drift = CMTimeSubtract(totalNarrationDuration, offset)
@@ -2675,12 +2802,27 @@ struct VideoExporter {
         return segments
     }
 
+    /// Active segment at `t`: last segment whose range start is ≤ `t` (timeline is sorted by start).
+    /// Avoids edge cases where `containsTime` and discrete frame times sit on opposite sides of a cut.
+    private func timelineSegment(at compositionTime: CMTime, segments: [TimelineSegment]) -> TimelineSegment? {
+        guard !segments.isEmpty else { return nil }
+        var chosen = segments[0]
+        for seg in segments.dropFirst() {
+            if CMTimeCompare(seg.timeRange.start, compositionTime) <= 0 {
+                chosen = seg
+            } else {
+                break
+            }
+        }
+        return chosen
+    }
+
     private func mediaFrameForTime(
         _ currentTime: CMTime,
         timelineSegments: [TimelineSegment],
         videoFrameCache: VideoFrameCache
     ) async throws -> UIImage {
-        guard let segment = timelineSegments.first(where: { $0.timeRange.containsTime(currentTime) }) ?? timelineSegments.last else {
+        guard let segment = timelineSegment(at: currentTime, segments: timelineSegments) else {
             return UIImage()
         }
 
