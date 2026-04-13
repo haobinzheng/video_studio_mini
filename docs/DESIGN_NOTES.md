@@ -69,6 +69,19 @@ Product framing:
 - captions on = safer subtitle-first story render
 - captions off = same story pacing, smoother video-style visual finish
 
+## Edit Story (Pro workspace)
+
+Implemented in the **Edit Story** tab (optional; Settings → **Show Edit Story tab** toggles visibility, default on for development):
+
+- **Paragraphs** match `StoryScriptPartition.nonEmptyParagraphs`: split on blank lines (`\n\n+`); whitespace-only chunks dropped.
+- **Blocks** are stored as `AppViewModel.StoryEditBlock` (paragraph index range, ordered `mediaItemIDs`, optional `soundtrackItemID` for future use). Not embedded in the script string.
+- **Export** when **Use block timeline** is on, Story mode is selected, and validation passes:
+  - Narration is synthesized **one utterance per paragraph** (forced segment list), so block durations align with measured TTS per paragraph.
+  - `VideoExporter` builds a global visual timeline by concatenating per-block segments: **photos only** → even split across the block; **mixed or all video** → cycle user media order with **up to 10s** per photo visit and natural clip length per video visit, filling the block’s narration duration.
+  - **Background music** remains the combined mix from the Music tab in v1 (per-block music is UI/metadata only until a later mix pass).
+- **Validation**: every non-empty paragraph must lie in exactly one block; each block needs ≥1 pool medium; pool IDs must resolve. Failures set `isStoryBlockExportBlocking` and disable Preview/Create Video.
+- **Script edits**: `reconcileStoryEditBlocksWithScript()` clamps block ranges when paragraph count changes (user may need to re-partition).
+
 ## Preview Video Disable-State Design
 
 Current problem:

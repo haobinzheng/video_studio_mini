@@ -268,6 +268,7 @@ final class AppViewModel: NSObject, ObservableObject {
         didSet {
             saveNarrationDraft()
             if oldValue != narrationText {
+                reconcileStoryEditBlocksWithScript()
                 markAllVideoRendersDirty(reason: "Script updated. Build a new preview or final render to reflect the latest narration.")
                 invalidateNarrationPreviewIfNeeded()
             }
@@ -417,6 +418,41 @@ final class AppViewModel: NSObject, ObservableObject {
             }
         }
     }
+
+    private static let editStoryProDefaultsKey = "fluxcut.isEditStoryProEnabled"
+
+    /// When false, the Edit tab is hidden (placeholder for StoreKit Pro).
+    @Published var isEditStoryProEnabled: Bool = UserDefaults.standard.object(forKey: "fluxcut.isEditStoryProEnabled") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(isEditStoryProEnabled, forKey: Self.editStoryProDefaultsKey)
+        }
+    }
+
+    struct StoryEditBlock: Identifiable, Equatable {
+        let id: UUID
+        var firstParagraphIndex: Int
+        var lastParagraphIndex: Int
+        var mediaItemIDs: [UUID]
+        var soundtrackItemID: UUID?
+    }
+
+    @Published var storyUsesBlockTimeline = false {
+        didSet {
+            guard oldValue != storyUsesBlockTimeline else { return }
+            hasPendingPreviewChanges = true
+            hasPendingFinalVideoChanges = true
+            markAllVideoRendersDirty(reason: "Edit Story block timeline setting changed.")
+            if storyUsesBlockTimeline {
+                if storyEditBlocks.isEmpty {
+                    resetStoryEditBlocksToDefault()
+                } else {
+                    reconcileStoryEditBlocksWithScript()
+                }
+            }
+        }
+    }
+
+    @Published var storyEditBlocks: [StoryEditBlock] = []
 
     @Published var musicVolume: Double = 0.6 {
         didSet {
@@ -1277,6 +1313,22 @@ final class AppViewModel: NSObject, ObservableObject {
             quality: selectedVideoModeQuality
         )
 
+        let paragraphSegmentsForExport: [String]?
+        let storyBlockDescriptorForExport: VideoExporter.StoryBlockExportDescriptor?
+        let bypassNarrationPreviewAudio: Bool
+        if storyUsesBlockTimeline,
+           selectedTimingMode == .story,
+           storyBlockValidationErrors().isEmpty,
+           let descriptor = makeStoryBlockExportDescriptor() {
+            paragraphSegmentsForExport = storyScriptParagraphs
+            storyBlockDescriptorForExport = descriptor
+            bypassNarrationPreviewAudio = true
+        } else {
+            paragraphSegmentsForExport = nil
+            storyBlockDescriptorForExport = nil
+            bypassNarrationPreviewAudio = false
+        }
+
         Task {
             do {
                 let shouldPrepareNarration = timingMode != .video && !narrationText.isEmpty
@@ -1317,8 +1369,12 @@ final class AppViewModel: NSObject, ObservableObject {
                     : "Preparing video files for export."
                 let exportMediaItems = try await resolveExportMediaItems()
 
-                let previewAudioURL = (timingMode == .video || narrationText.isEmpty) ? nil : narrationPreviewAudioURL
-                let previewCues = (timingMode == .video || narrationText.isEmpty) ? [] : narrationPreviewCues
+                let previewAudioURL = (timingMode == .video || narrationText.isEmpty || bypassNarrationPreviewAudio)
+                    ? nil
+                    : narrationPreviewAudioURL
+                let previewCues = (timingMode == .video || narrationText.isEmpty || bypassNarrationPreviewAudio)
+                    ? []
+                    : narrationPreviewCues
                 let exportedURL = try await Task.detached(priority: .userInitiated) {
                     try await exporter.exportVideo(
                         mediaItems: exportMediaItems,
@@ -1336,6 +1392,8 @@ final class AppViewModel: NSObject, ObservableObject {
                         externalCues: previewCues,
                         externalNarrationAudioURL: previewAudioURL,
                         captionStyle: captionStyleForExport,
+                        paragraphNarrationSegments: paragraphSegmentsForExport,
+                        storyBlockDescriptor: storyBlockDescriptorForExport,
                         progressHandler: { progress, message in
                             Task { @MainActor in
                                 self.exportProgress = progress
@@ -2970,6 +3028,7 @@ final class AppViewModel: NSObject, ObservableObject {
             && !isPreparingNarrationPreview
             && !hasNarrationLanguageMismatchForRender
             && storyCaptionOffPlanningWarning == nil
+            && !isStoryBlockExportBlocking
     }
 
     var canStartFinalVideoRender: Bool {
@@ -2982,6 +3041,7 @@ final class AppViewModel: NSObject, ObservableObject {
             && hasPendingFinalVideoChanges
             && !hasNarrationLanguageMismatchForRender
             && storyCaptionOffPlanningWarning == nil
+            && !isStoryBlockExportBlocking
     }
 
     var activeStatusMessage: String {
@@ -3537,6 +3597,181 @@ final class AppViewModel: NSObject, ObservableObject {
                 || option.language.hasPrefix("ko")
         }
         return option.language.hasPrefix("en")
+    }
+
+    var storyScriptParagraphs: [String] {
+        StoryScriptPartition.nonEmptyParagraphs(from: narrationText)
+    }
+
+    var isStoryBlockExportBlocking: Bool {
+        storyUsesBlockTimeline && selectedTimingMode == .story && !storyBlockValidationErrors().isEmpty
+    }
+
+    func storyBlockOrdinal(forParagraphIndex index: Int) -> Int? {
+        let sorted = storyEditBlocks.sorted { $0.firstParagraphIndex < $1.firstParagraphIndex }
+        guard let found = sorted.firstIndex(where: { $0.firstParagraphIndex <= index && $0.lastParagraphIndex >= index }) else { return nil }
+        return found + 1
+    }
+
+    func storyBlockValidationErrors() -> [String] {
+        guard storyUsesBlockTimeline, selectedTimingMode == .story else { return [] }
+        let n = storyScriptParagraphs.count
+        if n == 0 {
+            return ["Add script text with paragraphs separated by a blank line."]
+        }
+        var errors: [String] = []
+        var covered = Set<Int>()
+        let sorted = storyEditBlocks.sorted { $0.firstParagraphIndex < $1.firstParagraphIndex }
+        for block in sorted {
+            if block.mediaItemIDs.isEmpty {
+                errors.append("Every block needs at least one medium from the pool.")
+            }
+            let start = block.firstParagraphIndex
+            let end = block.lastParagraphIndex
+            if start < 0 || end >= n || start > end {
+                errors.append("A story block has an invalid paragraph range after your script changed.")
+                continue
+            }
+            for i in start...end {
+                if covered.contains(i) {
+                    errors.append("Paragraph \(i + 1) is assigned to more than one block.")
+                }
+                covered.insert(i)
+            }
+            let missingMedia = block.mediaItemIDs.contains { id in
+                !mediaItems.contains(where: { $0.id == id })
+            }
+            if missingMedia {
+                errors.append("A block references media that is not in the pool.")
+            }
+        }
+        for i in 0..<n where !covered.contains(i) {
+            errors.append("Paragraph \(i + 1) is not assigned to any block.")
+        }
+        return errors
+    }
+
+    func makeStoryBlockExportDescriptor() -> VideoExporter.StoryBlockExportDescriptor? {
+        guard storyBlockValidationErrors().isEmpty else { return nil }
+        let idToIndex = Dictionary(uniqueKeysWithValues: mediaItems.enumerated().map { ($0.element.id, $0.offset) })
+        var blocks: [VideoExporter.StoryBlockExportDescriptor.Block] = []
+        for block in storyEditBlocks.sorted(by: { $0.firstParagraphIndex < $1.firstParagraphIndex }) {
+            let indices = block.mediaItemIDs.compactMap { idToIndex[$0] }
+            guard indices.count == block.mediaItemIDs.count else { return nil }
+            blocks.append(
+                VideoExporter.StoryBlockExportDescriptor.Block(
+                    firstParagraphIndex: block.firstParagraphIndex,
+                    lastParagraphIndex: block.lastParagraphIndex,
+                    mediaIndices: indices
+                )
+            )
+        }
+        return VideoExporter.StoryBlockExportDescriptor(blocks: blocks)
+    }
+
+    func resetStoryEditBlocksToDefault() {
+        let paras = storyScriptParagraphs
+        guard !paras.isEmpty else {
+            storyEditBlocks = []
+            return
+        }
+        storyEditBlocks = [
+            StoryEditBlock(
+                id: UUID(),
+                firstParagraphIndex: 0,
+                lastParagraphIndex: paras.count - 1,
+                mediaItemIDs: mediaItems.map(\.id),
+                soundtrackItemID: nil
+            )
+        ]
+    }
+
+    func reconcileStoryEditBlocksWithScript() {
+        guard storyUsesBlockTimeline else { return }
+        let n = storyScriptParagraphs.count
+        guard n > 0 else {
+            storyEditBlocks = []
+            return
+        }
+        var updated: [StoryEditBlock] = []
+        for var block in storyEditBlocks {
+            let start = min(max(block.firstParagraphIndex, 0), n - 1)
+            let end = min(max(block.lastParagraphIndex, start), n - 1)
+            block.firstParagraphIndex = start
+            block.lastParagraphIndex = end
+            updated.append(block)
+        }
+        storyEditBlocks = updated.sorted { $0.firstParagraphIndex < $1.firstParagraphIndex }
+    }
+
+    func storyEditBlockCoveringExactRange(_ range: ClosedRange<Int>) -> StoryEditBlock? {
+        let lo = range.lowerBound
+        let hi = range.upperBound
+        return storyEditBlocks.first { $0.firstParagraphIndex == lo && $0.lastParagraphIndex == hi }
+    }
+
+    /// Display ordinal (1-based) for this paragraph range after overlapping blocks are replaced and the range is inserted.
+    func previewStoryBlockOrdinalForAssignment(firstParagraphIndex lo: Int, lastParagraphIndex hi: Int) -> Int {
+        let survivors = storyEditBlocks.filter { block in
+            block.lastParagraphIndex < lo || block.firstParagraphIndex > hi
+        }
+        var merged = survivors
+        merged.append(
+            StoryEditBlock(
+                id: UUID(),
+                firstParagraphIndex: lo,
+                lastParagraphIndex: hi,
+                mediaItemIDs: [],
+                soundtrackItemID: nil
+            )
+        )
+        merged.sort { $0.firstParagraphIndex < $1.firstParagraphIndex }
+        let idx = merged.firstIndex { $0.firstParagraphIndex == lo && $0.lastParagraphIndex == hi } ?? max(merged.count - 1, 0)
+        return idx + 1
+    }
+
+    func clearAllStoryEditBlocks() {
+        storyEditBlocks = []
+        markAllVideoRendersDirty(reason: "All story blocks cleared.")
+    }
+
+    func assignStoryMediaToParagraphRange(_ range: ClosedRange<Int>, mediaItemIDs: [UUID]) {
+        guard !mediaItemIDs.isEmpty else { return }
+        let n = storyScriptParagraphs.count
+        guard n > 0 else { return }
+        let lo = min(max(range.lowerBound, 0), n - 1)
+        let hi = min(max(range.upperBound, lo), n - 1)
+        storyEditBlocks.removeAll { block in
+            !(block.lastParagraphIndex < lo || block.firstParagraphIndex > hi)
+        }
+        let newBlock = StoryEditBlock(
+            id: UUID(),
+            firstParagraphIndex: lo,
+            lastParagraphIndex: hi,
+            mediaItemIDs: mediaItemIDs,
+            soundtrackItemID: nil
+        )
+        storyEditBlocks.append(newBlock)
+        storyEditBlocks.sort { $0.firstParagraphIndex < $1.firstParagraphIndex }
+        markAllVideoRendersDirty(reason: "Edit Story block media assignment changed.")
+    }
+
+    func setStoryBlockSoundtrackItem(blockID: UUID, soundtrackItemID: UUID?) {
+        guard let idx = storyEditBlocks.firstIndex(where: { $0.id == blockID }) else { return }
+        storyEditBlocks[idx].soundtrackItemID = soundtrackItemID
+        markAllVideoRendersDirty(reason: "Edit Story block music hint updated (final mix still uses the Music tab queue in v1).")
+    }
+
+    func previewStorySoundtrackItem(_ item: SoundtrackItem) {
+        configureAudioSessionIfNeeded()
+        do {
+            stopMusicSilently()
+            try prepareAudioPlayer(with: item.url)
+            audioPlayer?.numberOfLoops = 0
+            statusMessage = "\(item.name) is loaded. Use the play control in Music for full-queue playback."
+        } catch {
+            statusMessage = "Could not preview that soundtrack item."
+        }
     }
 
     private func resetSpeechSynthesizer() {

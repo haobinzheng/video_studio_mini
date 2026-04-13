@@ -19,6 +19,12 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-12 — Edit Story tab and block export
+
+- Added **Edit Story** studio step: media pool, music queue preview, script paragraphs with block badges, staged multi-clip assign to a contiguous paragraph range.
+- Story mode export path: optional `paragraphNarrationSegments` + `StoryBlockExportDescriptor` in `VideoExporter`; paragraph-aligned synthesis and composed block timelines.
+- Settings toggle **Show Edit Story tab** (`fluxcut.isEditStoryProEnabled`) as Pro placeholder.
+
 ### Concept 1
 
 - `Flow Ribbon`

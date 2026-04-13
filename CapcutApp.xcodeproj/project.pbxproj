@@ -19,6 +19,7 @@
 		A1B2C3D41E00001100000001 /* SubtitleTimelineEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001300000001 /* SubtitleTimelineEngine.swift */; };
 		A1B2C3D41E00001200000001 /* FluxCutLogoMark.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001400000001 /* FluxCutLogoMark.swift */; };
 		A1B2C3D41E00002000000001 /* CaptionTextChunker.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001600000001 /* CaptionTextChunker.swift */; };
+		A1B2C3D41E00002100000001 /* StoryScriptPartition.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001700000001 /* StoryScriptPartition.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -36,6 +37,7 @@
 		A1B2C3D41D00001300000001 /* SubtitleTimelineEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SubtitleTimelineEngine.swift; sourceTree = "<group>"; };
 		A1B2C3D41D00001400000001 /* FluxCutLogoMark.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FluxCutLogoMark.swift; sourceTree = "<group>"; };
 		A1B2C3D41D00001600000001 /* CaptionTextChunker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CaptionTextChunker.swift; sourceTree = "<group>"; };
+		A1B2C3D41D00001700000001 /* StoryScriptPartition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoryScriptPartition.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -66,6 +68,7 @@
 				A1B2C3D41D00000800000001 /* VideoExporter.swift */,
 				A1B2C3D41D00001200000001 /* NarrationPreviewBuilder.swift */,
 				A1B2C3D41D00001600000001 /* CaptionTextChunker.swift */,
+				A1B2C3D41D00001700000001 /* StoryScriptPartition.swift */,
 				A1B2C3D41D00001300000001 /* SubtitleTimelineEngine.swift */,
 				A1B2C3D41D00001400000001 /* FluxCutLogoMark.swift */,
 				A1B2C3D41D00000900000001 /* SampleMusic/dream_culture.mp3 */,
@@ -165,6 +168,7 @@
 				A1B2C3D41E00000600000001 /* VideoExporter.swift in Sources */,
 				A1B2C3D41E00000200000001 /* ContentView.swift in Sources */,
 				A1B2C3D41E00000100000001 /* CapcutApp.swift in Sources */,
+				A1B2C3D41E00002100000001 /* StoryScriptPartition.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

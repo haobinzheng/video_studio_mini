@@ -193,10 +193,22 @@ struct VideoExporter {
 
     typealias ExternalCue = NarrationPreviewBuilder.SubtitleCue
 
+    /// Ordered story blocks: each covers an inclusive paragraph index range; `mediaIndices` index into the export `mediaItems` array.
+    struct StoryBlockExportDescriptor: Sendable {
+        struct Block: Sendable {
+            let firstParagraphIndex: Int
+            let lastParagraphIndex: Int
+            let mediaIndices: [Int]
+        }
+
+        let blocks: [Block]
+    }
+
     private struct NarrationTimeline {
         let duration: CMTime
         let captionSegments: [CaptionSegment]
         let utteranceAudioURLs: [URL]
+        let utteranceDurations: [CMTime]
     }
 
     private struct CaptionSlice {
@@ -360,6 +372,8 @@ struct VideoExporter {
         externalCues: [ExternalCue] = [],
         externalNarrationAudioURL: URL? = nil,
         captionStyle: CaptionStyle = .normal,
+        paragraphNarrationSegments: [String]? = nil,
+        storyBlockDescriptor: StoryBlockExportDescriptor? = nil,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws -> URL {
         guard !mediaItems.isEmpty else {
@@ -387,20 +401,25 @@ struct VideoExporter {
             return finalURL
         }
 
-        let hasVideos = mediaItems.contains {
+        let useStoryBlocks = timingMode == .story && storyBlockDescriptor != nil
+        if useStoryBlocks, paragraphNarrationSegments?.isEmpty ?? true {
+            throw ExportError.invalidStoryBlockPlan
+        }
+
+        let hasVideosInPool = mediaItems.contains {
             if case .video = $0.kind { return true }
             return false
         }
-        let hasPhotos = mediaItems.contains {
+        let hasPhotosInPool = mediaItems.contains {
             if case .photo = $0.kind { return true }
             return false
         }
-        let hasMixedStoryMedia = timingMode == .story && hasVideos && hasPhotos
+        var hasMixedStoryMedia = timingMode == .story && hasVideosInPool && hasPhotosInPool
         /// Story timeline has only video clips (no photos) — always use composition/export instead of per-frame slideshow rendering.
-        let storyVideoOnlyMedia = timingMode == .story && hasVideos && !hasPhotos
+        var storyVideoOnlyMedia = timingMode == .story && hasVideosInPool && !hasPhotosInPool
         /// Story + captions needs a caption-burn pass; mixed and video-only use an intermediate file. Photo-only story still uses one-pass slideshow rendering.
-        let storyUsesCaptionIntermediateFile =
-            timingMode == .story && includeCaptions && hasVideos && (hasMixedStoryMedia || !hasPhotos)
+        var storyUsesCaptionIntermediateFile =
+            timingMode == .story && includeCaptions && hasVideosInPool && (hasMixedStoryMedia || !hasPhotosInPool)
 
         let minimumVisualDuration = minimumVisualDuration(for: mediaItems)
         let shouldUseNarration = timingMode != .video
@@ -412,10 +431,11 @@ struct VideoExporter {
                 voiceIdentifier: voiceIdentifier,
                 workspace: workspace,
                 externalCues: externalCues,
-                externalNarrationAudioURL: externalNarrationAudioURL
+                externalNarrationAudioURL: externalNarrationAudioURL,
+                forcedParagraphSegments: useStoryBlocks ? paragraphNarrationSegments : nil
             )
         } else {
-            narrationTimeline = NarrationTimeline(duration: .zero, captionSegments: [], utteranceAudioURLs: [])
+            narrationTimeline = NarrationTimeline(duration: .zero, captionSegments: [], utteranceAudioURLs: [], utteranceDurations: [])
         }
 
         let totalDuration: CMTime
@@ -433,12 +453,37 @@ struct VideoExporter {
                 : minimumVisualDuration
         }
         let resolvedDuration = renderQuality.maximumDuration.map { min(totalDuration, $0) } ?? totalDuration
-        let baseTimelineSegments = try await makeTimelineSegments(
-            for: mediaItems,
-            totalDuration: totalDuration,
-            timingMode: timingMode,
-            includeCaptions: includeCaptions
-        )
+        let baseTimelineSegments: [TimelineSegment]
+        if let descriptor = storyBlockDescriptor, timingMode == .story {
+            baseTimelineSegments = try composeStoryBlockTimelineSegments(
+                mediaItems: mediaItems,
+                descriptor: descriptor,
+                utteranceDurations: narrationTimeline.utteranceDurations,
+                totalNarrationDuration: totalDuration
+            )
+        } else {
+            baseTimelineSegments = try await makeTimelineSegments(
+                for: mediaItems,
+                totalDuration: totalDuration,
+                timingMode: timingMode,
+                includeCaptions: includeCaptions
+            )
+        }
+
+        if useStoryBlocks {
+            let hasVideosInTimeline = baseTimelineSegments.contains {
+                if case .video = $0.mediaItem.kind { return true }
+                return false
+            }
+            let hasPhotosInTimeline = baseTimelineSegments.contains {
+                if case .photo = $0.mediaItem.kind { return true }
+                return false
+            }
+            hasMixedStoryMedia = hasVideosInTimeline && hasPhotosInTimeline
+            storyVideoOnlyMedia = hasVideosInTimeline && !hasPhotosInTimeline
+            storyUsesCaptionIntermediateFile =
+                includeCaptions && hasVideosInTimeline && (hasMixedStoryMedia || !hasPhotosInTimeline)
+        }
         let timelineSegments = resolvedDuration < totalDuration
             ? timelineSegmentsTrimmed(to: resolvedDuration, segments: baseTimelineSegments)
             : baseTimelineSegments
@@ -660,11 +705,12 @@ struct VideoExporter {
         voiceIdentifier: String,
         workspace: URL,
         externalCues: [ExternalCue],
-        externalNarrationAudioURL: URL?
+        externalNarrationAudioURL: URL?,
+        forcedParagraphSegments: [String]? = nil
     ) async throws -> NarrationTimeline {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty || !externalCues.isEmpty else {
-            return NarrationTimeline(duration: .zero, captionSegments: [], utteranceAudioURLs: [])
+            return NarrationTimeline(duration: .zero, captionSegments: [], utteranceAudioURLs: [], utteranceDurations: [])
         }
 
         if let externalNarrationAudioURL, !externalCues.isEmpty {
@@ -675,13 +721,16 @@ struct VideoExporter {
             return NarrationTimeline(
                 duration: resolvedDuration,
                 captionSegments: captionSegments(from: externalCues),
-                utteranceAudioURLs: [externalNarrationAudioURL]
+                utteranceAudioURLs: [externalNarrationAudioURL],
+                utteranceDurations: [resolvedDuration]
             )
         }
 
         let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
         let narrationSegments: [String]
-        if SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag) {
+        if let forced = forcedParagraphSegments, !forced.isEmpty {
+            narrationSegments = forced
+        } else if SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag) {
             let sentences = CaptionTextChunker.sentenceSegmentsForNarration(trimmedText)
             narrationSegments = sentences.isEmpty
                 ? SpeechVoiceLibrary.narrationSegments(from: trimmedText, optimizeForLongForm: true)
@@ -723,7 +772,8 @@ struct VideoExporter {
         return NarrationTimeline(
             duration: resolvedDuration,
             captionSegments: captionSegments,
-            utteranceAudioURLs: utteranceAudioURLs
+            utteranceAudioURLs: utteranceAudioURLs,
+            utteranceDurations: utteranceDurations
         )
     }
 
@@ -2197,6 +2247,152 @@ struct VideoExporter {
         }
     }
 
+    private func composeStoryBlockTimelineSegments(
+        mediaItems: [MediaItem],
+        descriptor: StoryBlockExportDescriptor,
+        utteranceDurations: [CMTime],
+        totalNarrationDuration: CMTime
+    ) throws -> [TimelineSegment] {
+        let paragraphCount = utteranceDurations.count
+        guard paragraphCount > 0 else { throw ExportError.invalidStoryBlockPlan }
+
+        var covered = Set<Int>()
+        let sortedBlocks = descriptor.blocks.sorted { $0.firstParagraphIndex < $1.firstParagraphIndex }
+        for block in sortedBlocks {
+            guard !block.mediaIndices.isEmpty,
+                  block.mediaIndices.allSatisfy({ $0 >= 0 && $0 < mediaItems.count }),
+                  block.firstParagraphIndex >= 0,
+                  block.lastParagraphIndex >= block.firstParagraphIndex,
+                  block.lastParagraphIndex < paragraphCount else {
+                throw ExportError.invalidStoryBlockPlan
+            }
+            for idx in block.firstParagraphIndex...block.lastParagraphIndex {
+                guard !covered.contains(idx) else { throw ExportError.invalidStoryBlockPlan }
+                covered.insert(idx)
+            }
+        }
+        guard covered.count == paragraphCount else { throw ExportError.invalidStoryBlockPlan }
+
+        var output: [TimelineSegment] = []
+        var offset = CMTime.zero
+
+        for block in sortedBlocks {
+            let blockMedia = block.mediaIndices.map { mediaItems[$0] }
+            var blockDuration = CMTime.zero
+            for p in block.firstParagraphIndex...block.lastParagraphIndex where p < utteranceDurations.count {
+                blockDuration = blockDuration + utteranceDurations[p]
+            }
+            if blockDuration <= .zero {
+                blockDuration = CMTime(seconds: 0.1, preferredTimescale: 600)
+            }
+            let localSegments = timelineSegmentsForEditStoryBlock(mediaItems: blockMedia, blockDuration: blockDuration)
+            for seg in localSegments {
+                let shiftedStart = CMTimeAdd(offset, seg.timeRange.start)
+                output.append(
+                    TimelineSegment(
+                        mediaItem: seg.mediaItem,
+                        timeRange: CMTimeRange(start: shiftedStart, duration: seg.timeRange.duration)
+                    )
+                )
+            }
+            offset = CMTimeAdd(offset, blockDuration)
+        }
+
+        let drift = CMTimeSubtract(totalNarrationDuration, offset)
+        let driftSeconds = CMTimeGetSeconds(drift)
+        if abs(driftSeconds) > 0.05, let lastIndex = output.indices.last {
+            let seg = output[lastIndex]
+            let newDuration = CMTimeAdd(seg.timeRange.duration, drift)
+            if newDuration > .zero {
+                output[lastIndex] = TimelineSegment(
+                    mediaItem: seg.mediaItem,
+                    timeRange: CMTimeRange(start: seg.timeRange.start, duration: newDuration)
+                )
+            }
+        }
+
+        return output
+    }
+
+    private func timelineSegmentsForEditStoryBlock(mediaItems: [MediaItem], blockDuration: CMTime) -> [TimelineSegment] {
+        guard blockDuration > .zero, !mediaItems.isEmpty else { return [] }
+
+        let allPhotos = mediaItems.allSatisfy { item in
+            if case .photo = item.kind { return true }
+            return false
+        }
+        if allPhotos {
+            return editStoryEvenSplitPhotoTimeline(mediaItems: mediaItems, blockDuration: blockDuration)
+        }
+        return editStoryMixedOrVideoCycleTimeline(mediaItems: mediaItems, blockDuration: blockDuration)
+    }
+
+    private func editStoryEvenSplitPhotoTimeline(mediaItems: [MediaItem], blockDuration: CMTime) -> [TimelineSegment] {
+        let n = mediaItems.count
+        guard n > 0 else { return [] }
+        var segments: [TimelineSegment] = []
+        var cursor = CMTime.zero
+        for (index, item) in mediaItems.enumerated() {
+            let remaining = CMTimeSubtract(blockDuration, cursor)
+            guard remaining > .zero else { break }
+            let isLast = index == n - 1
+            let slot = isLast
+                ? remaining
+                : CMTimeMultiplyByFloat64(blockDuration, multiplier: 1.0 / Double(n))
+            let slice = CMTimeMinimum(slot, remaining)
+            guard slice > .zero else { break }
+            segments.append(TimelineSegment(mediaItem: item, timeRange: CMTimeRange(start: cursor, duration: slice)))
+            cursor = CMTimeAdd(cursor, slice)
+        }
+        return segments
+    }
+
+    /// Photos and videos: up to 10s per photo visit, natural clip length per video visit, cycling the list until the block ends.
+    private func editStoryMixedOrVideoCycleTimeline(mediaItems: [MediaItem], blockDuration: CMTime) -> [TimelineSegment] {
+        guard blockDuration > .zero, !mediaItems.isEmpty else { return [] }
+        let tenSeconds = CMTime(seconds: 10, preferredTimescale: 600)
+        let epsilon = CMTime(value: 1, timescale: 10_000)
+        var segments: [TimelineSegment] = []
+        var cursor = CMTime.zero
+        var loopSafety = 0
+        var mediaRound = 0
+
+        while cursor < blockDuration - epsilon, loopSafety < 10_000 {
+            loopSafety += 1
+            let item = mediaItems[mediaRound % mediaItems.count]
+            mediaRound += 1
+            let remaining = CMTimeSubtract(blockDuration, cursor)
+            guard remaining > epsilon else { break }
+
+            let slot: CMTime
+            switch item.kind {
+            case .photo:
+                slot = CMTimeMinimum(tenSeconds, remaining)
+            case let .video(_, duration):
+                slot = CMTimeMinimum(duration, remaining)
+            }
+
+            guard slot > epsilon else { continue }
+
+            segments.append(TimelineSegment(mediaItem: item, timeRange: CMTimeRange(start: cursor, duration: slot)))
+            cursor = CMTimeAdd(cursor, slot)
+        }
+
+        if cursor < blockDuration - epsilon, let last = segments.indices.last {
+            let gap = CMTimeSubtract(blockDuration, cursor)
+            let lastSeg = segments[last]
+            segments[last] = TimelineSegment(
+                mediaItem: lastSeg.mediaItem,
+                timeRange: CMTimeRange(
+                    start: lastSeg.timeRange.start,
+                    duration: CMTimeAdd(lastSeg.timeRange.duration, gap)
+                )
+            )
+        }
+
+        return segments
+    }
+
     private func makeTimelineSegments(
         for mediaItems: [MediaItem],
         totalDuration: CMTime,
@@ -2786,6 +2982,7 @@ struct VideoExporter {
         case exportSessionFailed
         case exportFailed
         case storyNeedsMoreMedia
+        case invalidStoryBlockPlan
 
         var errorDescription: String? {
             switch self {
@@ -2805,6 +3002,8 @@ struct VideoExporter {
                 return "Video export did not complete."
             case .storyNeedsMoreMedia:
                 return "Story without captions needs more media. Add more photos or videos so each photo would be 20 seconds or less."
+            case .invalidStoryBlockPlan:
+                return "Story block layout is invalid. Assign every script paragraph to a block with at least one medium."
             }
         }
     }
