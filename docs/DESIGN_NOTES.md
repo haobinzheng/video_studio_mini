@@ -73,15 +73,42 @@ Product framing:
 
 Implemented in the **Edit Story** tab (optional; Settings → **Show Edit Story tab** toggles visibility, default on for development):
 
+### Segments, media vs music (terminology)
+
+- **Media block**: one contiguous range of script **paragraphs** plus ordered pool clips (`AppViewModel.StoryEditBlock`: `firstParagraphIndex`…`lastParagraphIndex`, `mediaItemIDs`). Visual timeline only.
+- **Music segment**: an independent contiguous paragraph range with its own soundtrack choice (`AppViewModel.StoryMusicBedSegment`). It does **not** have to align with media blocks—e.g. media block 1 can be paragraphs 1–3 while music segment 1 spans 1–6.
+- **Edit tab structure**: segmented **Media** | **Music** (when **Use block timeline** is on). **Media** is script paragraphs labeled **Block** (track order/imports stay on the main **Music** tab). **Music** shows the same script with music assignment captions. Music **Assign** opens the soundtrack sheet for any valid contiguous paragraph selection (after the same gate as media: block timeline on and media assigned somewhere).
+
+### Per–music-segment soundtrack rules (product)
+
+- **One bed per music segment**: at most **one** assigned soundtrack (library track or Music-tab combined mix) per contiguous music span; overlapping spans are merged/replaced on assign.
+- **Always start at 0:00**: when that span’s narration plays, its bed **starts at the beginning** of the chosen source for that span.
+- **Shorter narration than track**: play from 0:00 and **trim** when the span ends.
+- **Same track on another span**: allowed; each span **starts that file at 0:00**.
+- **Shorter track than narration**: **loop** to cover the span duration.
+
+### Current implementation notes
+
 - **Paragraphs** match `StoryScriptPartition.nonEmptyParagraphs`: split on blank lines (`\n\n+`); whitespace-only chunks dropped.
-- **Blocks** are stored as `AppViewModel.StoryEditBlock` (paragraph index range, ordered `mediaItemIDs`, optional `soundtrackItemID` for future use). Not embedded in the script string.
+- **Media blocks** are `AppViewModel.StoryEditBlock` (paragraph range + `mediaItemIDs`). **Music** is `AppViewModel.storyMusicBedSegments` (`StoryMusicBedSegment`: paragraph range + optional library track id, or nil for Music-tab mix). Not embedded in the script string.
 - **Export** when **Use block timeline** is on, Story mode is selected, and validation passes:
   - Narration uses **whole-script-style** segmentation **per block** (`StoryScriptPartition.narrationSegmentsWholeScriptStyle`), then measured utterance lengths; timeline length and block composition use **measured TTS only** (no `max(measured, estimated)` inflation) so slideshow frames stay aligned with audio.
   - `VideoExporter` builds a global visual timeline by concatenating per-block segments: **photos only** → even split across the block; **mixed or all video** → cycle user media order with **up to 10s** per photo visit and natural clip length per video visit, filling the block’s narration duration. If block composition cannot run while block mode is on, export fails fast instead of falling back to caption-off “split pool across whole story” pacing.
   - If **Use block timeline** is on and validation passes but `makeStoryBlockExportDescriptor()` fails, **AppViewModel** aborts before export with a clear message (avoids legacy pool-wide story pacing). **Preview** with Edit Story blocks uses up to **180s** of measured narration (not the default **20s** preview cap) so multi-block photo timing can be checked.
-  - **Background music** remains the combined mix from the Music tab in v1 (per-block music is UI/metadata only until a later mix pass).
+  - **Background music (Edit Story + block timeline)**: `AppViewModel` passes `makeStoryMusicBedSpansForExport()` as `storyMusicBedSpans` (global paragraph indices + optional URL). `VideoExporter.buildStorySegmentMusicSlots` maps paragraph-level narration timing to beds: assigned URL or Music-tab **combined** `backgroundMusicURL` per span; gaps use the combined mix. Each bed **starts at 0:00**, **trims**/**loops** as above. Non-Edit-Story Story exports still use a single looped global bed.
 - **Validation**: every non-empty paragraph must lie in exactly one block; each block needs ≥1 pool medium; pool IDs must resolve. Failures set `isStoryBlockExportBlocking` and disable Preview/Create Video.
-- **Script edits**: `reconcileStoryEditBlocksWithScript()` clamps block ranges when paragraph count changes (user may need to re-partition).
+- **Script edits**: `reconcileStoryEditBlocksWithScript()` clamps media blocks; `reconcileStoryMusicSegmentsWithScript()` clamps `storyMusicBedSegments` to valid paragraph indices (user may need to re-partition).
+
+### Segment media assignment sheet (full-screen)
+
+Opened from **Edit** when the user selects a contiguous paragraph range and taps **Assign** (media / visual assignment for that segment).
+
+- **Narration meta** (orange capsule): uses `AppViewModel.blockNarrationEstimateMetaLine(paragraphRange:)` so **estimated length and character count** refer to **that block’s** joined paragraphs only, not the full script (same heuristic as global narration estimate, scoped to the range).
+- **Segment script**: A read-only scrollable card sits **between** the horizontal **pool** thumbnail strip and **Studio Tip**, showing the paragraph text for the selected range (`storyScriptParagraphs` joined with `\n\n`) so media choices stay aligned with what will be spoken in that segment.
+- **Large preview controls**: **+** adds the **current** pool clip to the block draft; **−** removes it from the draft (no ellipsis menu).
+- **Assigned to this segment (order)**: Thumbnails reflect draft `mediaItemIDs`; **video** clips show a **video** badge. **Tap** jumps the big preview to that clip; **double-tap** removes it from the draft. **Reorder** uses the same **drag-and-drop** as the **Media** tab (`onDrag` + `onDrop` with `UTType.text` / UUID string). Only the **draft** is mutated until **Done**; global pool order is unchanged.
+- **Muted looping preview**: When the active slide’s item reaches **readyToPlay**, playback starts on the **AVPlayerItem status** path (not only via SwiftUI `onChange`), so auto-start stays reliable; optional **Play** while buffering remains an early-start affordance.
+- **Studio Tip** below the block script summarizes swipe, pool thumbnail tap / double-tap, **+** / **−** on the preview, and assigned-strip gestures.
 
 ## Preview Video Disable-State Design
 

@@ -193,6 +193,14 @@ struct VideoExporter {
 
     typealias ExternalCue = NarrationPreviewBuilder.SubtitleCue
 
+    /// Music beds on **global** script paragraph indices (independent of media blocks). Gaps use the combined mix.
+    struct StoryMusicBedSpanExport: Sendable {
+        let firstParagraphIndex: Int
+        let lastParagraphIndex: Int
+        /// Nil → combined `backgroundMusicURL` for this span.
+        let soundtrackURL: URL?
+    }
+
     /// Ordered story blocks: each covers an inclusive paragraph index range; `mediaIndices` index into the export `mediaItems` array.
     struct StoryBlockExportDescriptor: Sendable {
         struct Block: Sendable {
@@ -202,6 +210,12 @@ struct VideoExporter {
         }
 
         let blocks: [Block]
+    }
+
+    /// One story segment’s bed duration; `sourceURL` nil means silence for that span (no global fallback available).
+    private struct StorySegmentMusicSlot: Sendable {
+        let duration: CMTime
+        let sourceURL: URL?
     }
 
     private struct NarrationTimeline {
@@ -376,6 +390,7 @@ struct VideoExporter {
         captionStyle: CaptionStyle = .normal,
         paragraphNarrationSegments: [String]? = nil,
         storyBlockDescriptor: StoryBlockExportDescriptor? = nil,
+        storyMusicBedSpans: [StoryMusicBedSpanExport]? = nil,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws -> URL {
         guard !mediaItems.isEmpty else {
@@ -575,6 +590,25 @@ struct VideoExporter {
             maxDuration: resolvedDuration
         )
 
+        let storySegmentMusicSlots: [StorySegmentMusicSlot]?
+        if useStoryBlocks,
+           let desc = storyBlockDescriptor,
+           let ranges = narrationTimeline.storyBlockUtteranceRanges,
+           let paras = paragraphNarrationSegments,
+           !trimmedNarrationURLs.isEmpty {
+            storySegmentMusicSlots = try await buildStorySegmentMusicSlots(
+                storyParagraphCount: paras.count,
+                descriptor: desc,
+                musicSpans: storyMusicBedSpans ?? [],
+                fallbackMusicURL: backgroundMusicURL,
+                blockUtteranceRanges: ranges,
+                trimmedNarrationURLs: trimmedNarrationURLs,
+                resolvedTimelineDuration: resolvedDuration
+            )
+        } else {
+            storySegmentMusicSlots = nil
+        }
+
         let shouldUseSmoothStoryExport =
             timingMode == .story &&
             (storyVideoOnlyMedia
@@ -617,6 +651,7 @@ struct VideoExporter {
                 exportPresetName: effectiveSlideshowSettings.presetName,
                 workspace: workspace,
                 outputURL: smoothOutputURL,
+                storySegmentMusic: storySegmentMusicSlots,
                 progressHandler: progressHandler
             )
 
@@ -662,7 +697,8 @@ struct VideoExporter {
             narrationVolume: narrationVolume,
             videoAudioVolume: videoAudioVolume,
             totalDuration: resolvedDuration,
-            outputURL: finalURL
+            outputURL: finalURL,
+            storySegmentMusic: storySegmentMusicSlots
         )
         progressHandler?(1.0, "Finalizing exported video.")
 
@@ -730,6 +766,181 @@ struct VideoExporter {
         }
 
         return trimmedURLs
+    }
+
+    /// Per-block narration duration on the export timeline, aligned to `trimmedNarrationURLs` (preview cap, partial last utterance, etc.).
+    private func storyBlockPerBlockDurationsFromTrimmedNarration(
+        blockUtteranceRanges: [Range<Int>],
+        trimmedNarrationURLs: [URL]
+    ) async throws -> [CMTime] {
+        var utteranceDurations: [CMTime] = []
+        utteranceDurations.reserveCapacity(trimmedNarrationURLs.count)
+        for url in trimmedNarrationURLs {
+            let asset = AVURLAsset(url: url)
+            utteranceDurations.append(try await asset.load(.duration))
+        }
+
+        var prefix: [CMTime] = [.zero]
+        for d in utteranceDurations {
+            prefix.append(prefix.last! + d)
+        }
+        let n = utteranceDurations.count
+
+        return blockUtteranceRanges.map { range in
+            let a = range.lowerBound
+            let b = range.upperBound
+            if a >= n || a >= b { return CMTime.zero }
+            let endIdx = min(b, n)
+            return CMTimeSubtract(prefix[endIdx], prefix[a])
+        }
+    }
+
+    private func reconcileStoryBlockMusicDurationsToTimeline(
+        blockDurations: inout [CMTime],
+        resolvedTimelineDuration: CMTime
+    ) {
+        guard !blockDurations.isEmpty else { return }
+        let sum = blockDurations.reduce(CMTime.zero, +)
+        let delta = CMTimeSubtract(resolvedTimelineDuration, sum)
+        guard CMTimeCompare(delta, .zero) != 0, let lastIdx = blockDurations.indices.last else { return }
+        let adjusted = CMTimeAdd(blockDurations[lastIdx], delta)
+        blockDurations[lastIdx] = CMTimeMaximum(.zero, adjusted)
+    }
+
+    private func buildStorySegmentMusicSlots(
+        storyParagraphCount: Int,
+        descriptor: StoryBlockExportDescriptor,
+        musicSpans: [StoryMusicBedSpanExport],
+        fallbackMusicURL: URL?,
+        blockUtteranceRanges: [Range<Int>],
+        trimmedNarrationURLs: [URL],
+        resolvedTimelineDuration: CMTime
+    ) async throws -> [StorySegmentMusicSlot] {
+        let sortedBlocks = descriptor.blocks.sorted { $0.firstParagraphIndex < $1.firstParagraphIndex }
+        guard sortedBlocks.count == blockUtteranceRanges.count, storyParagraphCount > 0 else {
+            throw ExportError.invalidStoryBlockPlan
+        }
+
+        var blockDurations = try await storyBlockPerBlockDurationsFromTrimmedNarration(
+            blockUtteranceRanges: blockUtteranceRanges,
+            trimmedNarrationURLs: trimmedNarrationURLs
+        )
+        reconcileStoryBlockMusicDurationsToTimeline(
+            blockDurations: &blockDurations,
+            resolvedTimelineDuration: resolvedTimelineDuration
+        )
+
+        var paragraphDurations = [CMTime](repeating: .zero, count: storyParagraphCount)
+        for (block, dur) in zip(sortedBlocks, blockDurations) {
+            guard CMTimeCompare(dur, .zero) > 0 else { continue }
+            let bf = block.firstParagraphIndex
+            let bl = block.lastParagraphIndex
+            guard bf >= 0, bl < storyParagraphCount, bf <= bl else { throw ExportError.invalidStoryBlockPlan }
+            let n = bl - bf + 1
+            let sec = CMTimeGetSeconds(dur) / Double(n)
+            let perPara = CMTime(seconds: sec, preferredTimescale: 600)
+            for p in bf...bl {
+                paragraphDurations[p] = perPara
+            }
+        }
+
+        var paraSum = paragraphDurations.reduce(CMTime.zero, +)
+        let paraDelta = CMTimeSubtract(resolvedTimelineDuration, paraSum)
+        if CMTimeCompare(paraDelta, .zero) != 0, storyParagraphCount > 0 {
+            let li = storyParagraphCount - 1
+            paragraphDurations[li] = CMTimeMaximum(.zero, CMTimeAdd(paragraphDurations[li], paraDelta))
+        }
+
+        let sortedSpans = musicSpans.sorted { $0.firstParagraphIndex < $1.firstParagraphIndex }
+        func resolvedURL(forParagraph p: Int) -> URL? {
+            for span in sortedSpans {
+                guard span.firstParagraphIndex <= span.lastParagraphIndex else { continue }
+                let lo = max(0, span.firstParagraphIndex)
+                let hi = min(storyParagraphCount - 1, span.lastParagraphIndex)
+                if p >= lo, p <= hi {
+                    return span.soundtrackURL ?? fallbackMusicURL
+                }
+            }
+            return fallbackMusicURL
+        }
+
+        var slots: [StorySegmentMusicSlot] = []
+        var runURL = resolvedURL(forParagraph: 0)
+        var runDur = paragraphDurations[0]
+        if storyParagraphCount == 1 {
+            slots.append(StorySegmentMusicSlot(duration: runDur, sourceURL: runURL))
+        } else {
+            for p in 1..<storyParagraphCount {
+                let u = resolvedURL(forParagraph: p)
+                if urlPairMatchesTimelineMusic(u, runURL) {
+                    runDur = CMTimeAdd(runDur, paragraphDurations[p])
+                } else {
+                    if CMTimeCompare(runDur, .zero) > 0 {
+                        slots.append(StorySegmentMusicSlot(duration: runDur, sourceURL: runURL))
+                    }
+                    runURL = u
+                    runDur = paragraphDurations[p]
+                }
+            }
+            if CMTimeCompare(runDur, .zero) > 0 {
+                slots.append(StorySegmentMusicSlot(duration: runDur, sourceURL: runURL))
+            }
+        }
+
+        if slots.isEmpty {
+            slots.append(StorySegmentMusicSlot(duration: resolvedTimelineDuration, sourceURL: fallbackMusicURL))
+        }
+        let slotSum = slots.reduce(CMTime.zero) { CMTimeAdd($0, $1.duration) }
+        let slotDelta = CMTimeSubtract(resolvedTimelineDuration, slotSum)
+        if CMTimeCompare(slotDelta, .zero) != 0, let li = slots.indices.last {
+            slots[li] = StorySegmentMusicSlot(
+                duration: CMTimeMaximum(.zero, CMTimeAdd(slots[li].duration, slotDelta)),
+                sourceURL: slots[li].sourceURL
+            )
+        }
+        return slots
+    }
+
+    /// Compare URLs for mux segment grouping (nil and nil match; same standardized file URL match).
+    private func urlPairMatchesTimelineMusic(_ a: URL?, _ b: URL?) -> Bool {
+        switch (a, b) {
+        case (nil, nil):
+            return true
+        case let (x?, y?):
+            return x.standardizedFileURL == y.standardizedFileURL
+        default:
+            return false
+        }
+    }
+
+    private func appendLoopedSourceAudio(
+        compositionTrack: AVMutableCompositionTrack,
+        sourceURL: URL,
+        outputStart: CMTime,
+        fillDuration: CMTime
+    ) async throws {
+        guard CMTimeCompare(fillDuration, .zero) > 0 else { return }
+
+        let musicAsset = AVURLAsset(url: sourceURL)
+        guard let musicTrack = try await musicAsset.loadTracks(withMediaType: .audio).first else { return }
+
+        let musicDuration = try await musicAsset.load(.duration)
+        var cursor = outputStart
+        let end = outputStart + fillDuration
+
+        while CMTimeCompare(cursor, end) < 0 {
+            let remaining = CMTimeSubtract(end, cursor)
+            let segmentDuration = CMTimeMinimum(musicDuration, remaining)
+            guard CMTimeCompare(segmentDuration, .zero) > 0 else { break }
+
+            try compositionTrack.insertTimeRange(
+                CMTimeRange(start: .zero, duration: segmentDuration),
+                of: musicTrack,
+                at: cursor
+            )
+            cursor = cursor + segmentDuration
+            if CMTimeCompare(musicDuration, .zero) == 0 { break }
+        }
     }
 
     private func utteranceDurationsFromAssetFiles(urls: [URL]) async throws -> [CMTime] {
@@ -1046,7 +1257,8 @@ struct VideoExporter {
         narrationVolume: Double,
         videoAudioVolume: Double,
         totalDuration: CMTime,
-        outputURL: URL
+        outputURL: URL,
+        storySegmentMusic: [StorySegmentMusicSlot]? = nil
     ) async throws {
         if FileManager.default.fileExists(atPath: outputURL.path) {
             try FileManager.default.removeItem(at: outputURL)
@@ -1118,7 +1330,28 @@ struct VideoExporter {
             audioMixParameters.append(narrationParameters)
         }
 
-        if let backgroundMusicURL {
+        if let slots = storySegmentMusic, !slots.isEmpty, slots.contains(where: { $0.sourceURL != nil }),
+           let compositionMusicTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
+            var musicCursor = CMTime.zero
+            for slot in slots {
+                if let url = slot.sourceURL {
+                    try await appendLoopedSourceAudio(
+                        compositionTrack: compositionMusicTrack,
+                        sourceURL: url,
+                        outputStart: musicCursor,
+                        fillDuration: slot.duration
+                    )
+                }
+                musicCursor = musicCursor + slot.duration
+            }
+
+            let musicParameters = AVMutableAudioMixInputParameters(track: compositionMusicTrack)
+            let resolvedVolume = Float(min(max(backgroundMusicVolume, 0), 1))
+            musicParameters.setVolume(resolvedVolume, at: .zero)
+            let fadeStart = CMTimeMaximum(.zero, totalDuration - CMTime(seconds: 1.2, preferredTimescale: 600))
+            musicParameters.setVolumeRamp(fromStartVolume: resolvedVolume, toEndVolume: 0.0, timeRange: CMTimeRange(start: fadeStart, duration: totalDuration - fadeStart))
+            audioMixParameters.append(musicParameters)
+        } else if let backgroundMusicURL {
             let musicAsset = AVURLAsset(url: backgroundMusicURL)
             if let musicTrack = try await musicAsset.loadTracks(withMediaType: .audio).first,
                let compositionMusicTrack = composition.addMutableTrack(withMediaType: .audio, preferredTrackID: kCMPersistentTrackID_Invalid) {
@@ -1378,6 +1611,7 @@ struct VideoExporter {
         exportPresetName: String,
         workspace: URL,
         outputURL: URL,
+        storySegmentMusic: [StorySegmentMusicSlot]? = nil,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws {
         let composition = AVMutableComposition()
@@ -1496,7 +1730,36 @@ struct VideoExporter {
             audioMixParameters.append(narrationParameters)
         }
 
-        if let backgroundMusicURL {
+        if let slots = storySegmentMusic, !slots.isEmpty, slots.contains(where: { $0.sourceURL != nil }),
+           let compositionMusicTrack = composition.addMutableTrack(
+            withMediaType: .audio,
+            preferredTrackID: kCMPersistentTrackID_Invalid
+           ) {
+            progressHandler?(0.72, "Mixing per-segment music into the story video.")
+            var musicCursor = CMTime.zero
+            for slot in slots {
+                if let url = slot.sourceURL {
+                    try await appendLoopedSourceAudio(
+                        compositionTrack: compositionMusicTrack,
+                        sourceURL: url,
+                        outputStart: musicCursor,
+                        fillDuration: slot.duration
+                    )
+                }
+                musicCursor = musicCursor + slot.duration
+            }
+
+            let musicParameters = AVMutableAudioMixInputParameters(track: compositionMusicTrack)
+            let resolvedMusicVolume = Float(min(max(backgroundMusicVolume, 0), 1))
+            musicParameters.setVolume(resolvedMusicVolume, at: .zero)
+            let fadeStart = CMTimeMaximum(.zero, totalDuration - CMTime(seconds: 1.2, preferredTimescale: 600))
+            musicParameters.setVolumeRamp(
+                fromStartVolume: resolvedMusicVolume,
+                toEndVolume: 0.0,
+                timeRange: CMTimeRange(start: fadeStart, duration: totalDuration - fadeStart)
+            )
+            audioMixParameters.append(musicParameters)
+        } else if let backgroundMusicURL {
             progressHandler?(0.72, "Mixing background music into the real-life video.")
             let musicAsset = AVURLAsset(url: backgroundMusicURL)
             if let musicTrack = try await musicAsset.loadTracks(withMediaType: .audio).first,

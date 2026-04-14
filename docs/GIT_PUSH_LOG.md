@@ -19,6 +19,46 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-14 — `pro-version`: assign sheet controls, assigned-strip UX, preview autoplay, type-check split
+
+- **ContentView**: Block **Assign** large preview uses **+** / **−** (add/remove current clip from draft) instead of an ellipsis menu. **Assigned** row: **video** badge on clips, **tap** selects that clip in the big preview, **double-tap** removes from draft (orange ring when that clip is the active slide). **LoopingVideoPlayerStore** calls `play()` when `AVPlayerItem` is **readyToPlay** if the preview slide is active (`setSlideActiveForPreview`), so muted looping preview auto-starts without relying on SwiftUI `onChange` for readiness. **storyBlockAssignSheet** split into `@ViewBuilder` helpers (`assignSheetDraftAssignedCell`, `assignSheetTabPage`, etc.) to fix **“unable to type-check in reasonable time”** build failures.
+- **AppViewModel / VideoExporter / DESIGN_NOTES**: Carried with this push (Edit Story media vs music segments, per-segment beds export, earlier log bullets below).
+
+### 2026-04-13 — Edit Story Media: remove duplicate Music queue card
+
+- **ContentView**: Dropped the **Music queue** list from Edit → Media (same data as the Music tab; assign sheet still lists tracks). Short caption points users to Music for imports/order.
+- **DESIGN_NOTES**: Media section description updated.
+
+### 2026-04-13 — Edit Story: music spans independent of media blocks
+
+- **Model**: `storyMusicBedSegments` is global; `StoryEditBlock` is media-only. Music assign validates paragraph bounds + block timeline, not media-block boundaries.
+- **Export**: `makeStoryMusicBedSpansForExport()` + `exportVideo(..., storyMusicBedSpans:)`; `VideoExporter` maps spans to paragraph-timed beds.
+- **UI / docs**: Music tab copy and `DESIGN_NOTES` updated.
+
+### 2026-04-12 — Edit Story Music tab: duplicate script list + segment assign sheet
+
+- **ContentView**: Music tab mirrors Media paragraph UI with separate selection; rows show **Segment** vs **Block**; **Assign** → full-screen segment soundtrack picker (exact block range required); **Clear music** clears all `soundtrackItemID`. **AppViewModel**: `clearAllStorySegmentSoundtracks()`.
+
+### 2026-04-12 — Per-segment music: Edit Media|Music UI + export mix
+
+- **VideoExporter**: `StoryBlockExportDescriptor.Block.segmentSoundtrackURL`; `buildStorySegmentMusicSlots` + `appendLoopedSourceAudio`; story block exports pass **per-segment** fills into `mergeAudioAndVideo` and `exportRealLifeComposition` (trim-aligned durations from trimmed narration, loop/trim per rules).
+- **AppViewModel**: descriptor resolves `soundtrackItemID` → URL; **Assign media** preserves a single overlapping segment’s `soundtrackItemID` when re-saving the same range.
+- **ContentView**: Edit Story **Media | Music** segmented control; Music tab = queue preview + per-segment menu picker (default = Music tab mix); assign sheet / labels use **segment** wording.
+- **Docs**: `DESIGN_NOTES` export bullet updated to describe implemented mix.
+
+### 2026-04-12 — Design: segments, media vs music, per-segment soundtrack rules
+
+- **DESIGN_NOTES**: Document **segment** as the shared script unit; **Media** (visual) vs **Music** (sentiment) terminology; target **Edit** split into Media | Music; **one track per segment**; **always start at 0:00**; **trim** when narration is shorter than the file; **reuse** same file on another segment from 0:00 again; **loop** when narration is longer than the file. Clarify current export still uses global Music-tab mix; per-segment mix is future work.
+
+### 2026-04-12 — Milestone push: `pro-version` @ `3381240`
+
+Checkpoint pushed to `origin/pro-version` (Edit Story + Story mode block timeline milestone).
+
+- **Export / sync**: Block-timeline story uses measured TTS sums only; `composeStoryBlockTimelineSegments` without estimated drift; preview renders up to **180s** for block mode; abort before export if block descriptor cannot build while toggle + validation imply blocks; legacy pool-wide story paths avoided when blocks compose.
+- **Script**: Paragraph-aware **Clean Up** (blank-line boundaries for `StoryScriptPartition.nonEmptyParagraphs`); `reconcileStoryEditBlocksWithScript()` after cleanup; caption-off “20s per photo” planning warning skipped when **Use block timeline** is on.
+- **Block assign sheet**: Shows **block** narration length estimate and character count (not whole script); **Block script** preview between thumbnail strip and Studio Tip; **Assigned** row reorders draft `mediaItemIDs` via drag-and-drop (same mechanism as Media tab), without changing global pool order.
+- **Code touchpoints**: `VideoExporter`, `AppViewModel`, `ContentView`, `StoryScriptPartition`, `NarrationPreviewBuilder`; docs updated in this commit.
+
 ### 2026-04-12 — Edit Story preview duration + export guard
 
 - **VideoExporter**: Edit Story block exports in **preview** quality cap at **180s** measured narration instead of **20s**, so block/photo sync is visible on long scripts.

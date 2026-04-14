@@ -169,6 +169,14 @@ final class AppViewModel: NSObject, ObservableObject {
             if case .video = kind { return true }
             return false
         }
+
+        /// File URL when a copy exists on disk. Photo Library picks often start as `nil` until export or preview resolution.
+        var embeddedVideoFileURL: URL? {
+            if case let .video(url, _, _) = kind {
+                return url
+            }
+            return nil
+        }
     }
 
     struct VoiceOption: Identifiable {
@@ -428,12 +436,20 @@ final class AppViewModel: NSObject, ObservableObject {
         }
     }
 
+    /// One music bed on a contiguous **script** paragraph range (independent of media blocks).
+    struct StoryMusicBedSegment: Identifiable, Equatable {
+        let id: UUID
+        var firstParagraphIndex: Int
+        var lastParagraphIndex: Int
+        /// Nil = Music tab combined mix for this span.
+        var soundtrackItemID: UUID?
+    }
+
     struct StoryEditBlock: Identifiable, Equatable {
         let id: UUID
         var firstParagraphIndex: Int
         var lastParagraphIndex: Int
         var mediaItemIDs: [UUID]
-        var soundtrackItemID: UUID?
     }
 
     @Published var storyUsesBlockTimeline = false {
@@ -453,6 +469,7 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     @Published var storyEditBlocks: [StoryEditBlock] = []
+    @Published var storyMusicBedSegments: [StoryMusicBedSegment] = []
 
     @Published var musicVolume: Double = 0.6 {
         didSet {
@@ -1320,15 +1337,18 @@ final class AppViewModel: NSObject, ObservableObject {
 
         let storyBlockDescriptorForExport: VideoExporter.StoryBlockExportDescriptor?
         let paragraphSegmentsForExport: [String]?
+        let storyMusicBedSpansForExport: [VideoExporter.StoryMusicBedSpanExport]?
         if storyUsesBlockTimeline,
            selectedTimingMode == .story,
            storyBlockValidationErrors().isEmpty,
            let descriptor = makeStoryBlockExportDescriptor() {
             storyBlockDescriptorForExport = descriptor
             paragraphSegmentsForExport = storyScriptParagraphs
+            storyMusicBedSpansForExport = makeStoryMusicBedSpansForExport()
         } else {
             storyBlockDescriptorForExport = nil
             paragraphSegmentsForExport = nil
+            storyMusicBedSpansForExport = nil
         }
         let bypassNarrationPreviewAudio = storyBlockDescriptorForExport != nil
 
@@ -1411,6 +1431,7 @@ final class AppViewModel: NSObject, ObservableObject {
                         captionStyle: captionStyleForExport,
                         paragraphNarrationSegments: paragraphSegmentsForExport,
                         storyBlockDescriptor: storyBlockDescriptorForExport,
+                        storyMusicBedSpans: storyMusicBedSpansForExport,
                         progressHandler: { progress, message in
                             Task { @MainActor in
                                 self.exportProgress = progress
@@ -1735,6 +1756,35 @@ final class AppViewModel: NSObject, ObservableObject {
             code: 11,
             userInfo: [NSLocalizedDescriptionKey: "FluxCut could not access one of the selected videos for rendering."]
         )
+    }
+
+    /// Resolves a playable file URL for the big preview (Media / Edit). Handles library assets (`libraryIdentifier`), finished file imports, and in-flight picker items.
+    func resolveVideoPreviewPlaybackURL(for item: MediaItem) async -> URL? {
+        switch item.kind {
+        case .photo:
+            return nil
+        case let .video(existingURL, _, libraryIdentifier):
+            if let existingURL {
+                return existingURL
+            }
+            if let libraryIdentifier {
+                return await photoLibraryVideoURL(forLocalIdentifier: libraryIdentifier)
+            }
+            if let pickerItem = pickerItemsBySourceAssetID[item.sourceAssetID] {
+                return await importedVideoURL(from: pickerItem)
+            }
+            return nil
+        }
+    }
+
+    /// True when a video row is waiting on background file copy (`url` and `libraryIdentifier` both nil).
+    func isVideoFileImportInProgress(for item: MediaItem) -> Bool {
+        guard case let .video(url, _, libraryIdentifier) = item.kind,
+              url == nil,
+              libraryIdentifier == nil else {
+            return false
+        }
+        return pickerItemsBySourceAssetID[item.sourceAssetID] != nil
     }
 
     private func photoLibraryVideoURL(forLocalIdentifier localIdentifier: String) async -> URL? {
@@ -3778,6 +3828,59 @@ final class AppViewModel: NSObject, ObservableObject {
         return found + 1
     }
 
+    /// Which music segment (global 1-based order) covers this paragraph, and its assigned paragraph range.
+    func storyMusicBedDisplay(forParagraphIndex index: Int) -> (segmentOrdinal: Int, assignedRange: ClosedRange<Int>)? {
+        var ord = 1
+        for seg in storyMusicBedSegments.sorted(by: { $0.firstParagraphIndex < $1.firstParagraphIndex }) {
+            if index >= seg.firstParagraphIndex && index <= seg.lastParagraphIndex {
+                return (ord, seg.firstParagraphIndex...seg.lastParagraphIndex)
+            }
+            ord += 1
+        }
+        return nil
+    }
+
+    func storyMusicSegmentOrdinal(forParagraphIndex index: Int) -> Int? {
+        storyMusicBedDisplay(forParagraphIndex: index)?.segmentOrdinal
+    }
+
+    /// Next segment number shown on the assign sheet for a selection starting at `selectionLo` (1-based ordering by paragraph).
+    func storyMusicSegmentOrdinalForAssignSheet(selectionLo: Int) -> Int {
+        storyMusicBedSegments
+            .filter { $0.lastParagraphIndex < selectionLo }
+            .count + 1
+    }
+
+    func storyMusicBedSegmentForExactRange(_ range: ClosedRange<Int>) -> StoryMusicBedSegment? {
+        storyMusicBedSegments.first {
+            $0.firstParagraphIndex == range.lowerBound && $0.lastParagraphIndex == range.upperBound
+        }
+    }
+
+    /// Validates Edit Story → Music assign (paragraph indices only; independent of media blocks).
+    func validateMusicAssignmentSelection(_ selection: ClosedRange<Int>) -> String? {
+        let n = storyScriptParagraphs.count
+        if n == 0 {
+            return "Add script text with paragraphs first."
+        }
+        let lo = selection.lowerBound
+        let hi = selection.upperBound
+        if lo < 0 || hi >= n || lo > hi {
+            return "That paragraph selection is out of range."
+        }
+        if storyUsesBlockTimeline && storyEditBlocks.isEmpty {
+            return "Turn on the block timeline and assign media in the Media tab first."
+        }
+        return nil
+    }
+
+    func storyMusicAssignmentCaption(forParagraphIndex index: Int) -> String {
+        guard let info = storyMusicBedDisplay(forParagraphIndex: index) else { return "Unassigned" }
+        let a = info.assignedRange.lowerBound + 1
+        let b = info.assignedRange.upperBound + 1
+        return "Segment \(info.segmentOrdinal), Paragraphs \(a)–\(b)"
+    }
+
     func storyBlockValidationErrors() -> [String] {
         guard storyUsesBlockTimeline, selectedTimingMode == .story else { return [] }
         let n = storyScriptParagraphs.count
@@ -3834,21 +3937,53 @@ final class AppViewModel: NSObject, ObservableObject {
         return VideoExporter.StoryBlockExportDescriptor(blocks: blocks)
     }
 
+    func makeStoryMusicBedSpansForExport() -> [VideoExporter.StoryMusicBedSpanExport] {
+        let soundtrackURLByID = Dictionary(uniqueKeysWithValues: soundtrackItems.map { ($0.id, $0.url) })
+        return storyMusicBedSegments
+            .sorted { $0.firstParagraphIndex < $1.firstParagraphIndex }
+            .map { seg in
+                VideoExporter.StoryMusicBedSpanExport(
+                    firstParagraphIndex: seg.firstParagraphIndex,
+                    lastParagraphIndex: seg.lastParagraphIndex,
+                    soundtrackURL: seg.soundtrackItemID.flatMap { soundtrackURLByID[$0] }
+                )
+            }
+    }
+
     func resetStoryEditBlocksToDefault() {
         let paras = storyScriptParagraphs
         guard !paras.isEmpty else {
             storyEditBlocks = []
+            storyMusicBedSegments = []
             return
         }
+        storyMusicBedSegments = []
         storyEditBlocks = [
             StoryEditBlock(
                 id: UUID(),
                 firstParagraphIndex: 0,
                 lastParagraphIndex: paras.count - 1,
-                mediaItemIDs: mediaItems.map(\.id),
-                soundtrackItemID: nil
+                mediaItemIDs: mediaItems.map(\.id)
             )
         ]
+    }
+
+    func reconcileStoryMusicSegmentsWithScript() {
+        let n = storyScriptParagraphs.count
+        guard n > 0 else {
+            storyMusicBedSegments = []
+            return
+        }
+        storyMusicBedSegments = storyMusicBedSegments.compactMap { seg -> StoryMusicBedSegment? in
+            let lo = max(0, min(seg.firstParagraphIndex, n - 1))
+            let hi = max(lo, min(seg.lastParagraphIndex, n - 1))
+            guard lo <= hi else { return nil }
+            var s = seg
+            s.firstParagraphIndex = lo
+            s.lastParagraphIndex = hi
+            return s
+        }
+        .sorted { $0.firstParagraphIndex < $1.firstParagraphIndex }
     }
 
     func reconcileStoryEditBlocksWithScript() {
@@ -3856,6 +3991,7 @@ final class AppViewModel: NSObject, ObservableObject {
         let n = storyScriptParagraphs.count
         guard n > 0 else {
             storyEditBlocks = []
+            reconcileStoryMusicSegmentsWithScript()
             return
         }
         var updated: [StoryEditBlock] = []
@@ -3867,6 +4003,7 @@ final class AppViewModel: NSObject, ObservableObject {
             updated.append(block)
         }
         storyEditBlocks = updated.sorted { $0.firstParagraphIndex < $1.firstParagraphIndex }
+        reconcileStoryMusicSegmentsWithScript()
     }
 
     func storyEditBlockCoveringExactRange(_ range: ClosedRange<Int>) -> StoryEditBlock? {
@@ -3886,8 +4023,7 @@ final class AppViewModel: NSObject, ObservableObject {
                 id: UUID(),
                 firstParagraphIndex: lo,
                 lastParagraphIndex: hi,
-                mediaItemIDs: [],
-                soundtrackItemID: nil
+                mediaItemIDs: []
             )
         )
         merged.sort { $0.firstParagraphIndex < $1.firstParagraphIndex }
@@ -3897,7 +4033,13 @@ final class AppViewModel: NSObject, ObservableObject {
 
     func clearAllStoryEditBlocks() {
         storyEditBlocks = []
+        storyMusicBedSegments = []
         markAllVideoRendersDirty(reason: "All story blocks cleared.")
+    }
+
+    func clearAllStorySegmentSoundtracks() {
+        storyMusicBedSegments = []
+        markAllVideoRendersDirty(reason: "All segment soundtrack assignments cleared.")
     }
 
     func assignStoryMediaToParagraphRange(_ range: ClosedRange<Int>, mediaItemIDs: [UUID]) {
@@ -3913,18 +4055,58 @@ final class AppViewModel: NSObject, ObservableObject {
             id: UUID(),
             firstParagraphIndex: lo,
             lastParagraphIndex: hi,
-            mediaItemIDs: mediaItemIDs,
-            soundtrackItemID: nil
+            mediaItemIDs: mediaItemIDs
         )
         storyEditBlocks.append(newBlock)
         storyEditBlocks.sort { $0.firstParagraphIndex < $1.firstParagraphIndex }
         markAllVideoRendersDirty(reason: "Edit Story block media assignment changed.")
     }
 
-    func setStoryBlockSoundtrackItem(blockID: UUID, soundtrackItemID: UUID?) {
-        guard let idx = storyEditBlocks.firstIndex(where: { $0.id == blockID }) else { return }
-        storyEditBlocks[idx].soundtrackItemID = soundtrackItemID
-        markAllVideoRendersDirty(reason: "Edit Story block music hint updated (final mix still uses the Music tab queue in v1).")
+    enum MusicSegmentSoundtrackChoice: Equatable {
+        case musicTabMix
+        case libraryTrack(UUID)
+    }
+
+    func applyMusicSegmentAssignment(choice: MusicSegmentSoundtrackChoice, paragraphRange: ClosedRange<Int>) {
+        let n = storyScriptParagraphs.count
+        guard n > 0 else { return }
+        let lo = max(0, min(paragraphRange.lowerBound, n - 1))
+        let hi = max(lo, min(paragraphRange.upperBound, n - 1))
+        let newRange = lo...hi
+        storyMusicBedSegments.removeAll { existing in
+            let er = existing.firstParagraphIndex...existing.lastParagraphIndex
+            return newRange.lowerBound <= er.upperBound && er.lowerBound <= newRange.upperBound
+        }
+        let trackID: UUID? = {
+            switch choice {
+            case .musicTabMix: return nil
+            case .libraryTrack(let id): return id
+            }
+        }()
+        storyMusicBedSegments.append(
+            StoryMusicBedSegment(id: UUID(), firstParagraphIndex: lo, lastParagraphIndex: hi, soundtrackItemID: trackID)
+        )
+        storyMusicBedSegments.sort { $0.firstParagraphIndex < $1.firstParagraphIndex }
+        markAllVideoRendersDirty(reason: "Edit Story segment music assignment confirmed.")
+    }
+
+    /// Load the combined Music-tab mix for preview (segment sheet “default” row).
+    func prepareCombinedMixPreview() -> Bool {
+        configureAudioSessionIfNeeded()
+        stopMusicSilently()
+        guard let importedMusicURL else {
+            statusMessage = "Add tracks in the Music tab to build a combined mix."
+            return false
+        }
+        do {
+            try prepareAudioPlayer(with: importedMusicURL)
+            audioPlayer?.numberOfLoops = 0
+            statusMessage = "Combined mix is ready to preview."
+            return true
+        } catch {
+            statusMessage = "Could not load the combined mix."
+            return false
+        }
     }
 
     func previewStorySoundtrackItem(_ item: SoundtrackItem) {

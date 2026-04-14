@@ -1,4 +1,5 @@
 import AVKit
+import Combine
 import Photos
 import PhotosUI
 import SwiftUI
@@ -46,12 +47,35 @@ struct ContentView: View {
     @State private var assignSheetDraftMediaIDs: [UUID] = []
     @State private var assignSheetSlideIndex = 0
     @State private var assignSheetBlockOrdinal = 1
-    @State private var previewingStorySoundtrackItemID: UUID?
     @State private var draggedAssignSheetMediaID: UUID?
+    @State private var selectedMusicStoryParagraphIndices: Set<Int> = []
+    @State private var isStoryMusicAssignSheetPresented = false
+    @State private var musicAssignSheetRange: ClosedRange<Int>?
+    @State private var musicAssignSheetSegmentOrdinal = 1
+    @State private var musicAssignDraftChoice: AppViewModel.MusicSegmentSoundtrackChoice?
+    /// Paragraphs the user selected for this music assign (passed through on Done).
+    @State private var musicAssignUserParagraphRange: ClosedRange<Int>?
+    @State private var storyMusicAssignBlockingMessage: String?
+
+    private enum EditStoryEditorTab: String, CaseIterable {
+        case media = "Media"
+        case music = "Music"
+    }
+
+    @State private var editStoryEditorTab: EditStoryEditorTab = .media
     @FocusState private var isNarrationFocused: Bool
 
     private var assignSheetBlockScriptText: String {
         guard let range = assignSheetRange else { return "" }
+        let paras = viewModel.storyScriptParagraphs
+        guard !paras.isEmpty,
+              range.lowerBound >= 0,
+              range.upperBound < paras.count else { return "" }
+        return paras[range.lowerBound...range.upperBound].joined(separator: "\n\n")
+    }
+
+    private var musicAssignSheetScriptText: String {
+        guard let range = musicAssignSheetRange else { return "" }
         let paras = viewModel.storyScriptParagraphs
         guard !paras.isEmpty,
               range.lowerBound >= 0,
@@ -106,6 +130,19 @@ struct ContentView: View {
             .fullScreenCover(isPresented: $isStoryBlockAssignSheetPresented) {
                 storyBlockAssignSheet
             }
+            .fullScreenCover(isPresented: $isStoryMusicAssignSheetPresented) {
+                storyMusicAssignSheet
+            }
+            .alert("Cannot assign music", isPresented: Binding(
+                get: { storyMusicAssignBlockingMessage != nil },
+                set: { if !$0 { storyMusicAssignBlockingMessage = nil } }
+            )) {
+                Button("OK", role: .cancel) {
+                    storyMusicAssignBlockingMessage = nil
+                }
+            } message: {
+                Text(storyMusicAssignBlockingMessage ?? "")
+            }
             .alert(item: $voicePendingHide) { voice in
                 Alert(
                     title: Text("Hide Voice?"),
@@ -148,7 +185,9 @@ struct ContentView: View {
                 }
                 if oldStep == .editStory && newStep != .editStory {
                     viewModel.stopMusicSilently()
-                    previewingStorySoundtrackItemID = nil
+                    selectedMusicStoryParagraphIndices = []
+                    resetStoryMusicAssignSheetState()
+                    isStoryMusicAssignSheetPresented = false
                 }
                 if oldStep == .video && newStep != .video {
                     pauseRenderPlaybackForTabSwitch()
@@ -817,6 +856,17 @@ struct ContentView: View {
         }
     }
 
+    private func assignSheetAddMediaToDraft(_ id: UUID) {
+        guard !assignSheetDraftMediaIDs.contains(id) else { return }
+        assignSheetDraftMediaIDs.append(id)
+    }
+
+    private func assignSheetRemoveMediaFromDraft(_ id: UUID) {
+        if let index = assignSheetDraftMediaIDs.firstIndex(of: id) {
+            assignSheetDraftMediaIDs.remove(at: index)
+        }
+    }
+
     private func moveAssignSheetDraftMedia(draggedId: UUID, before targetId: UUID) {
         guard draggedId != targetId,
               let sourceIndex = assignSheetDraftMediaIDs.firstIndex(of: draggedId),
@@ -862,6 +912,96 @@ struct ContentView: View {
         assignSheetRange = nil
         assignSheetDraftMediaIDs = []
         draggedAssignSheetMediaID = nil
+    }
+
+    private var contiguousMusicStoryParagraphSelection: Bool {
+        guard !selectedMusicStoryParagraphIndices.isEmpty else { return false }
+        let sorted = selectedMusicStoryParagraphIndices.sorted()
+        for i in sorted.indices.dropLast() where sorted[i + 1] != sorted[i] + 1 {
+            return false
+        }
+        return true
+    }
+
+    private func toggleMusicStoryParagraphSelection(_ index: Int) {
+        if selectedMusicStoryParagraphIndices.contains(index) {
+            selectedMusicStoryParagraphIndices.remove(index)
+        } else if selectedMusicStoryParagraphIndices.isEmpty {
+            selectedMusicStoryParagraphIndices = [index]
+        } else {
+            let lo = selectedMusicStoryParagraphIndices.min() ?? index
+            let hi = selectedMusicStoryParagraphIndices.max() ?? index
+            if index + 1 == lo || index - 1 == hi {
+                selectedMusicStoryParagraphIndices.insert(index)
+            } else {
+                selectedMusicStoryParagraphIndices = [index]
+            }
+        }
+    }
+
+    private func resetStoryMusicAssignSheetState() {
+        musicAssignSheetRange = nil
+        musicAssignDraftChoice = nil
+        musicAssignUserParagraphRange = nil
+    }
+
+    private func openStoryMusicAssignSheet() {
+        guard contiguousMusicStoryParagraphSelection, !selectedMusicStoryParagraphIndices.isEmpty else { return }
+        let sorted = selectedMusicStoryParagraphIndices.sorted()
+        guard let lo = sorted.first, let hi = sorted.last else { return }
+        if let reason = viewModel.validateMusicAssignmentSelection(lo...hi) {
+            viewModel.statusMessage = reason
+            storyMusicAssignBlockingMessage = reason
+            return
+        }
+        musicAssignSheetSegmentOrdinal = viewModel.storyMusicSegmentOrdinalForAssignSheet(selectionLo: lo)
+        musicAssignUserParagraphRange = lo...hi
+        musicAssignSheetRange = lo...hi
+        if let existing = viewModel.storyMusicBedSegmentForExactRange(lo...hi) {
+            if let trackID = existing.soundtrackItemID {
+                musicAssignDraftChoice = .libraryTrack(trackID)
+            } else {
+                musicAssignDraftChoice = .musicTabMix
+            }
+        } else {
+            musicAssignDraftChoice = nil
+        }
+        isStoryMusicAssignSheetPresented = true
+    }
+
+    private func confirmStoryMusicAssignSheet() {
+        guard let choice = musicAssignDraftChoice,
+              let paragraphRange = musicAssignUserParagraphRange else { return }
+        viewModel.applyMusicSegmentAssignment(choice: choice, paragraphRange: paragraphRange)
+        viewModel.stopMusicSilently()
+        isStoryMusicAssignSheetPresented = false
+        resetStoryMusicAssignSheetState()
+        selectedMusicStoryParagraphIndices = []
+    }
+
+    private func toggleMusicAssignSheetPlayback() {
+        guard musicAssignDraftChoice != nil else { return }
+        if viewModel.isMusicPlaying {
+            viewModel.toggleMusicPlayback()
+            return
+        }
+        switch musicAssignDraftChoice {
+        case .musicTabMix:
+            _ = viewModel.prepareCombinedMixPreview()
+            viewModel.toggleMusicPlayback()
+        case .libraryTrack(let id):
+            guard let item = viewModel.soundtrackItems.first(where: { $0.id == id }) else { return }
+            viewModel.previewStorySoundtrackItem(item)
+            viewModel.toggleMusicPlayback()
+        case .none:
+            break
+        }
+    }
+
+    private func cancelStoryMusicAssignSheet() {
+        viewModel.stopMusicSilently()
+        isStoryMusicAssignSheetPresented = false
+        resetStoryMusicAssignSheetState()
     }
 
     private func blockAssignPoolThumbnail(item: AppViewModel.MediaItem, index: Int) -> some View {
@@ -919,6 +1059,230 @@ struct ContentView: View {
         }
     }
 
+    @ViewBuilder
+    private func assignSheetDraftAssignedCell(mediaID: UUID) -> some View {
+        if let item = viewModel.mediaItems.first(where: { $0.id == mediaID }),
+           let position = assignSheetDraftMediaIDs.firstIndex(of: mediaID),
+           let poolIndex = viewModel.mediaItems.firstIndex(where: { $0.id == mediaID }) {
+            VStack(spacing: 4) {
+                ZStack(alignment: .topTrailing) {
+                    Image(uiImage: item.previewImage)
+                        .resizable()
+                        .scaledToFill()
+                        .frame(width: 64, height: 64)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                        .overlay {
+                            RoundedRectangle(cornerRadius: 14, style: .continuous)
+                                .stroke(
+                                    assignSheetSlideIndex == poolIndex ? Color.orange : Color.clear,
+                                    lineWidth: 2
+                                )
+                        }
+                    if item.isVideo {
+                        Image(systemName: "video.fill")
+                            .font(.caption2.weight(.bold))
+                            .padding(4)
+                            .background(.black.opacity(0.6), in: Capsule())
+                            .foregroundStyle(.white)
+                            .padding(4)
+                    }
+                }
+                Text("\(position + 1)")
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(.secondary)
+            }
+            .highPriorityGesture(
+                TapGesture(count: 2).onEnded {
+                    doubleTapAssignSheetMedia(mediaID)
+                }
+            )
+            .onTapGesture {
+                assignSheetSlideIndex = poolIndex
+            }
+            .onDrag {
+                draggedAssignSheetMediaID = mediaID
+                return NSItemProvider(object: mediaID.uuidString as NSString)
+            }
+            .onDrop(
+                of: [UTType.text],
+                delegate: AssignSheetDraftReorderDropDelegate(
+                    targetId: mediaID,
+                    draggedId: $draggedAssignSheetMediaID,
+                    onReorder: moveAssignSheetDraftMedia
+                )
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func assignSheetDraftAssignedSection() -> some View {
+        if !assignSheetDraftMediaIDs.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Assigned to this block (order)")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text("Drag to reorder. Tap a thumbnail to show it in the preview above; double-tap to remove it from the block.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                ScrollView(.horizontal, showsIndicators: false) {
+                    HStack(spacing: 10) {
+                        ForEach(assignSheetDraftMediaIDs, id: \.self) { mediaID in
+                            assignSheetDraftAssignedCell(mediaID: mediaID)
+                        }
+                    }
+                }
+            }
+            .padding(14)
+            .background(Color.white.opacity(0.64), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            .shadow(color: .black.opacity(0.05), radius: 12, y: 6)
+        }
+    }
+
+    @ViewBuilder
+    private func assignSheetTabPage(index: Int, item: AppViewModel.MediaItem) -> some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: 28, style: .continuous)
+                .fill(Color.black.opacity(0.08))
+            mediaStage(for: item, isActive: assignSheetSlideIndex == index)
+                .frame(maxWidth: .infinity, maxHeight: 280)
+                .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
+        }
+        .frame(height: 280)
+        .frame(maxWidth: .infinity)
+        .shadow(color: .black.opacity(0.1), radius: 16, y: 8)
+        .overlay(alignment: .topLeading) {
+            if item.isVideo {
+                Label("Video", systemImage: "video.fill")
+                    .font(.caption.weight(.bold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.55), in: Capsule())
+                    .foregroundStyle(.white)
+                    .padding(14)
+            }
+        }
+        .overlay(alignment: .topTrailing) {
+            if assignSheetSlideIndex == index {
+                HStack(spacing: 8) {
+                    Button {
+                        assignSheetAddMediaToDraft(item.id)
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(Color.black.opacity(0.62), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(assignSheetDraftMediaIDs.contains(item.id))
+                    .opacity(assignSheetDraftMediaIDs.contains(item.id) ? 0.35 : 1)
+                    .accessibilityLabel("Add clip to block")
+
+                    Button {
+                        assignSheetRemoveMediaFromDraft(item.id)
+                    } label: {
+                        Image(systemName: "minus")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 30, height: 30)
+                            .background(Color.black.opacity(0.62), in: Circle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(!assignSheetDraftMediaIDs.contains(item.id))
+                    .opacity(!assignSheetDraftMediaIDs.contains(item.id) ? 0.35 : 1)
+                    .accessibilityLabel("Remove clip from block")
+                }
+                .padding(14)
+            }
+        }
+        .overlay(alignment: .bottomTrailing) {
+            HStack(spacing: 8) {
+                Text(viewModel.mediaDisplayLabel(for: item.id))
+                    .font(.caption.weight(.bold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(Color.orange.opacity(0.9), in: Capsule())
+                    .foregroundStyle(.white)
+                Text("\(index + 1)/\(viewModel.mediaItems.count)")
+                    .font(.caption.weight(.bold))
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 6)
+                    .background(.black.opacity(0.55), in: Capsule())
+                    .foregroundStyle(.white)
+            }
+            .padding(14)
+        }
+        .tag(index)
+    }
+
+    @ViewBuilder
+    private func assignSheetNonEmptyMediaColumn() -> some View {
+        VStack(spacing: 14) {
+            TabView(selection: $assignSheetSlideIndex) {
+                ForEach(Array(viewModel.mediaItems.enumerated()), id: \.offset) { index, item in
+                    assignSheetTabPage(index: index, item: item)
+                }
+            }
+            .frame(height: 280)
+            .tabViewStyle(.page(indexDisplayMode: .automatic))
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 12) {
+                    ForEach(Array(viewModel.mediaItems.enumerated()), id: \.element.id) { index, item in
+                        blockAssignPoolThumbnail(item: item, index: index)
+                    }
+
+                    PhotosPicker(
+                        selection: $appendPhotoItems,
+                        maxSelectionCount: nil,
+                        selectionBehavior: .ordered,
+                        matching: .any(of: [.images, .videos]),
+                        photoLibrary: PHPhotoLibrary.shared()
+                    ) {
+                        mediaAppendThumbnail
+                    }
+                    .buttonStyle(.plain)
+                    .simultaneousGesture(
+                        TapGesture().onEnded {
+                            appendPhotoItems = viewModel.selectedPhotoItems
+                        }
+                    )
+                }
+                .padding(.vertical, 4)
+            }
+
+            if !assignSheetBlockScriptText.isEmpty {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Block script")
+                        .font(.caption.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    ScrollView {
+                        Text(assignSheetBlockScriptText)
+                            .font(.subheadline)
+                            .foregroundStyle(.primary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .frame(minHeight: 72, maxHeight: 160)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(14)
+                .background(Color.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
+
+            VStack(alignment: .leading, spacing: 6) {
+                Text("Studio Tip")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Text("Swipe the big preview to browse; videos always start when ready (Play during loading is optional early start). Tap a pool thumbnail to jump here. Use + / − on the preview to add or remove the current clip from the block, or double-tap a pool thumbnail. Assigned clips: drag to reorder; tap to preview, double-tap to remove.")
+                    .font(.subheadline)
+                    .foregroundStyle(.primary.opacity(0.82))
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background(Color.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+        }
+    }
+
     private var storyBlockAssignSheet: some View {
         NavigationStack {
             ScrollView {
@@ -928,11 +1292,6 @@ struct ContentView: View {
                             .font(.subheadline.weight(.semibold))
                             .foregroundStyle(.secondary)
                     }
-
-                    Text("Music for this block will be added in a future update.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 4)
 
                     VStack(alignment: .leading, spacing: 10) {
                         HStack(spacing: 8) {
@@ -993,49 +1352,7 @@ struct ContentView: View {
                         .background(Color.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
                     }
 
-                    if !assignSheetDraftMediaIDs.isEmpty {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Assigned to this block (order)")
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                            Text("Drag thumbnails to reorder play order (same as the Media tab).")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 10) {
-                                    ForEach(assignSheetDraftMediaIDs, id: \.self) { mediaID in
-                                        if let item = viewModel.mediaItems.first(where: { $0.id == mediaID }),
-                                           let position = assignSheetDraftMediaIDs.firstIndex(of: mediaID) {
-                                            VStack(spacing: 4) {
-                                                Image(uiImage: item.previewImage)
-                                                    .resizable()
-                                                    .scaledToFill()
-                                                    .frame(width: 64, height: 64)
-                                                    .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                                                Text("\(position + 1)")
-                                                    .font(.caption2.weight(.bold))
-                                                    .foregroundStyle(.secondary)
-                                            }
-                                            .onDrag {
-                                                draggedAssignSheetMediaID = mediaID
-                                                return NSItemProvider(object: mediaID.uuidString as NSString)
-                                            }
-                                            .onDrop(
-                                                of: [UTType.text],
-                                                delegate: AssignSheetDraftReorderDropDelegate(
-                                                    targetId: mediaID,
-                                                    draggedId: $draggedAssignSheetMediaID,
-                                                    onReorder: moveAssignSheetDraftMedia
-                                                )
-                                            )
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        .padding(14)
-                        .background(Color.white.opacity(0.64), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                    }
+                    assignSheetDraftAssignedSection()
 
                     if viewModel.mediaItems.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
@@ -1076,112 +1393,16 @@ struct ContentView: View {
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(Color.white.opacity(0.65), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
                     } else {
-                        VStack(spacing: 14) {
-                            TabView(selection: $assignSheetSlideIndex) {
-                                ForEach(Array(viewModel.mediaItems.enumerated()), id: \.offset) { index, item in
-                                    ZStack {
-                                        RoundedRectangle(cornerRadius: 28, style: .continuous)
-                                            .fill(Color.black.opacity(0.08))
-                                        mediaStage(for: item, isActive: assignSheetSlideIndex == index)
-                                            .frame(maxWidth: .infinity, maxHeight: 280)
-                                            .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
-                                    }
-                                    .frame(height: 280)
-                                    .frame(maxWidth: .infinity)
-                                    .overlay(alignment: .topLeading) {
-                                        if item.isVideo {
-                                            Label("Video", systemImage: "video.fill")
-                                                .font(.caption.weight(.bold))
-                                                .padding(.horizontal, 10)
-                                                .padding(.vertical, 6)
-                                                .background(.black.opacity(0.55), in: Capsule())
-                                                .foregroundStyle(.white)
-                                                .padding(14)
-                                        }
-                                    }
-                                    .overlay(alignment: .bottomTrailing) {
-                                        HStack(spacing: 8) {
-                                            Text(viewModel.mediaDisplayLabel(for: item.id))
-                                                .font(.caption.weight(.bold))
-                                                .padding(.horizontal, 10)
-                                                .padding(.vertical, 6)
-                                                .background(Color.orange.opacity(0.9), in: Capsule())
-                                                .foregroundStyle(.white)
-                                            Text("\(index + 1)/\(viewModel.mediaItems.count)")
-                                                .font(.caption.weight(.bold))
-                                                .padding(.horizontal, 10)
-                                                .padding(.vertical, 6)
-                                                .background(.black.opacity(0.55), in: Capsule())
-                                                .foregroundStyle(.white)
-                                        }
-                                        .padding(14)
-                                    }
-                                    .tag(index)
-                                }
-                            }
-                            .frame(height: 280)
-                            .tabViewStyle(.page(indexDisplayMode: .automatic))
-
-                            ScrollView(.horizontal, showsIndicators: false) {
-                                HStack(spacing: 12) {
-                                    ForEach(Array(viewModel.mediaItems.enumerated()), id: \.element.id) { index, item in
-                                        blockAssignPoolThumbnail(item: item, index: index)
-                                    }
-
-                                    PhotosPicker(
-                                        selection: $appendPhotoItems,
-                                        maxSelectionCount: nil,
-                                        selectionBehavior: .ordered,
-                                        matching: .any(of: [.images, .videos]),
-                                        photoLibrary: PHPhotoLibrary.shared()
-                                    ) {
-                                        mediaAppendThumbnail
-                                    }
-                                    .buttonStyle(.plain)
-                                    .simultaneousGesture(
-                                        TapGesture().onEnded {
-                                            appendPhotoItems = viewModel.selectedPhotoItems
-                                        }
-                                    )
-                                }
-                                .padding(.vertical, 4)
-                            }
-
-                            if !assignSheetBlockScriptText.isEmpty {
-                                VStack(alignment: .leading, spacing: 8) {
-                                    Text("Block script")
-                                        .font(.caption.weight(.semibold))
-                                        .foregroundStyle(.secondary)
-                                    ScrollView {
-                                        Text(assignSheetBlockScriptText)
-                                            .font(.subheadline)
-                                            .foregroundStyle(.primary)
-                                            .frame(maxWidth: .infinity, alignment: .leading)
-                                    }
-                                    .frame(minHeight: 72, maxHeight: 160)
-                                }
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .padding(14)
-                                .background(Color.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                            }
-
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text("Studio Tip")
-                                    .font(.caption.weight(.semibold))
-                                    .foregroundStyle(.secondary)
-                                Text("Swipe the stage to review media. Tap a thumbnail to jump here. Double-tap a thumbnail to add or remove it from this block (green number = play order).")
-                                    .font(.subheadline)
-                                    .foregroundStyle(.primary.opacity(0.82))
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(14)
-                            .background(Color.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-                        }
+                        assignSheetNonEmptyMediaColumn()
                     }
                 }
                 .padding(20)
                 .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
+                .shadow(color: .black.opacity(0.08), radius: 24, y: 12)
             }
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
             .background(
                 LinearGradient(
                     colors: [
@@ -1213,22 +1434,231 @@ struct ContentView: View {
         }
     }
 
-    private func storyParagraphRow(index: Int, text: String, blockOrdinal: Int?, isSelected: Bool) -> some View {
-        let stripeColor = ((blockOrdinal ?? 0) % 2 == 1) ? Color.blue.opacity(0.35) : Color.purple.opacity(0.32)
+    private var storyMusicAssignSheet: some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Segment \(musicAssignSheetSegmentOrdinal)")
+                            .font(.title2.weight(.semibold))
+                        if let range = musicAssignSheetRange {
+                            Text("Paragraphs \(range.lowerBound + 1)–\(range.upperBound + 1)")
+                                .font(.subheadline.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    Text("One soundtrack per segment, always from 0:00. Shorter narration trims the bed; longer narration loops. Reusing the same file on another segment starts at 0:00 again.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    if !musicAssignSheetScriptText.isEmpty {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Segment script")
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            ScrollView {
+                                Text(musicAssignSheetScriptText)
+                                    .font(.subheadline)
+                                    .foregroundStyle(.primary)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .frame(minHeight: 72, maxHeight: 200)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(14)
+                        .background(Color.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    }
+
+                    Text("Sound library")
+                        .font(.headline)
+
+                    Text("Tap a row to select it, then use the blue play button on that row to preview (same as Music → Music Library). Tap Done to save.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+
+                    VStack(spacing: 0) {
+                        musicAssignSoundLibraryRow(
+                            title: "Music Mix (default)",
+                            durationText: musicAssignMixDurationLabel,
+                            subtitle: "Combined tracks from your Music tab queue",
+                            isSelected: musicAssignDraftChoice == .musicTabMix,
+                            isPlayingPreview: musicAssignDraftChoice == .musicTabMix && viewModel.isMusicPlaying
+                        ) {
+                            musicAssignDraftChoice = .musicTabMix
+                        } onPlayTap: {
+                            musicAssignDraftChoice = .musicTabMix
+                            toggleMusicAssignSheetPlayback()
+                        }
+                        ForEach(viewModel.soundtrackItems) { item in
+                            Divider()
+                                .padding(.leading, 12)
+                            musicAssignSoundLibraryRow(
+                                title: item.name,
+                                durationText: viewModel.formattedMusicDuration(item.duration),
+                                subtitle: "In soundtrack queue",
+                                isSelected: musicAssignDraftChoice == .libraryTrack(item.id),
+                                isPlayingPreview: musicAssignDraftChoice == .libraryTrack(item.id) && viewModel.isMusicPlaying
+                            ) {
+                                musicAssignDraftChoice = .libraryTrack(item.id)
+                            } onPlayTap: {
+                                musicAssignDraftChoice = .libraryTrack(item.id)
+                                toggleMusicAssignSheetPlayback()
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.white, in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                    .overlay {
+                        RoundedRectangle(cornerRadius: 18, style: .continuous)
+                            .stroke(Color.black.opacity(0.06), lineWidth: 1)
+                    }
+
+                    if viewModel.soundtrackItems.isEmpty {
+                        Text("No tracks in the queue yet—add audio in the Music tab, or use the default mix row.")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(20)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
+            .background(
+                LinearGradient(
+                    colors: [
+                        Color(red: 0.98, green: 0.95, blue: 0.90),
+                        Color(red: 0.97, green: 0.84, blue: 0.71),
+                        Color(red: 0.89, green: 0.56, blue: 0.40)
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                )
+                .ignoresSafeArea()
+            )
+            .navigationTitle("Assign segment")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") {
+                        cancelStoryMusicAssignSheet()
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done") {
+                        confirmStoryMusicAssignSheet()
+                    }
+                    .disabled(musicAssignDraftChoice == nil)
+                }
+            }
+        }
+    }
+
+    /// Total duration label for the Music-tab mix row (matches Music Library row timing affordance).
+    private var musicAssignMixDurationLabel: String? {
+        let total = viewModel.soundtrackItems.reduce(0.0) { $0 + $1.duration }
+        guard total > 0 else { return nil }
+        return viewModel.formattedMusicDuration(total)
+    }
+
+    /// Same track row chrome as **Music → Music Library** (`musicLibrarySheet`): title + duration row, subtitle, blue selection, gradient play when selected.
+    private func musicAssignSoundLibraryRow(
+        title: String,
+        durationText: String?,
+        subtitle: String?,
+        isSelected: Bool,
+        isPlayingPreview: Bool,
+        onSelect: @escaping () -> Void,
+        onPlayTap: @escaping () -> Void
+    ) -> some View {
+        Button(action: onSelect) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(title)
+                            .font(.subheadline.weight(.semibold))
+                            .foregroundStyle(.primary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.leading)
+
+                        Spacer(minLength: 8)
+
+                        if let durationText {
+                            Text(durationText)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+
+                    if let subtitle, !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
+                }
+
+                if isSelected {
+                    Button {
+                        onPlayTap()
+                    } label: {
+                        Image(systemName: isPlayingPreview ? "pause.fill" : "play.fill")
+                            .font(.system(size: 14, weight: .bold))
+                            .foregroundStyle(.white)
+                            .frame(width: 38, height: 38)
+                            .background(
+                                LinearGradient(
+                                    colors: [
+                                        Color(red: 0.30, green: 0.61, blue: 0.85),
+                                        Color(red: 0.18, green: 0.39, blue: 0.73)
+                                    ],
+                                    startPoint: .topLeading,
+                                    endPoint: .bottomTrailing
+                                ),
+                                in: Circle()
+                            )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(.vertical, 4)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 8)
+            .background(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .fill(isSelected ? Color.blue.opacity(0.14) : Color.white.opacity(0.001))
+            )
+            .overlay {
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .stroke(isSelected ? Color.blue.opacity(0.28) : Color.clear, lineWidth: 1)
+            }
+        }
+        .buttonStyle(.plain)
+    }
+
+    private func storyScriptParagraphRow(
+        index: Int,
+        text: String,
+        isSelected: Bool,
+        assignmentCaption: String,
+        musicTabMediaBlockCaption: String? = nil
+    ) -> some View {
+        let stripeColor = (index % 2 == 0) ? Color.blue.opacity(0.35) : Color.purple.opacity(0.32)
+        let isUnassigned = assignmentCaption == "Unassigned"
         return HStack(alignment: .top, spacing: 10) {
             RoundedRectangle(cornerRadius: 3, style: .continuous)
                 .fill(stripeColor)
                 .frame(width: 5)
             VStack(alignment: .leading, spacing: 4) {
-                if let b = blockOrdinal {
-                    Text("Block \(b)")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(.secondary)
-                } else {
-                    Text("Unassigned")
-                        .font(.caption2.weight(.bold))
-                        .foregroundStyle(Color.orange.opacity(0.95))
+                if let mediaCap = musicTabMediaBlockCaption {
+                    Text(mediaCap)
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(Color.secondary.opacity(0.85))
                 }
+                Text(assignmentCaption)
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(isUnassigned ? Color.orange.opacity(0.95) : .secondary)
                 Text(text)
                     .font(.subheadline)
                     .foregroundStyle(.primary)
@@ -1261,6 +1691,7 @@ struct ContentView: View {
                 Button("Reset to one block (all paragraphs, all media)") {
                     viewModel.resetStoryEditBlocksToDefault()
                     selectedStoryParagraphIndices = []
+                    selectedMusicStoryParagraphIndices = []
                 }
                 .font(.caption.weight(.semibold))
                 .disabled(!viewModel.storyUsesBlockTimeline || viewModel.storyScriptParagraphs.isEmpty || viewModel.mediaItems.isEmpty)
@@ -1283,99 +1714,135 @@ struct ContentView: View {
                 .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
             }
 
-            VStack(alignment: .leading, spacing: 8) {
-                Text("Music queue")
-                    .font(.headline)
-                Text("Same order as the Music tab. Final export still uses the combined mix from Music for now.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                if viewModel.soundtrackItems.isEmpty {
-                    Text("No tracks in the queue yet.")
+            if viewModel.storyUsesBlockTimeline {
+                Picker("Editor", selection: $editStoryEditorTab) {
+                    ForEach(EditStoryEditorTab.allCases, id: \.self) { tab in
+                        Text(tab.rawValue).tag(tab)
+                    }
+                }
+                .pickerStyle(.segmented)
+            }
+
+            if !viewModel.storyUsesBlockTimeline || editStoryEditorTab == .media {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Script paragraphs")
+                        .font(.headline)
+                    Text("Import and order tracks in the Music tab. Use the Music sub-tab here to assign beds to paragraphs.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("Tap paragraphs to select a contiguous range, then tap Assign to open the media picker. Use + / − on the large preview, double-tap pool thumbnails, or tap assigned clips to preview and double-tap to remove.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                } else {
-                    ForEach(viewModel.soundtrackItems) { item in
-                        HStack {
-                            Text(item.name)
-                                .font(.subheadline.weight(.semibold))
-                                .lineLimit(1)
-                            Spacer()
-                            Button {
-                                if previewingStorySoundtrackItemID == item.id, viewModel.isMusicPlaying {
-                                    viewModel.toggleMusicPlayback()
-                                } else {
-                                    viewModel.previewStorySoundtrackItem(item)
-                                    previewingStorySoundtrackItemID = item.id
-                                    if !viewModel.isMusicPlaying {
-                                        viewModel.toggleMusicPlayback()
-                                    }
-                                }
-                            } label: {
-                                Image(systemName: previewingStorySoundtrackItemID == item.id && viewModel.isMusicPlaying ? "pause.fill" : "play.fill")
-                                    .font(.body.weight(.semibold))
-                            }
-                            .buttonStyle(.borderless)
-                        }
-                        .padding(.vertical, 4)
-                    }
-                }
-            }
-            .padding(14)
-            .background(Color.white.opacity(0.64), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
-
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Script paragraphs")
-                    .font(.headline)
-                Text("Tap paragraphs to select a contiguous range, then tap Assign to open the media picker. Double-tap thumbnails in the sheet to add or remove clips in play order.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                HStack(spacing: 12) {
-                    Button {
-                        openStoryBlockAssignSheet()
-                    } label: {
-                        Label("Assign", systemImage: "square.and.arrow.down.on.square")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.borderedProminent)
-                    .tint(.orange)
-                    .disabled(!contiguousStoryParagraphSelection || selectedStoryParagraphIndices.isEmpty)
-
-                    Button {
-                        viewModel.clearAllStoryEditBlocks()
-                        selectedStoryParagraphIndices = []
-                    } label: {
-                        Label("Clear", systemImage: "eraser")
-                            .font(.subheadline.weight(.semibold))
-                            .frame(maxWidth: .infinity)
-                    }
-                    .buttonStyle(.bordered)
-                    .disabled(!viewModel.storyUsesBlockTimeline || viewModel.storyEditBlocks.isEmpty)
-                }
-                if viewModel.storyScriptParagraphs.isEmpty {
-                    Text("No paragraphs yet—add Script text with blank lines between ideas, or run Clean Up on pasted text.")
-                        .font(.subheadline)
-                        .foregroundStyle(.secondary)
-                } else {
-                    ForEach(Array(viewModel.storyScriptParagraphs.enumerated()), id: \.offset) { index, text in
+                    HStack(spacing: 12) {
                         Button {
-                            toggleStoryParagraphSelection(index)
+                            openStoryBlockAssignSheet()
                         } label: {
-                            storyParagraphRow(
-                                index: index,
-                                text: text,
-                                blockOrdinal: viewModel.storyBlockOrdinal(forParagraphIndex: index),
-                                isSelected: selectedStoryParagraphIndices.contains(index)
-                            )
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .contentShape(Rectangle())
+                            Label("Assign", systemImage: "square.and.arrow.down.on.square")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
                         }
-                        .buttonStyle(.plain)
+                        .buttonStyle(.borderedProminent)
+                        .tint(.orange)
+                        .disabled(!contiguousStoryParagraphSelection || selectedStoryParagraphIndices.isEmpty)
+
+                        Button {
+                            viewModel.clearAllStoryEditBlocks()
+                            selectedStoryParagraphIndices = []
+                            selectedMusicStoryParagraphIndices = []
+                        } label: {
+                            Label("Clear", systemImage: "eraser")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!viewModel.storyUsesBlockTimeline || viewModel.storyEditBlocks.isEmpty)
+                    }
+                    if viewModel.storyScriptParagraphs.isEmpty {
+                        Text("No paragraphs yet—add Script text with blank lines between ideas, or run Clean Up on pasted text.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(viewModel.storyScriptParagraphs.enumerated()), id: \.offset) { index, text in
+                            Button {
+                                toggleStoryParagraphSelection(index)
+                            } label: {
+                                storyScriptParagraphRow(
+                                    index: index,
+                                    text: text,
+                                    isSelected: selectedStoryParagraphIndices.contains(index),
+                                    assignmentCaption: {
+                                        if let b = viewModel.storyBlockOrdinal(forParagraphIndex: index) {
+                                            return "Block \(b)"
+                                        }
+                                        return "Unassigned"
+                                    }()
+                                )
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
                     }
                 }
+                .padding(14)
+                .background(Color.white.opacity(0.7), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
             }
-            .padding(14)
-            .background(Color.white.opacity(0.7), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+
+            if viewModel.storyUsesBlockTimeline, editStoryEditorTab == .music {
+                VStack(alignment: .leading, spacing: 10) {
+                    Text("Script paragraphs")
+                        .font(.headline)
+                    Text("Music spans are independent of media blocks: pick any contiguous script paragraphs. Assign ties the soundtrack to only that range; other paragraphs stay Unassigned until you assign them.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    HStack(spacing: 12) {
+                        Button {
+                            openStoryMusicAssignSheet()
+                        } label: {
+                            Label("Assign", systemImage: "music.note.list")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.purple)
+                        .disabled(!contiguousMusicStoryParagraphSelection || selectedMusicStoryParagraphIndices.isEmpty)
+
+                        Button {
+                            viewModel.clearAllStorySegmentSoundtracks()
+                            selectedMusicStoryParagraphIndices = []
+                        } label: {
+                            Label("Clear music", systemImage: "eraser")
+                                .font(.subheadline.weight(.semibold))
+                                .frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        .disabled(!viewModel.storyUsesBlockTimeline || viewModel.storyMusicBedSegments.isEmpty)
+                    }
+                    if viewModel.storyScriptParagraphs.isEmpty {
+                        Text("No paragraphs yet—add Script text with blank lines between ideas, or run Clean Up on pasted text.")
+                            .font(.subheadline)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(Array(viewModel.storyScriptParagraphs.enumerated()), id: \.offset) { index, text in
+                            Button {
+                                toggleMusicStoryParagraphSelection(index)
+                            } label: {
+                                storyScriptParagraphRow(
+                                    index: index,
+                                    text: text,
+                                    isSelected: selectedMusicStoryParagraphIndices.contains(index),
+                                    assignmentCaption: viewModel.storyMusicAssignmentCaption(forParagraphIndex: index)
+                                )
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .contentShape(Rectangle())
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                }
+                .padding(14)
+                .background(Color.white.opacity(0.64), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+            }
         }
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -1642,7 +2109,7 @@ struct ContentView: View {
                         Text("Studio Tip")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
-                        Text("Swipe to review your media, then drag thumbnails to reorder the sequence before you move on to script, music, and export.")
+                        Text("Swipe to review your media. Videos always start when ready; you can also tap Play while loading to begin early. Drag thumbnails to reorder before script, music, and export.")
                             .font(.subheadline)
                             .foregroundStyle(.primary.opacity(0.82))
                     }
@@ -1664,14 +2131,8 @@ struct ContentView: View {
             Image(uiImage: item.previewImage)
                 .resizable()
                 .scaledToFit()
-        case let .video(url, _, _):
-            if let url {
-                LoopingVideoPreview(url: url, placeholder: item.previewImage, isActive: isActive)
-            } else {
-                Image(uiImage: item.previewImage)
-                    .resizable()
-                    .scaledToFit()
-            }
+        case .video:
+            ProjectVideoStageView(item: item, isActive: isActive, viewModel: viewModel)
         }
     }
 
@@ -3423,9 +3884,99 @@ private struct FullscreenPlayerContainer: UIViewControllerRepresentable {
     }
 }
 
+/// Big-stage video for **Media** and **Edit → Assign**: resolves PhotoKit / in-flight import URLs (often `nil` right after picking) then shows `LoopingVideoPreview` + Play.
+private struct ProjectVideoStageView: View {
+    let item: AppViewModel.MediaItem
+    let isActive: Bool
+    @ObservedObject var viewModel: AppViewModel
+
+    @State private var resolvedPlaybackURL: URL?
+    @State private var playbackResolveDidFail = false
+    @State private var resolveRetryNonce = 0
+
+    private var playbackURL: URL? {
+        item.embeddedVideoFileURL ?? resolvedPlaybackURL
+    }
+
+    var body: some View {
+        Group {
+            if let url = playbackURL {
+                LoopingVideoPreview(url: url, placeholder: item.previewImage, isActive: isActive)
+                    .id(url.absoluteString)
+            } else {
+                ZStack {
+                    Image(uiImage: item.previewImage)
+                        .resizable()
+                        .scaledToFit()
+
+                    if isActive {
+                        if playbackResolveDidFail {
+                            VStack(spacing: 10) {
+                                Text("Could not load video")
+                                    .font(.caption.weight(.semibold))
+                                    .foregroundStyle(.secondary)
+                                    .multilineTextAlignment(.center)
+                                Button {
+                                    playbackResolveDidFail = false
+                                    resolveRetryNonce += 1
+                                } label: {
+                                    Text("Try again")
+                                        .font(.caption.weight(.semibold))
+                                }
+                                .tint(.orange)
+                            }
+                            .padding(14)
+                            .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        } else {
+                            ProgressView()
+                                .scaleEffect(1.15)
+                                .tint(Color.orange)
+                        }
+                    }
+                }
+            }
+        }
+        .onChange(of: item) { _, newItem in
+            if newItem.embeddedVideoFileURL != nil {
+                playbackResolveDidFail = false
+                resolvedPlaybackURL = nil
+            }
+        }
+        .task(id: "\(item.id.uuidString)-\(isActive)-\(resolveRetryNonce)") {
+            await runPlaybackResolvePipeline()
+        }
+    }
+
+    private func runPlaybackResolvePipeline() async {
+        guard isActive, item.isVideo, item.embeddedVideoFileURL == nil else {
+            await MainActor.run { playbackResolveDidFail = false }
+            return
+        }
+        await MainActor.run { playbackResolveDidFail = false }
+        let url = await viewModel.resolveVideoPreviewPlaybackURL(for: item)
+        await MainActor.run {
+            if let url {
+                resolvedPlaybackURL = url
+                playbackResolveDidFail = false
+            } else if viewModel.isVideoFileImportInProgress(for: item) {
+                playbackResolveDidFail = false
+            } else {
+                playbackResolveDidFail = true
+            }
+        }
+    }
+}
+
 private final class LoopingVideoPlayerStore: ObservableObject {
     let player: AVQueuePlayer
     private let looper: AVPlayerLooper
+    private var statusCancellable: AnyCancellable?
+
+    @Published private(set) var isReadyForPlayback = false
+    @Published private(set) var loadDidFail = false
+
+    /// Big-preview slide is visible; when this and readiness line up, we `play()` on the main thread (never missed vs SwiftUI `onChange`).
+    private var isSlideActiveForPreview = false
 
     init(url: URL) {
         let item = AVPlayerItem(url: url)
@@ -3434,24 +3985,60 @@ private final class LoopingVideoPlayerStore: ObservableObject {
         queuePlayer.actionAtItemEnd = .none
         self.looper = AVPlayerLooper(player: queuePlayer, templateItem: item)
         self.player = queuePlayer
+
+        statusCancellable = item.publisher(for: \.status)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] status in
+                guard let self else { return }
+                switch status {
+                case .readyToPlay:
+                    self.isReadyForPlayback = true
+                    self.loadDidFail = false
+                    if self.isSlideActiveForPreview {
+                        self.play()
+                    }
+                case .failed:
+                    self.isReadyForPlayback = false
+                    self.loadDidFail = true
+                case .unknown:
+                    break
+                @unknown default:
+                    break
+                }
+            }
     }
 
-    func setActive(_ isActive: Bool) {
-        if isActive {
-            player.play()
+    func play() {
+        player.play()
+    }
+
+    func pauseAndReset() {
+        player.pause()
+        player.seek(to: .zero)
+    }
+
+    /// Call from the view when the TabView slide becomes active/inactive.
+    func setSlideActiveForPreview(_ active: Bool) {
+        isSlideActiveForPreview = active
+        if active {
+            if isReadyForPlayback {
+                play()
+            }
         } else {
-            player.pause()
-            player.seek(to: .zero)
+            pauseAndReset()
         }
     }
 }
 
+/// Muted looping preview for the big Media / Edit-Assign stage. **Every** clip calls `play()` when the item becomes **ready** (consistent auto-start). **Play** during buffering is an optional early start only; it does not change the ready-time behavior (`play()` is safe to repeat).
 private struct LoopingVideoPreview: View {
     let url: URL
     let placeholder: UIImage
     let isActive: Bool
 
     @StateObject private var store: LoopingVideoPlayerStore
+    /// Hides the manual **Play** control after the user taps it (spinner only until ready); does not gate auto `play()` when ready.
+    @State private var userChoseEarlyPlay = false
 
     init(url: URL, placeholder: UIImage, isActive: Bool) {
         self.url = url
@@ -3468,15 +4055,65 @@ private struct LoopingVideoPreview: View {
 
             VideoPlayer(player: store.player)
                 .allowsHitTesting(false)
+                .opacity(store.isReadyForPlayback || userChoseEarlyPlay ? 1 : 0)
+
+            if isActive && !store.isReadyForPlayback && !store.loadDidFail {
+                ZStack {
+                    ProgressView()
+                        .scaleEffect(1.2)
+                        .tint(Color.orange)
+                    if !userChoseEarlyPlay {
+                        Button {
+                            userChoseEarlyPlay = true
+                            store.play()
+                        } label: {
+                            Image(systemName: "play.fill")
+                                .font(.system(size: 30, weight: .bold))
+                                .foregroundStyle(.white)
+                                .frame(width: 76, height: 76)
+                                .background(
+                                    LinearGradient(
+                                        colors: [
+                                            Color(red: 0.94, green: 0.46, blue: 0.22),
+                                            Color(red: 0.80, green: 0.26, blue: 0.10)
+                                        ],
+                                        startPoint: .topLeading,
+                                        endPoint: .bottomTrailing
+                                    ),
+                                    in: Circle()
+                                )
+                                .shadow(color: .black.opacity(0.25), radius: 12, y: 6)
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityLabel("Play video preview")
+                    }
+                }
+            }
+
+            if isActive && store.loadDidFail {
+                Text("Could not play preview")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                    .multilineTextAlignment(.center)
+                    .padding(12)
+                    .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+            }
         }
         .onAppear {
-            store.setActive(isActive)
+            store.setSlideActiveForPreview(isActive)
+            if !isActive {
+                userChoseEarlyPlay = false
+            }
         }
-        .onChange(of: isActive) { _, newValue in
-            store.setActive(newValue)
+        .onChange(of: isActive) { _, visible in
+            store.setSlideActiveForPreview(visible)
+            if !visible {
+                userChoseEarlyPlay = false
+            }
         }
         .onDisappear {
-            store.setActive(false)
+            userChoseEarlyPlay = false
+            store.setSlideActiveForPreview(false)
         }
     }
 }
