@@ -21,6 +21,24 @@ Design note:
 - `Slideshow` will get the same export controls UI as `Video`, and the exporter will honor high settings when media is the clock
 - if narration is longer than media, keep the same UI selection but clamp the actual `4K 60 High` path down to a safer profile under the hood so FluxCut does not promise a combination that is too risky for the looping case
 
+## Big-stage video preview (Media tab & Edit Assign)
+
+**Full code design spec (copy-friendly):** [`docs/BIG_PREVIEW_VIDEO_AUTOPLAY_SPEC.md`](BIG_PREVIEW_VIDEO_AUTOPLAY_SPEC.md)
+
+**Product behavior**
+
+- Large **muted** looping preview for pool videos (`ProjectVideoStageView` → `LoopingVideoPreview` in `ContentView.swift`).
+- **Autoplay** when the carousel slide is active and playback can start; user does **not** need to tap Play.
+- **Optional Play** while still loading = early start only; when the clip is **ready**, the spinner + Play control **hide** and playback should already be requested (extra `play()` calls are harmless).
+
+**Implementation gist (why it feels “instant”)**
+
+- **`AVPlayerLooper`** plays **replica** items, not only the template `AVPlayerItem`. Relying on **template `AVPlayerItem.status` alone** can miss readiness; the store also observes **`AVPlayerLooper.status == .ready`** and treats **either** looper-ready **or** item `readyToPlay` as “show video.”
+- When the slide becomes active, the store calls **`player.play()`** immediately (as in Apple’s looper sample), not only after a SwiftUI `onChange` on a published flag—so AVFoundation can start as soon as the looper/item allows.
+- Slide visibility is driven by **`setSlideActiveForPreview`** from `onAppear` / `onChange(isActive)` / `onDisappear`, not by fragile `onChange` on `isReadyForPlayback` alone.
+
+For file/symbol index, failure handling, and a manual test checklist, use the linked spec.
+
 ## Story
 
 Story mode design record:
@@ -107,7 +125,7 @@ Opened from **Edit** when the user selects a contiguous paragraph range and taps
 - **Segment script**: A read-only scrollable card sits **between** the horizontal **pool** thumbnail strip and **Studio Tip**, showing the paragraph text for the selected range (`storyScriptParagraphs` joined with `\n\n`) so media choices stay aligned with what will be spoken in that segment.
 - **Large preview controls**: **+** adds the **current** pool clip to the block draft; **−** removes it from the draft (no ellipsis menu).
 - **Assigned to this segment (order)**: Thumbnails reflect draft `mediaItemIDs`; **video** clips show a **video** badge. **Tap** jumps the big preview to that clip; **double-tap** removes it from the draft. **Reorder** uses the same **drag-and-drop** as the **Media** tab (`onDrag` + `onDrop` with `UTType.text` / UUID string). Only the **draft** is mutated until **Done**; global pool order is unchanged.
-- **Muted looping preview**: When the active slide’s item reaches **readyToPlay**, playback starts on the **AVPlayerItem status** path (not only via SwiftUI `onChange`), so auto-start stays reliable; optional **Play** while buffering remains an early-start affordance.
+- **Muted looping preview**: Autoplay is driven in **`LoopingVideoPlayerStore`** using **`AVPlayerLooper.status`** and template **`AVPlayerItem.status`**, plus **`player.play()`** when the slide becomes active (see **Big-stage video preview** above and `docs/BIG_PREVIEW_VIDEO_AUTOPLAY_SPEC.md`). Optional **Play** while buffering remains an early-start affordance.
 - **Studio Tip** below the block script summarizes swipe, pool thumbnail tap / double-tap, **+** / **−** on the preview, and assigned-strip gestures.
 
 ## Preview Video Disable-State Design

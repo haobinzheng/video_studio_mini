@@ -3970,12 +3970,15 @@ private struct ProjectVideoStageView: View {
 private final class LoopingVideoPlayerStore: ObservableObject {
     let player: AVQueuePlayer
     private let looper: AVPlayerLooper
-    private var statusCancellable: AnyCancellable?
+    /// Template item passed to `AVPlayerLooper`; replicas actually play, so readiness must also follow `looper.status`.
+    private let templateItem: AVPlayerItem
+    private var itemStatusCancellable: AnyCancellable?
+    private var looperStatusCancellable: AnyCancellable?
 
     @Published private(set) var isReadyForPlayback = false
     @Published private(set) var loadDidFail = false
 
-    /// Big-preview slide is visible; when this and readiness line up, we `play()` on the main thread (never missed vs SwiftUI `onChange`).
+    /// Big-preview slide is visible.
     private var isSlideActiveForPreview = false
 
     init(url: URL) {
@@ -3983,29 +3986,43 @@ private final class LoopingVideoPlayerStore: ObservableObject {
         let queuePlayer = AVQueuePlayer()
         queuePlayer.isMuted = true
         queuePlayer.actionAtItemEnd = .none
-        self.looper = AVPlayerLooper(player: queuePlayer, templateItem: item)
+        let looper = AVPlayerLooper(player: queuePlayer, templateItem: item)
+        self.templateItem = item
+        self.looper = looper
         self.player = queuePlayer
 
-        statusCancellable = item.publisher(for: \.status)
+        itemStatusCancellable = item.publisher(for: \.status)
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] status in
-                guard let self else { return }
-                switch status {
-                case .readyToPlay:
-                    self.isReadyForPlayback = true
-                    self.loadDidFail = false
-                    if self.isSlideActiveForPreview {
-                        self.play()
-                    }
-                case .failed:
-                    self.isReadyForPlayback = false
-                    self.loadDidFail = true
-                case .unknown:
-                    break
-                @unknown default:
-                    break
-                }
+            .sink { [weak self] _ in
+                self?.refreshReadinessAndMaybePlay()
             }
+
+        looperStatusCancellable = looper.publisher(for: \.status)
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in
+                self?.refreshReadinessAndMaybePlay()
+            }
+
+        DispatchQueue.main.async { [weak self] in
+            self?.refreshReadinessAndMaybePlay()
+        }
+    }
+
+    /// `AVPlayerLooper` drives real looping; `.ready` often arrives while the template item is still `.unknown`.
+    private func refreshReadinessAndMaybePlay() {
+        if looper.status == .failed || templateItem.status == .failed {
+            loadDidFail = true
+            isReadyForPlayback = false
+            return
+        }
+        let canShowVideo = looper.status == .ready || templateItem.status == .readyToPlay
+        isReadyForPlayback = canShowVideo
+        if canShowVideo {
+            loadDidFail = false
+        }
+        if isSlideActiveForPreview, canShowVideo {
+            play()
+        }
     }
 
     func play() {
@@ -4021,9 +4038,9 @@ private final class LoopingVideoPlayerStore: ObservableObject {
     func setSlideActiveForPreview(_ active: Bool) {
         isSlideActiveForPreview = active
         if active {
-            if isReadyForPlayback {
-                play()
-            }
+            refreshReadinessAndMaybePlay()
+            // Request playback even before `.ready` so AVFoundation starts once the looper/item can play (same as manual Play).
+            player.play()
         } else {
             pauseAndReset()
         }

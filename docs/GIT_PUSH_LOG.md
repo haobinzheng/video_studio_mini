@@ -19,6 +19,11 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-14 — Docs: big-preview video autoplay spec
+
+- **`docs/BIG_PREVIEW_VIDEO_AUTOPLAY_SPEC.md`**: Code design spec for muted looping preview (`LoopingVideoPlayerStore`, `AVPlayerLooper` vs template item readiness, slide lifecycle, UX contract, test checklist).
+- **`docs/DESIGN_NOTES.md`**: New **Big-stage video preview** section with summary + link to spec; segment sheet bullet updated to point at spec.
+
 ### 2026-04-14 — `pro-version`: assign sheet controls, assigned-strip UX, preview autoplay, type-check split
 
 - **ContentView**: Block **Assign** large preview uses **+** / **−** (add/remove current clip from draft) instead of an ellipsis menu. **Assigned** row: **video** badge on clips, **tap** selects that clip in the big preview, **double-tap** removes from draft (orange ring when that clip is the active slide). **LoopingVideoPlayerStore** calls `play()` when `AVPlayerItem` is **readyToPlay** if the preview slide is active (`setSlideActiveForPreview`), so muted looping preview auto-starts without relying on SwiftUI `onChange` for readiness. **storyBlockAssignSheet** split into `@ViewBuilder` helpers (`assignSheetDraftAssignedCell`, `assignSheetTabPage`, etc.) to fix **“unable to type-check in reasonable time”** build failures.
