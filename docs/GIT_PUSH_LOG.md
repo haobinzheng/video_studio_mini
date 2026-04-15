@@ -19,6 +19,14 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-15 — Script / Voice: fix Hide voice control (ScrollView + Menu)
+
+- **ContentView**: Replaced **`Menu`** next to each voice row with a **`Button`** that sets **`voicePendingHide`** so the existing **Hide Voice?** alert runs. **`Menu`** popovers were mis-anchored inside the nested **ScrollView**, so “Hide Voice” appeared floating on the wrong row; the ellipsis is now a fixed hit target (`36×36`).
+- **Follow-up**: Removed the Script card’s blanket **`.contentShape` + `.onTapGesture`** (dismiss keyboard)—it was stealing taps before they reached the ellipsis **`Button`**. Main studio **`ScrollView`** now uses **`.scrollDismissesKeyboard(.interactively)`** instead.
+- **Later**: Removed trailing **⋯**; **−** in the **top-trailing** corner of each voice card → same **`voicePendingHide`** alert. Footer copy updated.
+- **Voice hide UX**: Row is **`HStack`** (select | **`minus.circle.fill`**) so remove taps are not swallowed by the card **`Button`**; icon matches **Music → soundtrack queue** remove control.
+- **Voice hide reliability**: **`confirmationDialog`** replaces **`alert(item:)` + legacy `Alert`**; **`.buttonStyle(.borderless)`** + **44×44** hit area on remove; removed blanket **`.disabled(availableVoices.isEmpty)`** on the Language/Speed/Voice group.
+
 ### 2026-04-15 — Edit Story: collapsible “How assigning works” + AppStorage
 
 - **ContentView**: Edit → **Script paragraphs** (Media / Music): short always-on hint + **`DisclosureGroup`** for full copy; **`@AppStorage("fluxcut.editStoryHelpExpanded")`** persists expand/collapse (shared across Media | Music). Orange **`tint`** on the disclosure for consistency with FluxCut accents.

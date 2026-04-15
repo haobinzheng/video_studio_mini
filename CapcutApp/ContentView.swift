@@ -112,6 +112,7 @@ struct ContentView: View {
                         .padding(.bottom, 20)
                         .frame(maxWidth: .infinity, alignment: .top)
                     }
+                    .scrollDismissesKeyboard(.interactively)
                     .onAppear {
                         scriptScrollProxy = proxy
                     }
@@ -145,15 +146,27 @@ struct ContentView: View {
             } message: {
                 Text(storyMusicAssignBlockingMessage ?? "")
             }
-            .alert(item: $voicePendingHide) { voice in
-                Alert(
-                    title: Text("Hide Voice?"),
-                    message: Text("\(voice.name) will be removed from the narration voice list. Reload iPhone Voices will bring it back."),
-                    primaryButton: .destructive(Text("Hide")) {
+            .confirmationDialog(
+                "Hide Voice?",
+                isPresented: Binding(
+                    get: { voicePendingHide != nil },
+                    set: { if !$0 { voicePendingHide = nil } }
+                ),
+                titleVisibility: .visible
+            ) {
+                Button("Hide", role: .destructive) {
+                    if let voice = voicePendingHide {
                         viewModel.hideVoice(withId: voice.id)
-                    },
-                    secondaryButton: .cancel()
-                )
+                    }
+                    voicePendingHide = nil
+                }
+                Button("Cancel", role: .cancel) {
+                    voicePendingHide = nil
+                }
+            } message: {
+                if let voice = voicePendingHide {
+                    Text("\(voice.name) will be removed from the narration voice list. Reload iPhone Voices will bring it back.")
+                }
             }
             .alert(item: $pendingMediaDeletion) { item in
                 Alert(
@@ -2491,7 +2504,8 @@ struct ContentView: View {
                     ScrollView {
                         VStack(spacing: 8) {
                             ForEach(viewModel.voicesForSelectedLanguage) { option in
-                                HStack(spacing: 10) {
+                                // HStack (not ZStack): a full-width selection Button overlapped a hide control; taps never reached the top control reliably.
+                                HStack(alignment: .center, spacing: 0) {
                                     Button {
                                         viewModel.selectedVoiceIdentifier = option.id
                                         isNarrationFocused = false
@@ -2511,34 +2525,39 @@ struct ContentView: View {
                                                 }
                                                 .foregroundStyle(.secondary)
                                             }
-                                            Spacer()
+                                            Spacer(minLength: 8)
                                             if option.id == viewModel.selectedVoiceIdentifier {
                                                 Image(systemName: "checkmark.circle.fill")
                                                     .foregroundStyle(.orange)
                                             }
                                         }
                                         .padding(12)
-                                        .background(
-                                            Color.white.opacity(option.id == viewModel.selectedVoiceIdentifier ? 0.95 : 0.72),
-                                            in: RoundedRectangle(cornerRadius: 16, style: .continuous)
-                                        )
+                                        .frame(maxWidth: .infinity, alignment: .leading)
                                     }
-                                    .buttonStyle(.plain)
+                                    .buttonStyle(.borderless)
 
-                                    Menu {
-                                        Button(role: .destructive) {
+                                    if viewModel.canHideVoices {
+                                        Button {
                                             voicePendingHide = option
                                         } label: {
-                                            Label("Hide Voice", systemImage: "eye.slash")
+                                            Image(systemName: "minus.circle.fill")
+                                                .font(.system(size: 18, weight: .semibold))
+                                                .foregroundStyle(Color.red.opacity(0.9))
+                                                .frame(minWidth: 44, minHeight: 44)
+                                                .contentShape(Rectangle())
                                         }
-                                    } label: {
-                                        Image(systemName: "ellipsis.circle")
-                                            .font(.system(size: 20, weight: .semibold))
-                                            .foregroundStyle(Color.secondary.opacity(0.85))
-                                            .padding(4)
+                                        // ScrollView + Button: borderless avoids the scroll gesture swallowing taps (iOS).
+                                        .buttonStyle(.borderless)
+                                        .padding(.trailing, 4)
+                                        .accessibilityLabel("Hide voice")
+                                        .accessibilityHint("Asks for confirmation, then removes this voice from the list")
+                                        .zIndex(1)
                                     }
-                                    .disabled(!viewModel.canHideVoices)
                                 }
+                                .background(
+                                    Color.white.opacity(option.id == viewModel.selectedVoiceIdentifier ? 0.95 : 0.72),
+                                    in: RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                )
                             }
                         }
                         .padding(.top, 2)
@@ -2546,14 +2565,15 @@ struct ContentView: View {
                     .frame(maxHeight: 180)
                 }
 
-                Text("Use the more button to hide a voice. Reload iPhone Voices brings hidden voices back.")
+                Text("Tap the red remove control (same icon as the Music soundtrack queue) to hide a voice. Reload iPhone Voices brings hidden voices back.")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             }
             .onAppear {
                 viewModel.loadAvailableVoicesIfNeeded()
             }
-            .disabled(viewModel.availableVoices.isEmpty)
+            // Do not disable this whole block when the voice list is empty — it prevented remove taps from
+            // reaching the trailing control in some states; rows are empty anyway when there are no voices.
 
             HStack(spacing: 10) {
                 scriptMetaPill(
@@ -2702,10 +2722,6 @@ struct ContentView: View {
         .padding(20)
         .frame(maxWidth: .infinity, alignment: .topLeading)
         .background(Color.white.opacity(0.8), in: RoundedRectangle(cornerRadius: 28, style: .continuous))
-        .contentShape(Rectangle())
-        .onTapGesture {
-            isNarrationFocused = false
-        }
     }
 
     private var narrationPreviewSection: some View {

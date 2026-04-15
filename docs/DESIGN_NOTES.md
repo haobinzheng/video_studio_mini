@@ -264,6 +264,7 @@ Behavior:
 - when voice changes:
   - that becomes the active narration voice
 - FluxCut remembers both selected language and selected voice
+- **Hide voice**: when more than one voice exists, the row uses an **`HStack`**: the main area selects the voice; the trailing control uses **`minus.circle.fill`** (same as **Music → soundtrack queue** remove). Tap → **`confirmationDialog`** (not legacy **`Alert`/`alert(item:)`**) → **`UserDefaults`**. Inside the voice **`ScrollView`**, use **`.buttonStyle(.borderless)`** and a ≥**44×44** pt hit target so taps are not eaten by scroll gestures. Do not apply **`.disabled(availableVoices.isEmpty)`** to the whole Language/Speed/Voice container — it could block the remove control in edge states. Do not wrap the whole Script card in **tap-to-dismiss-keyboard** with **`contentShape(Rectangle())`** — use **`scrollDismissesKeyboard`** on the main **ScrollView** instead.
 
 Language availability rule:
 
