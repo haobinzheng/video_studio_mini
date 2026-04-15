@@ -19,6 +19,12 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-15 — Pushed: `pro-version` @ `8f7bc98`
+
+- **Git**: `git push origin pro-version` — range `248f987..8f7bc98` (commit `8f7bc98`, 2026-04-15 14:35 −0700).
+- **Script / Voice hide**: **`confirmationDialog`** (replaces legacy **`alert(item:)`**); **`minus.circle.fill`** row layout (**`HStack`**); **`.buttonStyle(.borderless)`** + **44×44** remove target inside voice **`ScrollView`**; removed blanket **`.disabled(availableVoices.isEmpty)`** on Language/Speed/Voice block; main **`ScrollView`** uses **`scrollDismissesKeyboard`** (keyboard dismiss without stealing control taps).
+- **Files in that commit**: `CapcutApp/ContentView.swift`, `docs/DESIGN_NOTES.md`, `docs/GIT_PUSH_LOG.md`.
+
 ### 2026-04-15 — Script / Voice: fix Hide voice control (ScrollView + Menu)
 
 - **ContentView**: Replaced **`Menu`** next to each voice row with a **`Button`** that sets **`voicePendingHide`** so the existing **Hide Voice?** alert runs. **`Menu`** popovers were mis-anchored inside the nested **ScrollView**, so “Hide Voice” appeared floating on the wrong row; the ellipsis is now a fixed hit target (`36×36`).
