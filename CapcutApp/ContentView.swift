@@ -831,17 +831,60 @@ struct ContentView: View {
     private func toggleStoryParagraphSelection(_ index: Int) {
         if selectedStoryParagraphIndices.contains(index) {
             selectedStoryParagraphIndices.remove(index)
-        } else if selectedStoryParagraphIndices.isEmpty {
+            return
+        }
+        if selectedStoryParagraphIndices.isEmpty {
             selectedStoryParagraphIndices = [index]
-        } else {
-            let lo = selectedStoryParagraphIndices.min() ?? index
-            let hi = selectedStoryParagraphIndices.max() ?? index
-            if index + 1 == lo || index - 1 == hi {
-                selectedStoryParagraphIndices.insert(index)
+            return
+        }
+
+        let lo = selectedStoryParagraphIndices.min() ?? index
+        let hi = selectedStoryParagraphIndices.max() ?? index
+        let adjacent = index + 1 == lo || index - 1 == hi
+        if !adjacent {
+            selectedStoryParagraphIndices = [index]
+            return
+        }
+
+        let candidate = selectedStoryParagraphIndices.union([index])
+        let newLo = candidate.min()!
+        let newHi = candidate.max()!
+        guard candidate.count == newHi - newLo + 1 else {
+            selectedStoryParagraphIndices = [index]
+            return
+        }
+
+        guard mediaBlockSelectionMutexAllowsClosedRange(newLo...newHi) else {
+            viewModel.statusMessage =
+                "Can't extend here: that paragraph is in another block or would mix assigned and unassigned text. Deselect and choose a contiguous range in one block, or only unassigned paragraphs."
+            return
+        }
+
+        selectedStoryParagraphIndices.insert(index)
+    }
+
+    /// A valid media-block selection is either **only unassigned** paragraphs (contiguous) or **only** paragraphs inside **one** existing block (contiguous sub-range of that block).
+    private func mediaBlockSelectionMutexAllowsClosedRange(_ range: ClosedRange<Int>) -> Bool {
+        let lo = range.lowerBound
+        let hi = range.upperBound
+        var seenBlockID: UUID?
+        for i in lo...hi {
+            let block = viewModel.storyEditBlockContainingParagraph(i)
+            if let b = block {
+                if let sid = seenBlockID, sid != b.id {
+                    return false
+                }
+                seenBlockID = b.id
             } else {
-                selectedStoryParagraphIndices = [index]
+                if seenBlockID != nil {
+                    return false
+                }
             }
         }
+        if let b = viewModel.storyEditBlockContainingParagraph(lo), seenBlockID != nil {
+            return lo >= b.firstParagraphIndex && hi <= b.lastParagraphIndex
+        }
+        return true
     }
 
     private func assignSheetDraftOrdinal(for id: UUID) -> Int? {
@@ -926,17 +969,60 @@ struct ContentView: View {
     private func toggleMusicStoryParagraphSelection(_ index: Int) {
         if selectedMusicStoryParagraphIndices.contains(index) {
             selectedMusicStoryParagraphIndices.remove(index)
-        } else if selectedMusicStoryParagraphIndices.isEmpty {
+            return
+        }
+        if selectedMusicStoryParagraphIndices.isEmpty {
             selectedMusicStoryParagraphIndices = [index]
-        } else {
-            let lo = selectedMusicStoryParagraphIndices.min() ?? index
-            let hi = selectedMusicStoryParagraphIndices.max() ?? index
-            if index + 1 == lo || index - 1 == hi {
-                selectedMusicStoryParagraphIndices.insert(index)
+            return
+        }
+
+        let lo = selectedMusicStoryParagraphIndices.min() ?? index
+        let hi = selectedMusicStoryParagraphIndices.max() ?? index
+        let adjacent = index + 1 == lo || index - 1 == hi
+        if !adjacent {
+            selectedMusicStoryParagraphIndices = [index]
+            return
+        }
+
+        let candidate = selectedMusicStoryParagraphIndices.union([index])
+        let newLo = candidate.min()!
+        let newHi = candidate.max()!
+        guard candidate.count == newHi - newLo + 1 else {
+            selectedMusicStoryParagraphIndices = [index]
+            return
+        }
+
+        guard musicSegmentSelectionMutexAllowsClosedRange(newLo...newHi) else {
+            viewModel.statusMessage =
+                "Can't extend here: that paragraph is in another music segment or would mix assigned and unassigned lines. Deselect and choose a contiguous range in one segment, or only unassigned paragraphs."
+            return
+        }
+
+        selectedMusicStoryParagraphIndices.insert(index)
+    }
+
+    /// Same mutex as media blocks: selection is either only paragraphs with **no** music segment, or only paragraphs inside **one** existing segment.
+    private func musicSegmentSelectionMutexAllowsClosedRange(_ range: ClosedRange<Int>) -> Bool {
+        let lo = range.lowerBound
+        let hi = range.upperBound
+        var seenSegmentID: UUID?
+        for i in lo...hi {
+            let segment = viewModel.storyMusicBedSegmentContainingParagraph(i)
+            if let s = segment {
+                if let sid = seenSegmentID, sid != s.id {
+                    return false
+                }
+                seenSegmentID = s.id
             } else {
-                selectedMusicStoryParagraphIndices = [index]
+                if seenSegmentID != nil {
+                    return false
+                }
             }
         }
+        if let s = viewModel.storyMusicBedSegmentContainingParagraph(lo), seenSegmentID != nil {
+            return lo >= s.firstParagraphIndex && hi <= s.lastParagraphIndex
+        }
+        return true
     }
 
     private func resetStoryMusicAssignSheetState() {
@@ -1020,6 +1106,7 @@ struct ContentView: View {
                         )
                 }
                 .shadow(color: .black.opacity(0.08), radius: 10, y: 4)
+                .id("\(item.id.uuidString)-\(ObjectIdentifier(item.previewImage as AnyObject))")
 
             if item.isVideo {
                 Image(systemName: "video.fill")
@@ -1078,6 +1165,7 @@ struct ContentView: View {
                                     lineWidth: 2
                                 )
                         }
+                        .id("\(item.id.uuidString)-\(ObjectIdentifier(item.previewImage as AnyObject))")
                     if item.isVideo {
                         Image(systemName: "video.fill")
                             .font(.caption2.weight(.bold))
@@ -1677,18 +1765,73 @@ struct ContentView: View {
         }
     }
 
+    /// Edit → Media: Assign + Clear (kept above the fixed-height paragraph `ScrollView`, like Script tab controls above the editor).
+    private var editStoryMediaAssignButtonRow: some View {
+        HStack(spacing: 12) {
+            Button {
+                openStoryBlockAssignSheet()
+            } label: {
+                Label("Assign", systemImage: "square.and.arrow.down.on.square")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.orange)
+            .disabled(!contiguousStoryParagraphSelection || selectedStoryParagraphIndices.isEmpty)
+
+            Button {
+                viewModel.clearAllStoryEditBlocks()
+                selectedStoryParagraphIndices = []
+                selectedMusicStoryParagraphIndices = []
+            } label: {
+                Label("Clear", systemImage: "eraser")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .disabled(!viewModel.storyUsesBlockTimeline || viewModel.storyEditBlocks.isEmpty)
+        }
+    }
+
+    /// Same fixed height as the Script tab editor so paragraph lists scroll inside the card while actions stay visible.
+    private static let editStoryParagraphScrollMaxHeight: CGFloat = 320
+
+    /// Edit → Music: Assign + Clear music (same layout as media: actions above scrolling paragraph list).
+    private var editStoryMusicAssignButtonRow: some View {
+        HStack(spacing: 12) {
+            Button {
+                openStoryMusicAssignSheet()
+            } label: {
+                Label("Assign", systemImage: "music.note.list")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(.purple)
+            .disabled(!contiguousMusicStoryParagraphSelection || selectedMusicStoryParagraphIndices.isEmpty)
+
+            Button {
+                viewModel.clearAllStorySegmentSoundtracks()
+                selectedMusicStoryParagraphIndices = []
+            } label: {
+                Label("Clear music", systemImage: "eraser")
+                    .font(.subheadline.weight(.semibold))
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.bordered)
+            .disabled(!viewModel.storyUsesBlockTimeline || viewModel.storyMusicBedSegments.isEmpty)
+        }
+    }
+
     private var editStorySection: some View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Edit")
                 .font(.title2.weight(.semibold))
 
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Use block timeline (Story mode)", isOn: $viewModel.storyUsesBlockTimeline)
+                Toggle("Edit Media and Music", isOn: $viewModel.storyUsesBlockTimeline)
                     .font(.subheadline.weight(.semibold))
-                Text("Paragraphs (blank-line separated in Script) map to media. Script → Clean Up normalizes text and blank-line boundaries for assigning blocks.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Button("Reset to one block (all paragraphs, all media)") {
+                Button("Reset All") {
                     viewModel.resetStoryEditBlocksToDefault()
                     selectedStoryParagraphIndices = []
                     selectedMusicStoryParagraphIndices = []
@@ -1730,58 +1873,42 @@ struct ContentView: View {
                     Text("Import and order tracks in the Music tab. Use the Music sub-tab here to assign beds to paragraphs.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
-                    Text("Tap paragraphs to select a contiguous range, then tap Assign to open the media picker. Use + / − on the large preview, double-tap pool thumbnails, or tap assigned clips to preview and double-tap to remove.")
+                    Text("Tap paragraphs to select a contiguous range (only unassigned lines, or only lines inside one existing block—never both). Assign stays above the list while you scroll—same idea as the Script window. Use + / − on the large preview, double-tap pool thumbnails, or tap assigned clips to preview and double-tap to remove.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    HStack(spacing: 12) {
-                        Button {
-                            openStoryBlockAssignSheet()
-                        } label: {
-                            Label("Assign", systemImage: "square.and.arrow.down.on.square")
-                                .font(.subheadline.weight(.semibold))
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.orange)
-                        .disabled(!contiguousStoryParagraphSelection || selectedStoryParagraphIndices.isEmpty)
-
-                        Button {
-                            viewModel.clearAllStoryEditBlocks()
-                            selectedStoryParagraphIndices = []
-                            selectedMusicStoryParagraphIndices = []
-                        } label: {
-                            Label("Clear", systemImage: "eraser")
-                                .font(.subheadline.weight(.semibold))
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(!viewModel.storyUsesBlockTimeline || viewModel.storyEditBlocks.isEmpty)
-                    }
+                    editStoryMediaAssignButtonRow
                     if viewModel.storyScriptParagraphs.isEmpty {
                         Text("No paragraphs yet—add Script text with blank lines between ideas, or run Clean Up on pasted text.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     } else {
-                        ForEach(Array(viewModel.storyScriptParagraphs.enumerated()), id: \.offset) { index, text in
-                            Button {
-                                toggleStoryParagraphSelection(index)
-                            } label: {
-                                storyScriptParagraphRow(
-                                    index: index,
-                                    text: text,
-                                    isSelected: selectedStoryParagraphIndices.contains(index),
-                                    assignmentCaption: {
-                                        if let b = viewModel.storyBlockOrdinal(forParagraphIndex: index) {
-                                            return "Block \(b)"
-                                        }
-                                        return "Unassigned"
-                                    }()
-                                )
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 8) {
+                                ForEach(Array(viewModel.storyScriptParagraphs.enumerated()), id: \.offset) { index, text in
+                                    Button {
+                                        toggleStoryParagraphSelection(index)
+                                    } label: {
+                                        storyScriptParagraphRow(
+                                            index: index,
+                                            text: text,
+                                            isSelected: selectedStoryParagraphIndices.contains(index),
+                                            assignmentCaption: {
+                                                if let b = viewModel.storyBlockOrdinal(forParagraphIndex: index) {
+                                                    return "Block \(b)"
+                                                }
+                                                return "Unassigned"
+                                            }()
+                                        )
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
                             }
-                            .buttonStyle(.plain)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
+                        .frame(maxWidth: .infinity, minHeight: 120, maxHeight: Self.editStoryParagraphScrollMaxHeight)
+                        .background(Color.white.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
                 }
                 .padding(14)
@@ -1792,52 +1919,37 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Script paragraphs")
                         .font(.headline)
-                    Text("Music spans are independent of media blocks: pick any contiguous script paragraphs. Assign ties the soundtrack to only that range; other paragraphs stay Unassigned until you assign them.")
+                    Text("Music spans are independent of media blocks. Select a contiguous range that is either only unassigned lines or only lines inside one existing segment (not both). Assign stays above the scrolling list. Tap Assign to set the soundtrack for that range.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
-                    HStack(spacing: 12) {
-                        Button {
-                            openStoryMusicAssignSheet()
-                        } label: {
-                            Label("Assign", systemImage: "music.note.list")
-                                .font(.subheadline.weight(.semibold))
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .tint(.purple)
-                        .disabled(!contiguousMusicStoryParagraphSelection || selectedMusicStoryParagraphIndices.isEmpty)
-
-                        Button {
-                            viewModel.clearAllStorySegmentSoundtracks()
-                            selectedMusicStoryParagraphIndices = []
-                        } label: {
-                            Label("Clear music", systemImage: "eraser")
-                                .font(.subheadline.weight(.semibold))
-                                .frame(maxWidth: .infinity)
-                        }
-                        .buttonStyle(.bordered)
-                        .disabled(!viewModel.storyUsesBlockTimeline || viewModel.storyMusicBedSegments.isEmpty)
-                    }
+                    editStoryMusicAssignButtonRow
                     if viewModel.storyScriptParagraphs.isEmpty {
                         Text("No paragraphs yet—add Script text with blank lines between ideas, or run Clean Up on pasted text.")
                             .font(.subheadline)
                             .foregroundStyle(.secondary)
                     } else {
-                        ForEach(Array(viewModel.storyScriptParagraphs.enumerated()), id: \.offset) { index, text in
-                            Button {
-                                toggleMusicStoryParagraphSelection(index)
-                            } label: {
-                                storyScriptParagraphRow(
-                                    index: index,
-                                    text: text,
-                                    isSelected: selectedMusicStoryParagraphIndices.contains(index),
-                                    assignmentCaption: viewModel.storyMusicAssignmentCaption(forParagraphIndex: index)
-                                )
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                                .contentShape(Rectangle())
+                        ScrollView {
+                            LazyVStack(alignment: .leading, spacing: 8) {
+                                ForEach(Array(viewModel.storyScriptParagraphs.enumerated()), id: \.offset) { index, text in
+                                    Button {
+                                        toggleMusicStoryParagraphSelection(index)
+                                    } label: {
+                                        storyScriptParagraphRow(
+                                            index: index,
+                                            text: text,
+                                            isSelected: selectedMusicStoryParagraphIndices.contains(index),
+                                            assignmentCaption: viewModel.storyMusicAssignmentCaption(forParagraphIndex: index)
+                                        )
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .contentShape(Rectangle())
+                                    }
+                                    .buttonStyle(.plain)
+                                }
                             }
-                            .buttonStyle(.plain)
+                            .frame(maxWidth: .infinity, alignment: .leading)
                         }
+                        .frame(maxWidth: .infinity, minHeight: 120, maxHeight: Self.editStoryParagraphScrollMaxHeight)
+                        .background(Color.white.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                     }
                 }
                 .padding(14)
@@ -2151,6 +2263,7 @@ struct ContentView: View {
                         )
                 }
                 .shadow(color: .black.opacity(0.08), radius: 10, y: 4)
+                .id("\(item.id.uuidString)-\(ObjectIdentifier(item.previewImage as AnyObject))")
 
             if item.isVideo {
                 Image(systemName: "video.fill")

@@ -19,6 +19,17 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-14 — Video pool thumbnails: file-import frame + PhotoKit retry
+
+- **AppViewModel**: After a picker video finishes copying to disk (`completePickerVideoFileImport`), generate a **frame thumbnail** with `makeVideoThumbnail(for:)` and replace the generic placeholder so strip/assign thumbnails match the clip. **PhotoKit** prefetch retries with **network allowed** when the fast local request returns nil (e.g. iCloud-backed assets).
+- **ContentView**: Pool/assign/media strip `Image(uiImage:)` views use a stable **`.id(item + preview object identity)`** so SwiftUI refreshes when `previewImage` updates from the shared placeholder to a real image.
+
+### 2026-04-14 — Edit Story: Edit Media and Music toggle + Reset All
+
+- **ContentView**: Toggle label **Edit Media and Music** (replaces **Use block timeline (Story mode)**); removed paragraph caption under the toggle; reset control labeled **Reset All** (same behavior: one block, clear paragraph selections).
+- **AppViewModel**: Music-assign gate message when blocks are empty now says **Assign media in the Media tab first.** (no stale “turn on” wording).
+- **DESIGN_NOTES**: User-facing toggle name updated to **Edit Media and Music**.
+
 ### 2026-04-14 — Docs: big-preview video autoplay spec
 
 - **`docs/BIG_PREVIEW_VIDEO_AUTOPLAY_SPEC.md`**: Code design spec for muted looping preview (`LoopingVideoPlayerStore`, `AVPlayerLooper` vs template item readiness, slide lifecycle, UX contract, test checklist).

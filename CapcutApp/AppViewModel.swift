@@ -2230,6 +2230,19 @@ final class AppViewModel: NSObject, ObservableObject {
             sourceAssetID: sourceAssetID
         )
 
+        if let thumb = await makeVideoThumbnail(for: url),
+           let thumbIndex = mediaItems.firstIndex(where: { $0.sourceAssetID == sourceAssetID }) {
+            let thumbRow = mediaItems[thumbIndex]
+            if case let .video(fileURL, dur, lib) = thumbRow.kind {
+                mediaItems[thumbIndex] = MediaItem(
+                    id: thumbRow.id,
+                    previewImage: thumb.normalizedOrientationImage(),
+                    kind: .video(url: fileURL, duration: dur, libraryIdentifier: lib),
+                    sourceAssetID: sourceAssetID
+                )
+            }
+        }
+
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
 
@@ -2255,7 +2268,11 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     private func prefetchVideoThumbnailFromLibrary(sourceAssetID: UUID, asset: PHAsset) async {
-        guard let thumb = await makePhotoLibraryVideoThumbnail(for: asset) else { return }
+        var thumb = await makePhotoLibraryVideoThumbnail(for: asset, allowNetwork: false)
+        if thumb == nil {
+            thumb = await makePhotoLibraryVideoThumbnail(for: asset, allowNetwork: true)
+        }
+        guard let thumb else { return }
         guard let index = mediaItems.firstIndex(where: { $0.sourceAssetID == sourceAssetID }) else { return }
         let row = mediaItems[index]
         guard case let .video(url, duration, libraryIdentifier) = row.kind else { return }
@@ -3828,6 +3845,11 @@ final class AppViewModel: NSObject, ObservableObject {
         return found + 1
     }
 
+    /// Media block covering this paragraph for Edit → Media assignment, if any.
+    func storyEditBlockContainingParagraph(_ index: Int) -> StoryEditBlock? {
+        storyEditBlocks.first { $0.firstParagraphIndex <= index && $0.lastParagraphIndex >= index }
+    }
+
     /// Which music segment (global 1-based order) covers this paragraph, and its assigned paragraph range.
     func storyMusicBedDisplay(forParagraphIndex index: Int) -> (segmentOrdinal: Int, assignedRange: ClosedRange<Int>)? {
         var ord = 1
@@ -3857,6 +3879,11 @@ final class AppViewModel: NSObject, ObservableObject {
         }
     }
 
+    /// Music bed segment covering this paragraph for Edit → Music assignment, if any.
+    func storyMusicBedSegmentContainingParagraph(_ index: Int) -> StoryMusicBedSegment? {
+        storyMusicBedSegments.first { $0.firstParagraphIndex <= index && $0.lastParagraphIndex >= index }
+    }
+
     /// Validates Edit Story → Music assign (paragraph indices only; independent of media blocks).
     func validateMusicAssignmentSelection(_ selection: ClosedRange<Int>) -> String? {
         let n = storyScriptParagraphs.count
@@ -3869,7 +3896,7 @@ final class AppViewModel: NSObject, ObservableObject {
             return "That paragraph selection is out of range."
         }
         if storyUsesBlockTimeline && storyEditBlocks.isEmpty {
-            return "Turn on the block timeline and assign media in the Media tab first."
+            return "Assign media in the Media tab first."
         }
         return nil
     }
