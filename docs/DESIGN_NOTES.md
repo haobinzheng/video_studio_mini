@@ -96,6 +96,7 @@ Implemented in the **Edit Story** tab (optional; Settings → **Show Edit Story 
 - **Media block**: one contiguous range of script **paragraphs** plus ordered pool clips (`AppViewModel.StoryEditBlock`: `firstParagraphIndex`…`lastParagraphIndex`, `mediaItemIDs`). Visual timeline only.
 - **Music segment**: an independent contiguous paragraph range with its own soundtrack choice (`AppViewModel.StoryMusicBedSegment`). It does **not** have to align with media blocks—e.g. media block 1 can be paragraphs 1–3 while music segment 1 spans 1–6.
 - **Edit tab structure**: segmented **Media** | **Music** (when **Edit Media and Music** is on). **Media** is script paragraphs labeled **Block** (track order/imports stay on the main **Music** tab). **Music** shows the same script with music assignment captions. Music **Assign** opens the soundtrack sheet for any valid contiguous paragraph selection (after the same gate as media: **Edit Media and Music** on and media assigned somewhere).
+- **Script paragraphs help**: A one-line hint stays visible; full instructions sit under a **`DisclosureGroup`** titled **How assigning works**. Expansion is persisted in **`UserDefaults`** via **`@AppStorage("fluxcut.editStoryHelpExpanded")`** (default collapsed). **Media** and **Music** share the same expanded flag so switching tabs keeps the user’s preference.
 
 ### Per–music-segment soundtrack rules (product)
 

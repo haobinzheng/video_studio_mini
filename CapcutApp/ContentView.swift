@@ -63,6 +63,8 @@ struct ContentView: View {
     }
 
     @State private var editStoryEditorTab: EditStoryEditorTab = .media
+    /// Persists Edit → Script paragraphs “How assigning works” disclosure (Media / Music share one expansion state).
+    @AppStorage("fluxcut.editStoryHelpExpanded") private var editStoryHelpExpanded = false
     @FocusState private var isNarrationFocused: Bool
 
     private var assignSheetBlockScriptText: String {
@@ -1870,12 +1872,26 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Script paragraphs")
                         .font(.headline)
-                    Text("Import and order tracks in the Music tab. Use the Music sub-tab here to assign beds to paragraphs.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text("Tap paragraphs to select a contiguous range (only unassigned lines, or only lines inside one existing block—never both). Assign stays above the list while you scroll—same idea as the Script window. Use + / − on the large preview, double-tap pool thumbnails, or tap assigned clips to preview and double-tap to remove.")
+                    Text("Select a contiguous paragraph range, then Assign.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    DisclosureGroup(isExpanded: $editStoryHelpExpanded) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Import and order tracks in the Music tab. Use the Music sub-tab here to assign beds to paragraphs.")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            Text("Tap paragraphs to select a contiguous range (only unassigned lines, or only lines inside one existing block—never both). Assign stays above the list while you scroll—same idea as the Script window. Use + / − on the large preview, double-tap pool thumbnails, or tap assigned clips to preview and double-tap to remove.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 2)
+                    } label: {
+                        Text("How assigning works")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .tint(.orange)
                     editStoryMediaAssignButtonRow
                     if viewModel.storyScriptParagraphs.isEmpty {
                         Text("No paragraphs yet—add Script text with blank lines between ideas, or run Clean Up on pasted text.")
@@ -1919,9 +1935,21 @@ struct ContentView: View {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Script paragraphs")
                         .font(.headline)
-                    Text("Music spans are independent of media blocks. Select a contiguous range that is either only unassigned lines or only lines inside one existing segment (not both). Assign stays above the scrolling list. Tap Assign to set the soundtrack for that range.")
+                    Text("Select a contiguous range for one music segment, then Assign.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                    DisclosureGroup(isExpanded: $editStoryHelpExpanded) {
+                        Text("Music spans are independent of media blocks. Select a contiguous range that is either only unassigned lines or only lines inside one existing segment (not both). Assign stays above the scrolling list. Tap Assign to set the soundtrack for that range.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding(.top, 2)
+                    } label: {
+                        Text("How assigning works")
+                            .font(.subheadline.weight(.semibold))
+                    }
+                    .tint(.orange)
                     editStoryMusicAssignButtonRow
                     if viewModel.storyScriptParagraphs.isEmpty {
                         Text("No paragraphs yet—add Script text with blank lines between ideas, or run Clean Up on pasted text.")

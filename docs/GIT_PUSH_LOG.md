@@ -19,6 +19,10 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-15 — Edit Story: collapsible “How assigning works” + AppStorage
+
+- **ContentView**: Edit → **Script paragraphs** (Media / Music): short always-on hint + **`DisclosureGroup`** for full copy; **`@AppStorage("fluxcut.editStoryHelpExpanded")`** persists expand/collapse (shared across Media | Music). Orange **`tint`** on the disclosure for consistency with FluxCut accents.
+
 ### 2026-04-15 — Export: Script speed applies to final TTS
 
 - **VideoExporter**: **`exportVideo(..., speechRateMultiplier:)`** (default `1.0`); **`synthesizeNarrationIfNeeded`** passes it into **`SpeechVoiceLibrary.makeUtterance`** and scales **estimated** narration duration by **`effectiveSpeechRateMultiplier`** (measured utterances already reflect the rate).
