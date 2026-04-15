@@ -454,6 +454,7 @@ Implementation:
 
 - **`VideoExporter.CaptionStyle`**: `normal`, `stylish`.
 - **`AppViewModel.captionStyle`** passed into **`exportVideo(..., captionStyle:)`** for final exports (preview path keeps captions off as today; when captions are off, style is ignored).
+- **Script → Speed** (`selectedNarrationSpeed`): **`exportVideo(..., speechRateMultiplier:)`** must match the Script tab so **`VideoExporter.synthesizeNarrationIfNeeded`** uses **`SpeechVoiceLibrary.makeUtterance(..., speechRateMultiplier:)`** for fresh TTS (not only the default `1.0`). When export **reuses** preview narration audio + cues (`externalNarrationAudioURL` + `externalCues`), speed is whatever was baked into that preview file.
 
 ### Normal
 

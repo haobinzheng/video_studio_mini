@@ -19,6 +19,18 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-15 — Export: Script speed applies to final TTS
+
+- **VideoExporter**: **`exportVideo(..., speechRateMultiplier:)`** (default `1.0`); **`synthesizeNarrationIfNeeded`** passes it into **`SpeechVoiceLibrary.makeUtterance`** and scales **estimated** narration duration by **`effectiveSpeechRateMultiplier`** (measured utterances already reflect the rate).
+- **AppViewModel**: Passes **`selectedNarrationSpeed`** into **`exportVideo`**.
+
+### 2026-04-15 — Pushed: `pro-version` @ `180f298` (milestone)
+
+- **Git**: `git push origin pro-version` — range `c1cd530..180f298` (commit `180f298`, 2026-04-15 09:57 −0700).
+- **Edit Story UI**: Toggle label **Edit Media and Music**; **Reset All**; removed paragraph caption under toggle; music-assign empty-blocks message **Assign media in the Media tab first.**; **DESIGN_NOTES** aligned to the new toggle name.
+- **Video strip thumbnails**: After picker file import completes, **`makeVideoThumbnail(for:)`** replaces the generic placeholder; **PhotoKit** prefetch retries with **network allowed** when the fast request returns nil; **`prefetchVideoThumbnailFromLibrary`** avoids `?? await` (Swift concurrency / build fix); pool/assign/media strip images use **`.id`** so SwiftUI refreshes when `previewImage` updates.
+- **Same commit** as code: `CapcutApp/AppViewModel.swift`, `CapcutApp/ContentView.swift`, `docs/DESIGN_NOTES.md`, `docs/GIT_PUSH_LOG.md`.
+
 ### 2026-04-14 — Video pool thumbnails: file-import frame + PhotoKit retry
 
 - **AppViewModel**: After a picker video finishes copying to disk (`completePickerVideoFileImport`), generate a **frame thumbnail** with `makeVideoThumbnail(for:)` and replace the generic placeholder so strip/assign thumbnails match the clip. **PhotoKit** prefetch retries with **network allowed** when the fast local request returns nil (e.g. iCloud-backed assets).

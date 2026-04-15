@@ -380,6 +380,7 @@ struct VideoExporter {
         narrationVolume: Double,
         videoAudioVolume: Double,
         voiceIdentifier: String,
+        speechRateMultiplier: Double = 1.0,
         aspectRatio: AspectRatio,
         timingMode: TimingMode,
         includeCaptions: Bool = true,
@@ -457,6 +458,7 @@ struct VideoExporter {
             narrationTimeline = try await synthesizeNarrationIfNeeded(
                 text: narrationText,
                 voiceIdentifier: voiceIdentifier,
+                speechRateMultiplier: speechRateMultiplier,
                 workspace: workspace,
                 externalCues: externalCues,
                 externalNarrationAudioURL: externalNarrationAudioURL,
@@ -994,6 +996,7 @@ struct VideoExporter {
     private func synthesizeNarrationIfNeeded(
         text: String,
         voiceIdentifier: String,
+        speechRateMultiplier: Double,
         workspace: URL,
         externalCues: [ExternalCue],
         externalNarrationAudioURL: URL?,
@@ -1061,7 +1064,11 @@ struct VideoExporter {
             storyBlockUtteranceRanges = nil
         }
         let utterances = narrationSegments.map {
-            SpeechVoiceLibrary.makeUtterance(from: $0, voiceIdentifier: voiceIdentifier)
+            SpeechVoiceLibrary.makeUtterance(
+                from: $0,
+                voiceIdentifier: voiceIdentifier,
+                speechRateMultiplier: speechRateMultiplier
+            )
         }
         var utteranceAudioURLs: [URL] = []
         var utteranceDurations: [CMTime] = []
@@ -1074,8 +1081,11 @@ struct VideoExporter {
         }
 
         let measuredNarrationDuration = utteranceDurations.reduce(CMTime.zero, +)
+        let effectiveRate = SpeechVoiceLibrary.effectiveSpeechRateMultiplier(for: speechRateMultiplier)
+        let estimatedSecondsRaw = estimatedNarrationSeconds(for: narrationSegments)
+        let estimatedSeconds = estimatedSecondsRaw / max(effectiveRate, 0.1)
         let estimatedNarrationDuration = CMTime(
-            seconds: estimatedNarrationSeconds(for: narrationSegments),
+            seconds: estimatedSeconds,
             preferredTimescale: 600
         )
         // Edit Story blocks: drive length from real TTS samples only. Bumping to estimated here

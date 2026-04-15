@@ -1421,6 +1421,7 @@ final class AppViewModel: NSObject, ObservableObject {
                         narrationVolume: narrationVolume,
                         videoAudioVolume: videoAudioVolume,
                         voiceIdentifier: voiceIdentifier,
+                        speechRateMultiplier: speechRateMultiplier,
                         aspectRatio: aspectRatio,
                         timingMode: timingMode,
                         includeCaptions: includeCaptions,
