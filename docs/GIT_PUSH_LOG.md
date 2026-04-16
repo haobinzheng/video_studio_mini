@@ -19,6 +19,12 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-15 — Pushed: `pro-version` @ `59cf78b`
+
+- **Git**: `git push origin pro-version` — range `5ed61d2..59cf78b` (commit `59cf78b`, 2026-04-15 22:24 −0700).
+- **Edit Story**: Toggle **Edit Media and Music** on clears **`storyMusicBedSegments`** and **`storyEditBlocks`** (fully unassigned; no default Block 1); **`reconcileStoryEditBlocksWithScript()`** no longer seeds an empty block. **`validateMusicAssignmentSelection`** does not require media blocks first. **ContentView**: paragraph selection clear on enable; **Reset All** removed.
+- **Files in that commit**: `CapcutApp/AppViewModel.swift`, `CapcutApp/ContentView.swift`, `docs/DESIGN_NOTES.md`, `docs/GIT_PUSH_LOG.md`.
+
 ### 2026-04-12 — Edit Story: toggle on = fully unassigned (no default Block 1)
 
 - **AppViewModel**: **`resetStoryEditBlocksToDefault()`** clears **`storyMusicBedSegments`** and **`storyEditBlocks`** only (no implicit block covering the script). **`reconcileStoryEditBlocksWithScript()`** no longer seeds a block when empty.
