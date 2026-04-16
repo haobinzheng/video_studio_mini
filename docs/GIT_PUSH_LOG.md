@@ -19,6 +19,13 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-16 — Video tab: Story preflight, Stop, render session + docs
+
+- **AppViewModel**: **`storyPoolTimelineExportBlockingReason`** (hybrid pool / **20s**-per-photo rule); **`activeVideoRenderSessionID`** so progress callbacks cannot overwrite status after **Stop**; **`stopActiveVideoRender()`**.
+- **ContentView**: Orange **Add more media.** callout; red **Stop** on render progress card.
+- **VideoExporter**: **`storyNeedsMoreMedia`** user text **Add more media.**
+- **DESIGN_NOTES**: New section **Video tab: Story pool preflight, Stop, and status**.
+
 ### 2026-04-15 — Pushed: `pro-version` @ `59cf78b` (+ log @ `d81423a`)
 
 - **Git**: `git push origin pro-version` — range `5ed61d2..59cf78b` (feature commit `59cf78b`, 2026-04-15 22:24 −0700); then `59cf78b..d81423a` (commit `d81423a`, push-log-only follow-up).

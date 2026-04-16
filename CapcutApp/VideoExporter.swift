@@ -3416,7 +3416,7 @@ struct VideoExporter {
             case .exportFailed:
                 return "Video export did not complete."
             case .storyNeedsMoreMedia:
-                return "Story without captions needs more media. Add more photos or videos so each photo would be 20 seconds or less."
+                return "Add more media."
             case .invalidStoryBlockPlan:
                 return "Story block layout is invalid. Assign every script paragraph to a block with at least one medium."
             }

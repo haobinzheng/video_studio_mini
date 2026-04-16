@@ -530,6 +530,10 @@ final class AppViewModel: NSObject, ObservableObject {
     private var didConfigureAudioSession = false
     private var suppressSelectedPhotoItemsReload = false
     private var pickerItemsBySourceAssetID: [UUID: PhotosPickerItem] = [:]
+    private var activeVideoRenderTask: Task<Void, Never>?
+    private var activeVideoExportTask: Task<URL, Error>?
+    /// Invalidated on **Stop** so `VideoExporter` / narration progress handlers cannot overwrite `statusMessage` after cancel.
+    private var activeVideoRenderSessionID: UUID?
 
     override init() {
         if let hidden = UserDefaults.standard.array(forKey: Self.hiddenVoiceIdentifiersKey) as? [String] {
@@ -1284,6 +1288,18 @@ final class AppViewModel: NSObject, ObservableObject {
         runVideoRender(renderQuality: .preview, successMessage: "Preview ready. Review the result below before creating the final video.")
     }
 
+    func stopActiveVideoRender() {
+        guard isExportingVideo || isPreparingVideoPreview else { return }
+        activeVideoRenderSessionID = nil
+        activeVideoRenderTask?.cancel()
+        activeVideoExportTask?.cancel()
+        isPreparingVideoPreview = false
+        isExportingVideo = false
+        isPreparingNarrationPreview = false
+        exportProgress = 0
+        statusMessage = "Render stopped. Continue editing and start again anytime."
+    }
+
     private func runVideoRender(renderQuality: VideoExporter.RenderQuality, successMessage: String) {
         guard !isLoadingMediaSelection else {
             statusMessage = "Media is still loading. Please wait a moment, then try again."
@@ -1301,6 +1317,11 @@ final class AppViewModel: NSObject, ObservableObject {
                 : "Pick photos or videos before rendering."
             return
         }
+
+        activeVideoRenderTask?.cancel()
+        activeVideoExportTask?.cancel()
+        activeVideoRenderTask = nil
+        activeVideoExportTask = nil
 
         if renderQuality == .preview {
             isPreparingVideoPreview = true
@@ -1363,7 +1384,21 @@ final class AppViewModel: NSObject, ObservableObject {
             return
         }
 
-        Task {
+        activeVideoRenderTask = Task {
+            let sessionID = UUID()
+            activeVideoRenderSessionID = sessionID
+            defer {
+                activeVideoExportTask = nil
+                activeVideoRenderTask = nil
+                if activeVideoRenderSessionID == sessionID {
+                    activeVideoRenderSessionID = nil
+                }
+                if renderQuality == .preview {
+                    isPreparingVideoPreview = false
+                } else {
+                    isExportingVideo = false
+                }
+            }
             do {
                 let shouldPrepareNarration = timingMode != .video && !narrationText.isEmpty
                 let requiresFullNarrationPreview = renderQuality != .preview && timingMode != .video
@@ -1386,17 +1421,24 @@ final class AppViewModel: NSObject, ObservableObject {
                             ? "Preview narration is ready. Building a short sample render now."
                             : "Narration and captions are ready. Rendering your video now.",
                         progressHandler: { progress, message in
+                            guard self.activeVideoRenderSessionID == sessionID else { return }
                             self.exportProgress = 0.08 + (progress * 0.14)
                             self.statusMessage = message
                         }
                     )
+                    try Task.checkCancellation()
+                    guard activeVideoRenderSessionID == sessionID else { throw CancellationError() }
                 } else {
+                    try Task.checkCancellation()
+                    guard activeVideoRenderSessionID == sessionID else { throw CancellationError() }
                     exportProgress = 0.22
                     statusMessage = renderQuality == .preview
                         ? "Building a short preview render."
                         : "Rendering your video. This can take a moment."
                 }
 
+                try Task.checkCancellation()
+                guard activeVideoRenderSessionID == sessionID else { throw CancellationError() }
                 exportProgress = max(exportProgress, 0.24)
                 statusMessage = renderQuality == .preview
                     ? "Preparing video files for preview."
@@ -1409,7 +1451,7 @@ final class AppViewModel: NSObject, ObservableObject {
                 let previewCues = (timingMode == .video || narrationText.isEmpty || bypassNarrationPreviewAudio)
                     ? []
                     : narrationPreviewCues
-                let exportedURL = try await Task.detached(priority: .userInitiated) {
+                let exportTask = Task.detached(priority: .userInitiated) {
                     try await exporter.exportVideo(
                         mediaItems: exportMediaItems,
                         narrationText: narrationText,
@@ -1432,12 +1474,16 @@ final class AppViewModel: NSObject, ObservableObject {
                         storyMusicBedSpans: storyMusicBedSpansForExport,
                         progressHandler: { progress, message in
                             Task { @MainActor in
+                                guard self.activeVideoRenderSessionID == sessionID else { return }
                                 self.exportProgress = progress
                                 self.statusMessage = message
                             }
                         }
                     )
-                }.value
+                }
+                activeVideoExportTask = exportTask
+                let exportedURL = try await exportTask.value
+                guard activeVideoRenderSessionID == sessionID else { throw CancellationError() }
                 if renderQuality == .preview {
                     videoPreviewURL = exportedURL
                     hasPendingPreviewChanges = false
@@ -1448,15 +1494,15 @@ final class AppViewModel: NSObject, ObservableObject {
                 }
                 exportProgress = 1.0
                 statusMessage = successMessage
+            } catch is CancellationError {
+                exportProgress = 0
+                if activeVideoRenderSessionID != nil {
+                    statusMessage = "Render stopped. Continue editing and start again anytime."
+                    activeVideoRenderSessionID = nil
+                }
             } catch {
                 exportProgress = 0
                 statusMessage = error.localizedDescription.isEmpty ? "Video export failed." : error.localizedDescription
-            }
-
-            if renderQuality == .preview {
-                isPreparingVideoPreview = false
-            } else {
-                isExportingVideo = false
             }
         }
     }
@@ -3174,7 +3220,7 @@ final class AppViewModel: NSObject, ObservableObject {
             && !isPreparingVideoPreview
             && !isPreparingNarrationPreview
             && !hasNarrationLanguageMismatchForRender
-            && storyCaptionOffPlanningWarning == nil
+            && storyPoolTimelineExportBlockingReason == nil
             && !isStoryBlockExportBlocking
     }
 
@@ -3187,12 +3233,12 @@ final class AppViewModel: NSObject, ObservableObject {
             && !isPreparingNarrationPreview
             && hasPendingFinalVideoChanges
             && !hasNarrationLanguageMismatchForRender
-            && storyCaptionOffPlanningWarning == nil
+            && storyPoolTimelineExportBlockingReason == nil
             && !isStoryBlockExportBlocking
     }
 
     var activeStatusMessage: String {
-        storyCaptionOffPlanningWarning ?? statusMessage
+        storyPoolTimelineExportBlockingReason ?? statusMessage
     }
 
     var canPlayNarration: Bool {
@@ -3320,13 +3366,10 @@ final class AppViewModel: NSObject, ObservableObject {
         }
     }
 
-    var storyCaptionOffPlanningWarning: String? {
-        guard selectedTimingMode == .story,
-              !includesFinalCaptions else { return nil }
-
-        // Legacy pool-wide check: caption-off story spreads time across *all* pool photos.
-        // Block timeline composes per block; average time per pool photo is meaningless here.
-        if storyUsesBlockTimeline {
+    /// When Story export uses the pool-wide hybrid visual path (`VideoExporter.storyCaptionOffTimelineSegments`), average time per photo cannot exceed 20s—same rule as `ExportError.storyNeedsMoreMedia`. Skipped when Edit Story block export is active (per-block composition).
+    var storyPoolTimelineExportBlockingReason: String? {
+        guard selectedTimingMode == .story else { return nil }
+        if storyUsesBlockTimeline, makeStoryBlockExportDescriptor() != nil {
             return nil
         }
 
@@ -3341,7 +3384,15 @@ final class AppViewModel: NSObject, ObservableObject {
                 return partial
             }
         }
-        guard photoCount > 0 else { return nil }
+        let videoCount = mediaItems.reduce(0) { partial, item in
+            switch item.kind {
+            case .photo:
+                return partial
+            case .video:
+                return partial + 1
+            }
+        }
+        guard photoCount > 0, videoCount > 0 else { return nil }
 
         let totalVideoSeconds = mediaItems.reduce(0.0) { partial, item in
             switch item.kind {
@@ -3354,7 +3405,7 @@ final class AppViewModel: NSObject, ObservableObject {
 
         let rawPhotoTime = max(narrationSeconds - totalVideoSeconds, 0) / Double(photoCount)
         guard rawPhotoTime > 20 else { return nil }
-        return "Story without captions needs more media. Add more photos or videos so each photo would be 20 seconds or less."
+        return "Add more media."
     }
 
     private var hasRenderableMediaForSelectedMode: Bool {

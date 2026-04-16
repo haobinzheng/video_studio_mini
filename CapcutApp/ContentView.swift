@@ -3588,6 +3588,21 @@ struct ContentView: View {
                     .background(Color.white.opacity(0.76), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
                 }
 
+                if let poolStoryBlock = viewModel.storyPoolTimelineExportBlockingReason {
+                    HStack(alignment: .top, spacing: 8) {
+                        Image(systemName: "photo.on.rectangle.angled")
+                            .font(.system(size: 12, weight: .bold))
+                        Text(poolStoryBlock)
+                            .font(.caption.weight(.semibold))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .foregroundStyle(Color.orange.opacity(0.95))
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 9)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color.white.opacity(0.76), in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+                }
+
                 if viewModel.selectedTimingMode != .video, let narrationLanguageWarning = viewModel.narrationLanguageWarning {
                     HStack(spacing: 8) {
                         Image(systemName: "exclamationmark.triangle.fill")
@@ -3772,6 +3787,16 @@ struct ContentView: View {
                             .font(.caption.monospacedDigit())
                             .foregroundStyle(.secondary)
                     }
+
+                    Button {
+                        viewModel.stopActiveVideoRender()
+                    } label: {
+                        Label("Stop", systemImage: "stop.fill")
+                            .font(.caption.weight(.semibold))
+                            .frame(maxWidth: .infinity)
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(.red.opacity(0.9))
                 }
                 .padding(14)
                 .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 18, style: .continuous))

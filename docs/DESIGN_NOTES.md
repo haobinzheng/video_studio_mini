@@ -202,6 +202,11 @@ Design benefit:
 - more trustworthy preview button
 - easier future maintenance
 
+## Video tab: Story pool preflight, Stop, and status
+
+- **Hybrid pool Story cap** (matches `VideoExporter.storyCaptionOffTimelineSegments`): when Story mode uses the **pool-wide** visual path (not Edit Story block export) and the pool has **both** photos and videos, average time per photo after subtracting total imported video duration cannot exceed **20s** vs estimated narration length—otherwise export throws **`storyNeedsMoreMedia`**. **`AppViewModel.storyPoolTimelineExportBlockingReason`** mirrors that check; **`canStartVideoPreviewRender`** / **`canStartFinalVideoRender`** are false; **`activeStatusMessage`** and an orange callout on the **Video** tab show **Add more media.** (short copy; same idea as the exporter error string).
+- **Stop** while **Preview Video** or **Create Video** runs: **`stopActiveVideoRender()`** cancels the active render task and the detached export task, clears progress flags, and sets status to **Render stopped…** **`activeVideoRenderSessionID`** is cleared **before** cancel so in-flight **`VideoExporter`** / narration **progressHandler** updates (which may still fire briefly) do not overwrite the status line with **Rendering…** again.
+
 ## Narration Voice Design
 
 Goal:
