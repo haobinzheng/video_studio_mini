@@ -231,11 +231,17 @@ struct ContentView: View {
             .onChange(of: viewModel.isPreparingVideoPreview) { _, isPreparing in
                 if isPreparing {
                     deactivateRenderPlaybackForNewRender()
+                } else {
+                    // Preview finished or was never started; restore last good URL (e.g. after cancelling a preview rebuild).
+                    updateRenderPreviewPlayer(for: activeRenderedVideoURL)
                 }
             }
             .onChange(of: viewModel.isExportingVideo) { _, isExporting in
                 if isExporting {
                     deactivateRenderPlaybackForNewRender()
+                } else {
+                    // Final render finished or stopped — put preview (or final) back in the player without requiring URL @Published to change.
+                    updateRenderPreviewPlayer(for: activeRenderedVideoURL)
                 }
             }
             .onChange(of: appendPhotoItems) { _, newItems in
@@ -3523,7 +3529,11 @@ struct ContentView: View {
                         Text("Include Captions")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
-                        Text(viewModel.includesFinalCaptions ? "Captions on for final video" : "Final video without captions")
+                        Text(
+                            viewModel.includesFinalCaptions
+                                ? "Burned into preview sample (~20s) and final video when captions are on."
+                                : "Preview sample and final video have no burned-in captions."
+                        )
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.primary.opacity(0.72))
                     }

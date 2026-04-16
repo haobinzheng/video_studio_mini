@@ -409,12 +409,14 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var includesFinalCaptions = true {
         didSet {
             if oldValue != includesFinalCaptions {
+                hasPendingPreviewChanges = true
                 hasPendingFinalVideoChanges = true
+                videoPreviewURL = nil
                 exportedVideoURL = nil
                 exportProgress = 0
                 statusMessage = includesFinalCaptions
-                    ? "Captions will be included in the final export."
-                    : "Final export will be created without captions."
+                    ? "Captions will be included in preview (~20s) and final export."
+                    : "Preview and final export will be created without burned-in captions."
             }
         }
     }
@@ -1345,7 +1347,8 @@ final class AppViewModel: NSObject, ObservableObject {
         let exporter = videoExporter
         let aspectRatio = selectedAspectRatio
         let timingMode = selectedTimingMode
-        let includeCaptions = renderQuality == .preview ? false : includesFinalCaptions
+        /// Preview and final both respect **Include Captions** (preview output is capped at ~20s in `VideoExporter`).
+        let includeCaptions = selectedTimingMode != .video && includesFinalCaptions
         let captionStyleForExport = includeCaptions ? captionStyle : .normal
         let videoModeSettings = VideoExporter.VideoModeExportSettings(
             frameRate: selectedVideoModeFrameRate,

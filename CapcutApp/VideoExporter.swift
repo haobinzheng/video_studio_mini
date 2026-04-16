@@ -521,12 +521,9 @@ struct VideoExporter {
                     : minimumVisualDuration
             }
         }
-        /// Default preview cap is 20s — too short to judge Edit Story block/photo sync on ~1min+ scripts.
+        /// Preview render is capped at **20s** (including Edit Story) so users can verify captions and pacing quickly; use final export for full length.
         let resolvedDuration: CMTime
-        if renderQuality == .preview, useStoryBlocks {
-            let storyBlockPreviewMax = CMTime(seconds: 180, preferredTimescale: 600)
-            resolvedDuration = CMTimeMinimum(totalDuration, storyBlockPreviewMax)
-        } else if let previewCap = renderQuality.maximumDuration {
+        if renderQuality == .preview, let previewCap = renderQuality.maximumDuration {
             resolvedDuration = CMTimeMinimum(totalDuration, previewCap)
         } else {
             resolvedDuration = totalDuration
