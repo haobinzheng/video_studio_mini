@@ -3151,7 +3151,16 @@ struct VideoExporter {
         }
 
         let slices = makeCaptionSlices(from: texts, voiceIdentifier: voiceIdentifier)
-        guard !slices.isEmpty else { return [] }
+        // If every utterance stripped to nothing in splitCaptionText, slices are empty but TTS still ran;
+        // do not return no captions (same recovery as the post-loop `segments.isEmpty` branch below).
+        if slices.isEmpty {
+            return [
+                CaptionSegment(
+                    text: formattedCaptionText(texts.joined(separator: " ")),
+                    timeRange: CMTimeRange(start: .zero, duration: totalDuration)
+                )
+            ]
+        }
 
         let sourceWeights = sourceSegmentWeights(from: texts)
         let totalSourceWeight = max(sourceWeights.reduce(0.0, +), 0.1)

@@ -19,6 +19,14 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-16 — Script: dismiss keyboard when tapping outside TextEditor
+
+- **ContentView**: Tap header (brand/step strip) or the main **ScrollView** backdrop to clear `@FocusState` script focus; **Script** title + caption lines tappable to dismiss; `scrollDismissesKeyboard(.automatic)`; removed redundant `TextEditor` `.onTapGesture { isNarrationFocused = true }` that interfered with focus/scroll keyboard dismissal.
+
+### 2026-04-16 — Long export: caption fallback when slice timing strips all text
+
+- **VideoExporter** (`timedCaptionSegments`): If `makeCaptionSlices` returns no slices (every utterance normalizes to empty in `splitCaptionText`), use the same full-timeline fallback as when the timed loop yields no segments, instead of returning no caption segments. Prevents final renders with **Include captions** on but a completely uncaptioned file in that edge case.
+
 ### 2026-04-16 — Video tab: Story preflight, Stop, render session + docs
 
 - **AppViewModel**: **`storyPoolTimelineExportBlockingReason`** (hybrid pool / **20s**-per-photo rule); **`activeVideoRenderSessionID`** so progress callbacks cannot overwrite status after **Stop**; **`stopActiveVideoRender()`**.

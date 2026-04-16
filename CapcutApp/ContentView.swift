@@ -101,6 +101,10 @@ struct ContentView: View {
                 .padding(20)
                 .padding(.bottom, 4)
                 .frame(maxWidth: .infinity, alignment: .top)
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    isNarrationFocused = false
+                }
 
                 ScrollViewReader { proxy in
                     ScrollView {
@@ -111,8 +115,15 @@ struct ContentView: View {
                         .padding(.horizontal, 20)
                         .padding(.bottom, 20)
                         .frame(maxWidth: .infinity, alignment: .top)
+                        .background {
+                            Color.clear
+                                .contentShape(Rectangle())
+                                .onTapGesture {
+                                    isNarrationFocused = false
+                                }
+                        }
                     }
-                    .scrollDismissesKeyboard(.interactively)
+                    .scrollDismissesKeyboard(.automatic)
                     .onAppear {
                         scriptScrollProxy = proxy
                     }
@@ -2356,9 +2367,11 @@ struct ContentView: View {
 
             Text("Script")
                 .font(.title2.weight(.semibold))
+                .onTapGesture { isNarrationFocused = false }
             Text("Edit Story treats a paragraph as text between blank lines. Use an empty line between ideas, or tap Clean Up to insert breaks when pasted text only has single line breaks.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+                .onTapGesture { isNarrationFocused = false }
 
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
@@ -2705,9 +2718,6 @@ struct ContentView: View {
                 .scrollContentBackground(.hidden)
                 .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .focused($isNarrationFocused)
-                .onTapGesture {
-                    isNarrationFocused = true
-                }
 
             if isNarrationPreviewSectionVisible {
                 narrationPreviewSection
