@@ -19,6 +19,21 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-12 — Edit Story: toggle on = fully unassigned (no default Block 1)
+
+- **AppViewModel**: **`resetStoryEditBlocksToDefault()`** clears **`storyMusicBedSegments`** and **`storyEditBlocks`** only (no implicit block covering the script). **`reconcileStoryEditBlocksWithScript()`** no longer seeds a block when empty.
+- **ContentView**: Clearing paragraph selections when the toggle turns **on** (unchanged).
+- **DESIGN_NOTES**: **Edit Media and Music: toggle and fresh state** updated.
+
+### 2026-04-12 — Edit Story: music assign without media blocks
+
+- **AppViewModel**: `validateMusicAssignmentSelection` no longer returns **Assign media in the Media tab first.** when `storyEditBlocks` is empty; paragraph music beds are independent of media block assignment (export still requires full media-block validation when you create video).
+- **DESIGN_NOTES**: Edit tab bullet updated.
+
+### 2026-04-15 — Edit Story: remove ambiguous Reset All
+
+- **ContentView**: Removed **Reset All** under **Edit Media and Music** (behavior was easy to misunderstand: one block, all pool media, cleared music segments + selections). **`AppViewModel.resetStoryEditBlocksToDefault()`** remains for internal use when enabling **Edit Media and Music** (clears blocks + segment music).
+
 ### 2026-04-15 — Pushed: `pro-version` @ `8f7bc98`
 
 - **Git**: `git push origin pro-version` — range `248f987..8f7bc98` (commit `8f7bc98`, 2026-04-15 14:35 −0700).

@@ -459,11 +459,8 @@ final class AppViewModel: NSObject, ObservableObject {
             hasPendingFinalVideoChanges = true
             markAllVideoRendersDirty(reason: "Edit Story block timeline setting changed.")
             if storyUsesBlockTimeline {
-                if storyEditBlocks.isEmpty {
-                    resetStoryEditBlocksToDefault()
-                } else {
-                    reconcileStoryEditBlocksWithScript()
-                }
+                // Fresh slate: no music segments and no media blocks—paragraphs stay unassigned until the user assigns.
+                resetStoryEditBlocksToDefault()
             }
         }
     }
@@ -3896,9 +3893,6 @@ final class AppViewModel: NSObject, ObservableObject {
         if lo < 0 || hi >= n || lo > hi {
             return "That paragraph selection is out of range."
         }
-        if storyUsesBlockTimeline && storyEditBlocks.isEmpty {
-            return "Assign media in the Media tab first."
-        }
         return nil
     }
 
@@ -3978,22 +3972,11 @@ final class AppViewModel: NSObject, ObservableObject {
             }
     }
 
+    /// Clears all music segments and all media blocks (fully unassigned paragraphs).
+    /// Called when **Edit Media and Music** is turned on.
     func resetStoryEditBlocksToDefault() {
-        let paras = storyScriptParagraphs
-        guard !paras.isEmpty else {
-            storyEditBlocks = []
-            storyMusicBedSegments = []
-            return
-        }
         storyMusicBedSegments = []
-        storyEditBlocks = [
-            StoryEditBlock(
-                id: UUID(),
-                firstParagraphIndex: 0,
-                lastParagraphIndex: paras.count - 1,
-                mediaItemIDs: mediaItems.map(\.id)
-            )
-        ]
+        storyEditBlocks = []
     }
 
     func reconcileStoryMusicSegmentsWithScript() {

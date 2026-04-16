@@ -1846,13 +1846,12 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 8) {
                 Toggle("Edit Media and Music", isOn: $viewModel.storyUsesBlockTimeline)
                     .font(.subheadline.weight(.semibold))
-                Button("Reset All") {
-                    viewModel.resetStoryEditBlocksToDefault()
-                    selectedStoryParagraphIndices = []
-                    selectedMusicStoryParagraphIndices = []
-                }
-                .font(.caption.weight(.semibold))
-                .disabled(!viewModel.storyUsesBlockTimeline || viewModel.storyScriptParagraphs.isEmpty || viewModel.mediaItems.isEmpty)
+                    .onChange(of: viewModel.storyUsesBlockTimeline) { _, isOn in
+                        if isOn {
+                            selectedStoryParagraphIndices = []
+                            selectedMusicStoryParagraphIndices = []
+                        }
+                    }
             }
             .padding(14)
             .background(Color.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))

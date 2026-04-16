@@ -95,8 +95,17 @@ Implemented in the **Edit Story** tab (optional; Settings → **Show Edit Story 
 
 - **Media block**: one contiguous range of script **paragraphs** plus ordered pool clips (`AppViewModel.StoryEditBlock`: `firstParagraphIndex`…`lastParagraphIndex`, `mediaItemIDs`). Visual timeline only.
 - **Music segment**: an independent contiguous paragraph range with its own soundtrack choice (`AppViewModel.StoryMusicBedSegment`). It does **not** have to align with media blocks—e.g. media block 1 can be paragraphs 1–3 while music segment 1 spans 1–6.
-- **Edit tab structure**: segmented **Media** | **Music** (when **Edit Media and Music** is on). **Media** is script paragraphs labeled **Block** (track order/imports stay on the main **Music** tab). **Music** shows the same script with music assignment captions. Music **Assign** opens the soundtrack sheet for any valid contiguous paragraph selection (after the same gate as media: **Edit Media and Music** on and media assigned somewhere).
+- **Edit tab structure**: segmented **Media** | **Music** (when **Edit Media and Music** is on). **Media** is script paragraphs labeled **Block** (track order/imports stay on the main **Music** tab). **Music** shows the same script with music assignment captions. Music **Assign** opens the soundtrack sheet for any valid contiguous paragraph selection; it does **not** require media blocks—you can assign beds before assigning clips on the Media tab.
 - **Script paragraphs help**: A one-line hint stays visible; full instructions sit under a **`DisclosureGroup`** titled **How assigning works**. Expansion is persisted in **`UserDefaults`** via **`@AppStorage("fluxcut.editStoryHelpExpanded")`** (default collapsed). **Media** and **Music** share the same expanded flag so switching tabs keeps the user’s preference.
+- **No “reset all” button** in the Edit card (removed; the old control merged blocks, filled pool media, and cleared music in one step without clear labeling).
+
+### Edit Media and Music: toggle and fresh state
+
+- **Turning the toggle on** (`AppViewModel.storyUsesBlockTimeline` → `true`): always runs **`resetStoryEditBlocksToDefault()`**, which **clears** **`storyMusicBedSegments`** and **`storyEditBlocks`**. Every script paragraph is **unassigned** (no automatic **Block 1**); the paragraph list shows **Unassigned** until the user creates blocks via **Assign**. There is no implicit block spanning the full script.
+- **UI**: When the toggle turns **on**, **`ContentView`** clears **Media** and **Music** paragraph multi-selections so highlights do not refer to stale ranges.
+- **Turning the toggle off** does **not** run that reset; in-memory block and music data stay as-is until the user enables again (next **on** clears assignments as above).
+- **Script changes while edit mode is on**: **`reconcileStoryEditBlocksWithScript()`** (triggered when **`narrationText`** changes, etc.) clamps existing blocks to valid paragraph indices; it does **not** create blocks when none exist—**empty** **`storyEditBlocks`** stays empty until the user assigns. **`reconcileStoryMusicSegmentsWithScript()`** clamps music segments to valid indices afterward.
+- **Music vs media gates**: **`validateMusicAssignmentSelection`** only checks script paragraphs and range validity; it does **not** require media blocks or pool assignments, so **Music → Assign** can run before **Media** assignments.
 
 ### Per–music-segment soundtrack rules (product)
 
@@ -116,7 +125,7 @@ Implemented in the **Edit Story** tab (optional; Settings → **Show Edit Story 
   - If **Edit Media and Music** is on and validation passes but `makeStoryBlockExportDescriptor()` fails, **AppViewModel** aborts before export with a clear message (avoids legacy pool-wide story pacing). **Preview** with Edit Story blocks uses up to **180s** of measured narration (not the default **20s** preview cap) so multi-block photo timing can be checked.
   - **Background music (Edit Story with block-based export)**: `AppViewModel` passes `makeStoryMusicBedSpansForExport()` as `storyMusicBedSpans` (global paragraph indices + optional URL). `VideoExporter.buildStorySegmentMusicSlots` maps paragraph-level narration timing to beds: assigned URL or Music-tab **combined** `backgroundMusicURL` per span; gaps use the combined mix. Each bed **starts at 0:00**, **trims**/**loops** as above. Non-Edit-Story Story exports still use a single looped global bed.
 - **Validation**: every non-empty paragraph must lie in exactly one block; each block needs ≥1 pool medium; pool IDs must resolve. Failures set `isStoryBlockExportBlocking` and disable Preview/Create Video.
-- **Script edits**: `reconcileStoryEditBlocksWithScript()` clamps media blocks; `reconcileStoryMusicSegmentsWithScript()` clamps `storyMusicBedSegments` to valid paragraph indices (user may need to re-partition).
+- **Script edits**: `reconcileStoryEditBlocksWithScript()` clamps existing media blocks to valid paragraph indices; `reconcileStoryMusicSegmentsWithScript()` clamps `storyMusicBedSegments` to valid paragraph indices (user may need to re-partition music spans after heavy script edits).
 
 ### Segment media assignment sheet (full-screen)
 
