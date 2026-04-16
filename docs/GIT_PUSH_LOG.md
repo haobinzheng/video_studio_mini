@@ -26,6 +26,11 @@ It points to the current stable commit on `main`, so we now have a clean referen
 - **VideoExporter**: **`storyNeedsMoreMedia`** user text **Add more media.**
 - **DESIGN_NOTES**: New section **Video tab: Story pool preflight, Stop, and status**.
 
+### 2026-04-16 — Pushed: `pro-version` @ `e070c69`
+
+- **Git**: `git push origin pro-version` — range `ef9184f..e070c69` (commit `e070c69`, 2026-04-16 07:57 −0700).
+- **Files in commit** `e070c69`: `CapcutApp/AppViewModel.swift`, `CapcutApp/ContentView.swift`, `CapcutApp/VideoExporter.swift`, `docs/DESIGN_NOTES.md`, `docs/GIT_PUSH_LOG.md`.
+
 ### 2026-04-15 — Pushed: `pro-version` @ `59cf78b` (+ log @ `d81423a`)
 
 - **Git**: `git push origin pro-version` — range `5ed61d2..59cf78b` (feature commit `59cf78b`, 2026-04-15 22:24 −0700); then `59cf78b..d81423a` (commit `d81423a`, push-log-only follow-up).
