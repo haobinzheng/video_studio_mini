@@ -19,6 +19,11 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-16 — Pushed: `pro-version` @ `107f4aa`
+
+- **Git**: `git push origin pro-version` — range `233ac27..107f4aa` (commit `107f4aa`).
+- **Files in commit** `107f4aa`: `CapcutApp/ContentView.swift`, `CapcutApp/VideoExporter.swift`, `docs/GIT_PUSH_LOG.md` (caption slice fallback + script keyboard dismiss + log entries above).
+
 ### 2026-04-16 — Script: dismiss keyboard when tapping outside TextEditor
 
 - **ContentView**: Tap header (brand/step strip) or the main **ScrollView** backdrop to clear `@FocusState` script focus; **Script** title + caption lines tappable to dismiss; `scrollDismissesKeyboard(.automatic)`; removed redundant `TextEditor` `.onTapGesture { isNarrationFocused = true }` that interfered with focus/scroll keyboard dismissal.
