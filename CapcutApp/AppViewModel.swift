@@ -523,6 +523,9 @@ final class AppViewModel: NSObject, ObservableObject {
     private var previewSourceVoiceIdentifier = ""
     private var previewSourceSpeechRate: Double = 1.0
     private var narrationPreviewIsFullLength = false
+    /// Increment when whole-script narration chunking changes so a cached full-length preview is not reused with stale TTS boundaries.
+    private static let narrationPreviewSegmentationPolicy = "full-length-preview-no-utterance-merge-v3"
+    private var narrationPreviewSegmentationPolicyAtBuild = ""
     private var pendingUtteranceCount = 0
     private var didLoadFullVoiceList = false
     private var shouldPersistNarrationDraft = true
@@ -2361,6 +2364,8 @@ final class AppViewModel: NSObject, ObservableObject {
             || abs(previewSourceSpeechRate - speechRateMultiplier) > 0.0001
             || (requireFullLength && !narrationPreviewIsFullLength)
             || narrationPreviewNeedsStoryFingerprintRefresh()
+            || (narrationPreviewAudioURL != nil
+                && narrationPreviewSegmentationPolicyAtBuild != Self.narrationPreviewSegmentationPolicy)
     }
 
     private func currentStoryNarrationPreviewFingerprint() -> String {
@@ -2432,6 +2437,7 @@ final class AppViewModel: NSObject, ObservableObject {
         previewSourceVoiceIdentifier = voiceIdentifier
         previewSourceSpeechRate = speechRateMultiplier
         narrationPreviewIsFullLength = maximumDuration == nil
+        narrationPreviewSegmentationPolicyAtBuild = Self.narrationPreviewSegmentationPolicy
         statusMessage = completedMessage
     }
 
@@ -2455,6 +2461,7 @@ final class AppViewModel: NSObject, ObservableObject {
         previewSourceVoiceIdentifier = ""
         previewSourceSpeechRate = 1.0
         narrationPreviewIsFullLength = false
+        narrationPreviewSegmentationPolicyAtBuild = ""
         isNarrationPreviewPlaying = false
         stopNarrationPreviewTimer()
         if resetCaption {
@@ -2990,8 +2997,7 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     private func updateNarrationPreviewCaption(for time: Double) {
-        let lead = SubtitleTimelineEngine.displayLeadSeconds
-        let lookupTime = max(0, time - lead)
+        let lookupTime = max(0, time + SubtitleTimelineEngine.displayLeadSeconds)
         if let cue = narrationTimelineEngine.cue(at: lookupTime) {
             narrationPreviewCaption = cue.text
         } else {
@@ -4292,7 +4298,9 @@ enum SpeechVoiceLibrary {
         voice(for: identifier)?.language ?? ""
     }
 
-    /// One TTS utterance (and one caption) per sentence for Chinese, Japanese, and Lao family voices only.
+    /// Chinese, Japanese, and Lao family voices: caption layout uses **`splitForCaptions`** / one timed segment
+    /// per TTS utterance (multi-line wrap). Utterance boundaries follow **`StoryScriptPartition.narrationSegmentsWholeScriptStyle`**
+    /// for both whole-script Story mode and each Edit Story block (same rules).
     static func usesSentenceAlignedNarration(voiceLanguageTag: String) -> Bool {
         let id = voiceLanguageTag.lowercased().replacingOccurrences(of: "_", with: "-")
         guard !id.isEmpty else { return false }

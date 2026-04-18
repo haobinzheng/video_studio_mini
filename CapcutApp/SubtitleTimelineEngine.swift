@@ -1,8 +1,9 @@
 import Foundation
 
 struct SubtitleTimelineEngine {
-    /// Matches `VideoExporter.captionLagCompensation`: show captions slightly early so on-screen text lines up with heard speech after encode/render latency.
-    static let displayLeadSeconds: TimeInterval = 0.3
+    /// Seconds added to playback time before resolving the active cue (`lookup = time + this`). **0** = nominal
+    /// sync to cue times from measured TTS; use a small **positive** value only if you intentionally want text early.
+    static let displayLeadSeconds: TimeInterval = 0
 
     typealias Cue = NarrationPreviewBuilder.SubtitleCue
 

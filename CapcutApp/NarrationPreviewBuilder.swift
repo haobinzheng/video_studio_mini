@@ -88,7 +88,6 @@ struct NarrationPreviewBuilder {
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws -> PreviewResult {
         let normalized = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
         let segments: [String]
         /// Per Edit block: how many TTS utterances belong to that block (preview only).
         var storyBlockUtteranceCounts: [Int]? = nil
@@ -127,18 +126,20 @@ struct NarrationPreviewBuilder {
             guard !normalized.isEmpty else {
                 throw PreviewError.emptyNarration
             }
-            let allSegments: [String]
-            if SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag) {
-                let sentences = CaptionTextChunker.sentenceSegmentsForNarration(normalized)
-                allSegments = sentences.isEmpty
-                    ? SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
-                    : sentences
-            } else {
+            // Same utterance rules as Edit Story: one logical “block” = whole script here.
+            var allSegments = StoryScriptPartition.narrationSegmentsWholeScriptStyle(
+                blockText: normalized,
+                voiceIdentifier: voiceIdentifier
+            )
+            if allSegments.isEmpty {
                 allSegments = SpeechVoiceLibrary.narrationSegments(from: normalized, optimizeForLongForm: true)
             }
             let capped = cappedPreviewSegments(from: allSegments, maximumDuration: maximumDuration)
-            let merged = Self.mergedPreviewSegments(capped)
-            segments = merged
+            // Capped previews (~20s sample) stay under `maxSynthesisSegments`. Full-length previews must **not**
+            // merge: that audio is muxed into final export when Edit Story is off, and must match utterance
+            // boundaries from `narrationSegmentsWholeScriptStyle`—same as Edit-on export (no preview bypass).
+            let forSynthesis = maximumDuration == nil ? capped : Self.mergedPreviewSegments(capped)
+            segments = forSynthesis
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
         }
@@ -347,7 +348,8 @@ struct NarrationPreviewBuilder {
             return buildSentenceAlignedCues(
                 segments: segments,
                 utteranceDurations: utteranceDurations,
-                totalDuration: totalDuration
+                totalDuration: totalDuration,
+                voiceIdentifier: voiceIdentifier
             )
         }
 
@@ -382,12 +384,14 @@ struct NarrationPreviewBuilder {
         return cues
     }
 
-    /// One subtitle line per TTS utterance (full sentence); timing follows measured audio per sentence.
+    /// One cue per TTS utterance; cue text may include `\n` from **`splitForCaptions`** for wrapping without extra cues.
     private func buildSentenceAlignedCues(
         segments: [String],
         utteranceDurations: [TimeInterval],
-        totalDuration: TimeInterval
+        totalDuration: TimeInterval,
+        voiceIdentifier: String
     ) -> [SubtitleCue] {
+        let tag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
         var cues: [SubtitleCue] = []
         var cursor: TimeInterval = 0
 
@@ -402,7 +406,15 @@ struct NarrationPreviewBuilder {
             let safeDuration = max(utteranceDuration, minimumCueDuration(for: text))
             let start = cursor
             let end = min(cursor + safeDuration, totalDuration)
-            let shown = CaptionTextChunker.strippedCaptionForDisplay(displayCaption(for: text))
+            let lines = CaptionTextChunker.splitForCaptions(normalizedText: text, voiceLanguageTag: tag)
+            let shown: String
+            if lines.count > 1 {
+                shown = CaptionTextChunker.strippedCaptionForDisplay(
+                    lines.map { displayCaption(for: $0) }.joined(separator: "\n")
+                )
+            } else {
+                shown = CaptionTextChunker.strippedCaptionForDisplay(displayCaption(for: text))
+            }
             cues.append(SubtitleCue(text: shown, start: start, end: end))
             cursor = end
         }

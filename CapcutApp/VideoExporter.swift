@@ -182,10 +182,6 @@ struct VideoExporter {
         let kind: Kind
     }
 
-    private var captionLagCompensation: CMTime {
-        CMTime(seconds: SubtitleTimelineEngine.displayLeadSeconds, preferredTimescale: 600)
-    }
-
     private struct CaptionSegment {
         let text: String
         let timeRange: CMTimeRange
@@ -1025,7 +1021,6 @@ struct VideoExporter {
             )
         }
 
-        let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
         let narrationSegments: [String]
         let storyBlockUtteranceRanges: [Range<Int>]?
         if let blockScripts = storyBlockNarrationSegments, !blockScripts.isEmpty {
@@ -1050,14 +1045,19 @@ struct VideoExporter {
         } else if let forced = forcedParagraphSegments, !forced.isEmpty {
             narrationSegments = forced
             storyBlockUtteranceRanges = nil
-        } else if SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag) {
-            let sentences = CaptionTextChunker.sentenceSegmentsForNarration(trimmedText)
-            narrationSegments = sentences.isEmpty
-                ? SpeechVoiceLibrary.narrationSegments(from: trimmedText, optimizeForLongForm: true)
-                : sentences
-            storyBlockUtteranceRanges = nil
         } else {
-            narrationSegments = SpeechVoiceLibrary.narrationSegments(from: trimmedText, optimizeForLongForm: true)
+            // Whole script as one block: same segmentation as each Edit Story block (`narrationSegmentsWholeScriptStyle`).
+            var subs = StoryScriptPartition.narrationSegmentsWholeScriptStyle(
+                blockText: trimmedText,
+                voiceIdentifier: voiceIdentifier
+            )
+            if subs.isEmpty {
+                subs = SpeechVoiceLibrary.narrationSegments(from: trimmedText, optimizeForLongForm: true)
+            }
+            if subs.isEmpty {
+                subs = [" "]
+            }
+            narrationSegments = subs
             storyBlockUtteranceRanges = nil
         }
         let utterances = narrationSegments.map {
@@ -2579,13 +2579,14 @@ struct VideoExporter {
     private func captionText(for currentTime: CMTime, segments: [CaptionSegment]) -> String? {
         guard !segments.isEmpty else { return nil }
 
-        let compensatedTime = CMTimeMaximum(.zero, currentTime - captionLagCompensation)
+        let lead = CMTime(seconds: SubtitleTimelineEngine.displayLeadSeconds, preferredTimescale: 600)
+        let lookupTime = CMTimeMaximum(.zero, CMTimeAdd(currentTime, lead))
 
-        for segment in segments where segment.timeRange.containsTime(compensatedTime) {
+        for segment in segments where segment.timeRange.containsTime(lookupTime) {
             return segment.text
         }
 
-        if compensatedTime >= segments.last?.timeRange.end ?? .zero {
+        if lookupTime >= segments.last?.timeRange.end ?? .zero {
             return segments.last?.text
         }
 
@@ -3143,7 +3144,8 @@ struct VideoExporter {
             return sentenceAlignedTimedCaptionSegments(
                 from: texts,
                 utteranceDurations: utteranceDurations,
-                totalDuration: totalDuration
+                totalDuration: totalDuration,
+                voiceIdentifier: voiceIdentifier
             )
         }
 
@@ -3206,12 +3208,15 @@ struct VideoExporter {
         return segments
     }
 
-    /// One caption per utterance; duration matches each sentence’s synthesized audio (Chinese / Japanese / Lao family only).
+    /// One timed caption per utterance (Chinese / Japanese / Lao). **`splitForCaptions`** may insert `\n` for
+    /// wrapping only—same utterance duration, so captions are not “busy” from extra time slices.
     private func sentenceAlignedTimedCaptionSegments(
         from texts: [String],
         utteranceDurations: [CMTime],
-        totalDuration: CMTime
+        totalDuration: CMTime,
+        voiceIdentifier: String
     ) -> [CaptionSegment] {
+        let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
         var segments: [CaptionSegment] = []
         var cursor = CMTime.zero
 
@@ -3236,7 +3241,15 @@ struct VideoExporter {
 
             let end = cursor + pieceDur
             let timeRange = CMTimeRange(start: cursor, end: end)
-            let displayText = CaptionTextChunker.strippedCaptionForDisplay(formattedCaptionText(norm))
+            let lines = CaptionTextChunker.splitForCaptions(normalizedText: norm, voiceLanguageTag: voiceTag)
+            let displayText: String
+            if lines.count > 1 {
+                displayText = CaptionTextChunker.strippedCaptionForDisplay(
+                    lines.map { formattedCaptionText($0) }.joined(separator: "\n")
+                )
+            } else {
+                displayText = CaptionTextChunker.strippedCaptionForDisplay(formattedCaptionText(norm))
+            }
             segments.append(CaptionSegment(text: displayText, timeRange: timeRange))
             cursor = end
         }

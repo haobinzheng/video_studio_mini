@@ -19,6 +19,30 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-16 — Edit off final export: stop merging preview utterances (parity with Edit on)
+
+- **Gap:** Edit on bypasses preview audio → **`VideoExporter`** synthesizes **every** `narrationSegmentsWholeScriptStyle` utterance. Edit off reused preview M4A built with **`mergedPreviewSegments`** (≤36) even for **`maximumDuration == nil`** (full-length export prep) → **fewer, longer** TTS chunks and different captions vs Edit on.
+- **Change:** **`NarrationPreviewBuilder`** applies **`mergedPreviewSegments`** only when **`maximumDuration != nil`** (time-capped sample previews). Full-length preview keeps full utterance list. **`narrationPreviewSegmentationPolicy`** → **`full-length-preview-no-utterance-merge-v3`**.
+- **Files:** `CapcutApp/NarrationPreviewBuilder.swift`, `CapcutApp/AppViewModel.swift`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-16 — Story mode without Edit: same narration segmentation as Edit blocks
+
+- **Intent:** Pre-Edit Story mode narration should match Edit: one shared rule (**`StoryScriptPartition.narrationSegmentsWholeScriptStyle`**) for a block’s text—whole script is treated as a single block when Edit is off.
+- **Change:** **`NarrationPreviewBuilder`** (non-block) and **`VideoExporter.synthesizeNarrationIfNeeded`** (no `storyBlockNarrationSegments` / no forced paragraphs) call **`narrationSegmentsWholeScriptStyle(blockText: full script, …)`** instead of branching to long-form-only. **`narrationPreviewSegmentationPolicy`** bumped to **`whole-script-partition-v2`** so cached preview audio refreshes.
+- **Files:** `CapcutApp/VideoExporter.swift`, `CapcutApp/NarrationPreviewBuilder.swift`, `CapcutApp/AppViewModel.swift`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-16 — CJK captions: less “busy” (revert paragraph flatten; wrap in one cue)
+
+- **Issue:** Per-paragraph **`narrationSegmentsWholeScriptStyle`** flattening created **many more** TTS utterances → caption lines **changed too often** (“busy”).
+- **Change:** Reverted that flattening. For **sentence-aligned** display, **`splitForCaptions`** lines joined with **`\n`** inside **one** **`CaptionSegment` / `SubtitleCue`** per utterance—fewer timed switches, readable multi-line block. (Whole-script TTS boundaries: see **“Story mode without Edit: same narration segmentation as Edit blocks”** above.)
+- **Files:** `CapcutApp/StoryScriptPartition.swift`, `CapcutApp/VideoExporter.swift`, `CapcutApp/NarrationPreviewBuilder.swift`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-16 — Caption sync only: restore `9859689` CJK layout (local; ship with next push)
+
+- **User timeline:** **`9859689`** shipped without the later “long caption” problem; experiments after that (timing + alternate CJK chunking) caused regressions—not **`git reset`** failing.
+- **This change:** Keep **`9859689`**-style CJK caption **construction** (**`sentenceAlignedTimedCaptionSegments`** + **`buildSentenceAlignedCues`**). Fix **playback lookup only:** **`SubtitleTimelineEngine.displayLeadSeconds = 0`**, **`time + displayLeadSeconds`** in **`AppViewModel.updateNarrationPreviewCaption`** and **`VideoExporter.captionText`** (**`CMTimeAdd`**, removed **`captionLagCompensation`** subtraction). No weighted / even intra-sentence cue splitting.
+- **Files:** `CapcutApp/SubtitleTimelineEngine.swift`, `CapcutApp/VideoExporter.swift`, `CapcutApp/NarrationPreviewBuilder.swift`, `CapcutApp/AppViewModel.swift`, `docs/GIT_PUSH_LOG.md`.
+
 ### 2026-04-16 — Pushed: `pro-version` @ `107f4aa`
 
 - **Git**: `git push origin pro-version` — range `233ac27..107f4aa` (commit `107f4aa`).

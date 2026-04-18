@@ -2,8 +2,13 @@ import Foundation
 
 /// Script paragraphs for Edit Story and paragraph-aligned narration: split on blank lines (`\n\n` or more).
 /// Chunks that are empty or whitespace-only are dropped (extra newlines do not create paragraphs).
+///
+/// **Story mode product model:** narration and captions (including zh / ja / lo and related sentence-aligned
+/// handling) use the **same** rules with Edit on or off. Edit only adds tools to assign **media** and **music**
+/// per paragraph block. With Edit off, the entire script is treated as **one block**—the same as a single
+/// block in Edit-on mode—and **`narrationSegmentsWholeScriptStyle`** is applied to that full text.
 enum StoryScriptPartition {
-    /// Same TTS chunking as legacy **whole-script** export (sentence / long-form splits), applied to **one block’s** text only.
+    /// TTS utterance list for **one** story block’s script (or the whole script when Edit is off). Same rules for every block.
     static func narrationSegmentsWholeScriptStyle(blockText: String, voiceIdentifier: String) -> [String] {
         let trimmed = blockText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return [] }
