@@ -359,6 +359,9 @@ final class AppViewModel: NSObject, ObservableObject {
     }
     @Published var selectedTimingMode: VideoExporter.TimingMode = .story {
         didSet {
+            if storyUsesBlockTimeline, selectedTimingMode != .story {
+                selectedTimingMode = .story
+            }
             if oldValue != selectedTimingMode {
                 hasPendingPreviewChanges = true
                 hasPendingFinalVideoChanges = true
@@ -461,10 +464,18 @@ final class AppViewModel: NSObject, ObservableObject {
             hasPendingFinalVideoChanges = true
             markAllVideoRendersDirty(reason: "Edit Story block timeline setting changed.")
             if storyUsesBlockTimeline {
+                if selectedTimingMode != .story {
+                    selectedTimingMode = .story
+                }
                 // Fresh slate: no music segments and no media blocks—paragraphs stay unassigned until the user assigns.
                 resetStoryEditBlocksToDefault()
             }
         }
+    }
+
+    /// Video tab **Video Mode** picker: only Story while Edit Story is on (block timeline).
+    var selectableVideoTimingModes: [VideoExporter.TimingMode] {
+        storyUsesBlockTimeline ? [.story] : VideoExporter.TimingMode.allCases
     }
 
     @Published var storyEditBlocks: [StoryEditBlock] = []
@@ -4033,7 +4044,7 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     /// Clears all music segments and all media blocks (fully unassigned paragraphs).
-    /// Called when **Edit Media and Music** is turned on.
+    /// Called when **Edit Story** (block timeline) is turned on.
     func resetStoryEditBlocksToDefault() {
         storyMusicBedSegments = []
         storyEditBlocks = []

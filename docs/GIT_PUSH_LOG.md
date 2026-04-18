@@ -19,6 +19,17 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-16 — Export status messages: Slideshow / Story (not “real-life”)
+
+- **VideoExporter** user-visible `progressHandler` strings now use the same labels as **Video Mode** (**Story**, **Slideshow** from `TimingMode.rawValue`, not internal “real-life” wording). Updated: building composition, mixing music, export pass, caption-burn export.
+- **Files:** `CapcutApp/VideoExporter.swift`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-16 — Edit Story: rename toggle; lock Video Mode to Story
+
+- **UI:** Edit tab toggle **Edit Media and Music** → **Edit Story**.
+- **Behavior:** When **Edit Story** is on (`storyUsesBlockTimeline`), **Video Mode** is forced to **Story** and the Video tab picker only lists **Story**; **`selectedTimingMode`** is clamped to **`.story`** if anything tries to set another mode. Turning Edit Story off restores the full mode picker.
+- **Files:** `CapcutApp/ContentView.swift`, `CapcutApp/AppViewModel.swift`, `docs/DESIGN_NOTES.md`, `docs/GIT_PUSH_LOG.md`.
+
 ### 2026-04-16 — Edit off final export: stop merging preview utterances (parity with Edit on)
 
 - **Gap:** Edit on bypasses preview audio → **`VideoExporter`** synthesizes **every** `narrationSegmentsWholeScriptStyle` utterance. Edit off reused preview M4A built with **`mergedPreviewSegments`** (≤36) even for **`maximumDuration == nil`** (full-length export prep) → **fewer, longer** TTS chunks and different captions vs Edit on.

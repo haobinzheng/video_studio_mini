@@ -610,7 +610,8 @@ struct VideoExporter {
                 || (renderQuality != .preview && (!includeCaptions || hasMixedStoryMedia)))
 
         if timingMode == .realLife || shouldUseSmoothStoryExport {
-            progressHandler?(0.24, "Building a real-life composition.")
+            let buildingLabel = timingMode == .realLife ? "Slideshow" : "Story"
+            progressHandler?(0.24, "Building a \(buildingLabel) composition.")
             let effectiveSlideshowSettings = effectiveSlideshowExportSettings(
                 requestedSettings: renderQuality == .preview ? nil : videoModeSettings,
                 mediaItems: mediaItems,
@@ -647,6 +648,7 @@ struct VideoExporter {
                 workspace: workspace,
                 outputURL: smoothOutputURL,
                 storySegmentMusic: storySegmentMusicSlots,
+                timingMode: timingMode,
                 progressHandler: progressHandler
             )
 
@@ -661,6 +663,7 @@ struct VideoExporter {
                     frameRate: renderProfile.frameRate,
                     captionStyle: captionStyle,
                     outputURL: finalURL,
+                    timingMode: timingMode,
                     progressHandler: progressHandler
                 )
             }
@@ -1619,6 +1622,7 @@ struct VideoExporter {
         workspace: URL,
         outputURL: URL,
         storySegmentMusic: [StorySegmentMusicSlot]? = nil,
+        timingMode: TimingMode,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws {
         let composition = AVMutableComposition()
@@ -1767,7 +1771,8 @@ struct VideoExporter {
             )
             audioMixParameters.append(musicParameters)
         } else if let backgroundMusicURL {
-            progressHandler?(0.72, "Mixing background music into the real-life video.")
+            let musicLabel = timingMode == .realLife ? "Slideshow" : "Story"
+            progressHandler?(0.72, "Mixing background music into the \(musicLabel) video.")
             let musicAsset = AVURLAsset(url: backgroundMusicURL)
             if let musicTrack = try await musicAsset.loadTracks(withMediaType: .audio).first,
                let compositionMusicTrack = composition.addMutableTrack(
@@ -1820,7 +1825,7 @@ struct VideoExporter {
                 frameRate: frameRate,
                 preserveSourceScale: true
             ),
-            progressMessage: "Exporting the real-life video.",
+            progressMessage: "Exporting the \(timingMode.rawValue) video.",
             progressHandler: progressHandler
         )
     }
@@ -1832,6 +1837,7 @@ struct VideoExporter {
         frameRate: Int32,
         captionStyle: CaptionStyle,
         outputURL: URL,
+        timingMode: TimingMode,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws {
         if FileManager.default.fileExists(atPath: outputURL.path) {
@@ -1914,7 +1920,7 @@ struct VideoExporter {
             outputURL: outputURL,
             audioMixParameters: [],
             videoComposition: videoComposition,
-            progressMessage: "Exporting story captions.",
+            progressMessage: "Exporting the \(timingMode.rawValue) video with captions.",
             progressHandler: progressHandler
         )
     }

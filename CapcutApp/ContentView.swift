@@ -1861,7 +1861,7 @@ struct ContentView: View {
                 .font(.title2.weight(.semibold))
 
             VStack(alignment: .leading, spacing: 8) {
-                Toggle("Edit Media and Music", isOn: $viewModel.storyUsesBlockTimeline)
+                Toggle("Edit Story", isOn: $viewModel.storyUsesBlockTimeline)
                     .font(.subheadline.weight(.semibold))
                     .onChange(of: viewModel.storyUsesBlockTimeline) { _, isOn in
                         if isOn {
@@ -3015,7 +3015,7 @@ struct ContentView: View {
             }
 
             Picker("Video Mode", selection: $viewModel.selectedTimingMode) {
-                ForEach(VideoExporter.TimingMode.allCases) { mode in
+                ForEach(viewModel.selectableVideoTimingModes) { mode in
                     Text(mode.rawValue).tag(mode)
                 }
             }
