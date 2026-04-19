@@ -388,6 +388,10 @@ struct VideoExporter {
         paragraphNarrationSegments: [String]? = nil,
         storyBlockDescriptor: StoryBlockExportDescriptor? = nil,
         storyMusicBedSpans: [StoryMusicBedSpanExport]? = nil,
+        /// Isolates this run’s intermediates (TTS, slideshow, captions) and final `.mov` from any other concurrent or overlapping export.
+        exportArtifactID: UUID,
+        /// When set (e.g. `Documents/NarrationPreview` after full-length **prepareNarrationPreview**), Edit Story export copies `utterance-preview-*.caf` instead of re-synthesizing hundreds of segments.
+        prebuiltUtteranceSourceDirectory: URL? = nil,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws -> URL {
         guard !mediaItems.isEmpty else {
@@ -395,7 +399,10 @@ struct VideoExporter {
         }
 
         progressHandler?(0.08, "Preparing export workspace.")
-        let workspace = try makeWorkspace()
+        try Task.checkCancellation()
+        let workspaceRoot = try makeWorkspace()
+        let workspace = workspaceRoot.appendingPathComponent(exportArtifactID.uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: workspace, withIntermediateDirectories: true)
         let slideshowURL = workspace.appendingPathComponent("slideshow.mov")
         let finalURL = workspace.appendingPathComponent(renderQuality.outputFileName)
 
@@ -459,11 +466,15 @@ struct VideoExporter {
                 externalCues: externalCues,
                 externalNarrationAudioURL: externalNarrationAudioURL,
                 forcedParagraphSegments: nil,
-                storyBlockNarrationSegments: storyBlockScripts
+                storyBlockNarrationSegments: storyBlockScripts,
+                renderQuality: renderQuality,
+                prebuiltUtteranceSourceDirectory: prebuiltUtteranceSourceDirectory,
+                progressHandler: progressHandler
             )
             if useStoryBlocks, narrationTimeline.storyBlockUtteranceRanges == nil {
                 throw ExportError.invalidStoryBlockPlan
             }
+            try Task.checkCancellation()
         } else {
             narrationTimeline = NarrationTimeline(
                 duration: .zero,
@@ -673,6 +684,7 @@ struct VideoExporter {
         }
 
         progressHandler?(0.24, renderProfile.longFormOptimized ? "Optimizing a long-form render." : "Rendering video frames.")
+        try Task.checkCancellation()
 
         try await renderSlideshow(
             timelineSegments: timelineSegments,
@@ -968,15 +980,7 @@ struct VideoExporter {
         exportSession.outputURL = outputURL
         exportSession.outputFileType = .m4a
         exportSession.timeRange = CMTimeRange(start: .zero, duration: duration)
-        await exportSession.export()
-
-        if let error = exportSession.error {
-            throw error
-        }
-
-        guard exportSession.status == .completed else {
-            throw ExportError.exportFailed
-        }
+        try await awaitExportSession(exportSession)
 
         return outputURL
     }
@@ -988,6 +992,41 @@ struct VideoExporter {
         return workspace
     }
 
+    /// Copies `utterance-preview-0…n-1.caf` from **`NarrationPreviewBuilder`**’s workspace into this export’s
+    /// `utterance-*.caf` when counts match, avoiding duplicate TTS after **prepareNarrationPreview** (Edit Story).
+    private func copyPrebuiltNarrationUtterancesIfAvailable(
+        sourceDirectory: URL,
+        workspace: URL,
+        utteranceCount: Int,
+        progressHandler: ((Double, String) -> Void)?
+    ) async throws -> (urls: [URL], durations: [CMTime])? {
+        guard utteranceCount > 0 else { return nil }
+        for i in 0..<utteranceCount {
+            let src = sourceDirectory.appendingPathComponent("utterance-preview-\(i).caf")
+            guard FileManager.default.fileExists(atPath: src.path) else { return nil }
+        }
+        var urls: [URL] = []
+        var durations: [CMTime] = []
+        urls.reserveCapacity(utteranceCount)
+        durations.reserveCapacity(utteranceCount)
+        for i in 0..<utteranceCount {
+            let src = sourceDirectory.appendingPathComponent("utterance-preview-\(i).caf")
+            let dst = workspace.appendingPathComponent("utterance-\(i).caf")
+            if FileManager.default.fileExists(atPath: dst.path) {
+                try FileManager.default.removeItem(at: dst)
+            }
+            try FileManager.default.copyItem(at: src, to: dst)
+            let asset = AVURLAsset(url: dst)
+            let d = try await asset.load(.duration)
+            urls.append(dst)
+            durations.append(d)
+        }
+        progressHandler?(0.2, "Reusing \(utteranceCount) prepared narration segments (no re-synthesis).")
+        return (urls, durations)
+    }
+
+    /// Preview exports cap **output** duration (`RenderQuality.maximumDuration`); Edit Story bypass must not
+    /// run full-script TTS for that preview—only enough utterances to cover the preview window (see budget).
     @MainActor
     private func synthesizeNarrationIfNeeded(
         text: String,
@@ -997,7 +1036,10 @@ struct VideoExporter {
         externalCues: [ExternalCue],
         externalNarrationAudioURL: URL?,
         forcedParagraphSegments: [String]? = nil,
-        storyBlockNarrationSegments: [String]? = nil
+        storyBlockNarrationSegments: [String]? = nil,
+        renderQuality: RenderQuality = .finalStandard,
+        prebuiltUtteranceSourceDirectory: URL? = nil,
+        progressHandler: ((Double, String) -> Void)? = nil
     ) async throws -> NarrationTimeline {
         let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmedText.isEmpty || !externalCues.isEmpty || !(storyBlockNarrationSegments?.isEmpty ?? true) else {
@@ -1011,6 +1053,7 @@ struct VideoExporter {
         }
 
         if let externalNarrationAudioURL, !externalCues.isEmpty {
+            progressHandler?(0.22, "Using prepared narration audio.")
             let audioAsset = AVURLAsset(url: externalNarrationAudioURL)
             let audioDuration = try await audioAsset.load(.duration)
             let cueDuration = CMTime(seconds: externalCues.map(\.end).max() ?? 0, preferredTimescale: 600)
@@ -1063,7 +1106,22 @@ struct VideoExporter {
             narrationSegments = subs
             storyBlockUtteranceRanges = nil
         }
-        let utterances = narrationSegments.map {
+
+        var narrationSegmentsForSynth = narrationSegments
+        var blockRangesForSynth = storyBlockUtteranceRanges
+        if renderQuality == .preview, let previewCap = renderQuality.maximumDuration {
+            let budgetSeconds = CMTimeGetSeconds(previewCap) + 12
+            let capped = applyPreviewNarrationSynthesisBudget(
+                segments: narrationSegmentsForSynth,
+                blockRanges: blockRangesForSynth,
+                maxEstimatedSeconds: budgetSeconds,
+                speechRateMultiplier: speechRateMultiplier
+            )
+            narrationSegmentsForSynth = capped.segments
+            blockRangesForSynth = capped.blockRanges
+        }
+
+        let utterances = narrationSegmentsForSynth.map {
             SpeechVoiceLibrary.makeUtterance(
                 from: $0,
                 voiceIdentifier: voiceIdentifier,
@@ -1073,16 +1131,32 @@ struct VideoExporter {
         var utteranceAudioURLs: [URL] = []
         var utteranceDurations: [CMTime] = []
 
-        for (index, utterance) in utterances.enumerated() {
-            let utteranceURL = workspace.appendingPathComponent("utterance-\(index).caf")
-            let duration = try await renderUtteranceAudio(utterance, outputURL: utteranceURL)
-            utteranceAudioURLs.append(utteranceURL)
-            utteranceDurations.append(duration)
+        if let sourceDir = prebuiltUtteranceSourceDirectory,
+           blockRangesForSynth != nil,
+           !utterances.isEmpty,
+           let reused = try await copyPrebuiltNarrationUtterancesIfAvailable(
+                sourceDirectory: sourceDir,
+                workspace: workspace,
+                utteranceCount: utterances.count,
+                progressHandler: progressHandler
+            ) {
+            utteranceAudioURLs = reused.urls
+            utteranceDurations = reused.durations
+        } else {
+            let totalUtterances = max(utterances.count, 1)
+            for (index, utterance) in utterances.enumerated() {
+                let step = Double(index + 1) / Double(totalUtterances)
+                progressHandler?(0.16 + 0.07 * step, "Synthesizing narration \(index + 1) of \(utterances.count).")
+                let utteranceURL = workspace.appendingPathComponent("utterance-\(index).caf")
+                let duration = try await renderUtteranceAudio(utterance, outputURL: utteranceURL)
+                utteranceAudioURLs.append(utteranceURL)
+                utteranceDurations.append(duration)
+            }
         }
 
         let measuredNarrationDuration = utteranceDurations.reduce(CMTime.zero, +)
         let effectiveRate = SpeechVoiceLibrary.effectiveSpeechRateMultiplier(for: speechRateMultiplier)
-        let estimatedSecondsRaw = estimatedNarrationSeconds(for: narrationSegments)
+        let estimatedSecondsRaw = estimatedNarrationSeconds(for: narrationSegmentsForSynth)
         let estimatedSeconds = estimatedSecondsRaw / max(effectiveRate, 0.1)
         let estimatedNarrationDuration = CMTime(
             seconds: estimatedSeconds,
@@ -1091,14 +1165,14 @@ struct VideoExporter {
         // Edit Story blocks: drive length from real TTS samples only. Bumping to estimated here
         // stretched the slideshow (or drift-padded the last segment) while audio stayed measured.
         let totalDuration: CMTime
-        if storyBlockUtteranceRanges != nil {
+        if blockRangesForSynth != nil {
             totalDuration = max(measuredNarrationDuration, CMTime(seconds: 1, preferredTimescale: 600))
         } else {
             totalDuration = max(measuredNarrationDuration, estimatedNarrationDuration, CMTime(seconds: 1, preferredTimescale: 600))
         }
         let captionSegments = externalCues.isEmpty
             ? timedCaptionSegments(
-                from: narrationSegments,
+                from: narrationSegmentsForSynth,
                 utteranceDurations: utteranceDurations,
                 totalDuration: totalDuration,
                 voiceIdentifier: voiceIdentifier
@@ -1113,8 +1187,43 @@ struct VideoExporter {
             captionSegments: captionSegments,
             utteranceAudioURLs: utteranceAudioURLs,
             utteranceDurations: utteranceDurations,
-            storyBlockUtteranceRanges: storyBlockUtteranceRanges
+            storyBlockUtteranceRanges: blockRangesForSynth
         )
+    }
+
+    /// Limits how many utterances we **synthesize** for preview exports (output is still capped later). Uses the
+    /// same per-segment timing heuristic as export estimates so long scripts do not run full TTS for a ~20s sample.
+    ///
+    /// **Edit Story:** `blockRanges` must stay **one entry per story block**. Older logic used `compactMap`, which
+    /// dropped blocks with no utterances in the prefix—breaking alignment with `StoryBlockExportDescriptor` and
+    /// throwing `invalidStoryBlockPlan` during preview. We clip each block’s utterance range to `0..<prefix.count`
+    /// (empty `lo..<lo` means “no audio for this block in the preview sample”).
+    private func applyPreviewNarrationSynthesisBudget(
+        segments: [String],
+        blockRanges: [Range<Int>]?,
+        maxEstimatedSeconds: Double,
+        speechRateMultiplier: Double
+    ) -> (segments: [String], blockRanges: [Range<Int>]?) {
+        guard maxEstimatedSeconds > 0, segments.count > 1 else { return (segments, blockRanges) }
+        let effectiveRate = SpeechVoiceLibrary.effectiveSpeechRateMultiplier(for: speechRateMultiplier)
+        var sum = 0.0
+        var k = 0
+        for seg in segments {
+            let est = estimatedSecondsForSegment(seg) / max(effectiveRate, 0.1)
+            sum += est
+            k += 1
+            if sum >= maxEstimatedSeconds { break }
+        }
+        k = max(k, 1)
+        let prefix = Array(segments.prefix(k))
+        guard let ranges = blockRanges else { return (prefix, nil) }
+        let n = prefix.count
+        let clipped: [Range<Int>] = ranges.map { r in
+            let hi = min(r.upperBound, n)
+            let lo = min(r.lowerBound, hi)
+            return lo..<hi
+        }
+        return (prefix, clipped)
     }
 
     @MainActor
@@ -1399,15 +1508,7 @@ struct VideoExporter {
             exportSession.audioMix = audioMix
         }
 
-        await exportSession.export()
-
-        if let error = exportSession.error {
-            throw error
-        }
-
-        guard exportSession.status == .completed else {
-            throw ExportError.exportFailed
-        }
+        try await awaitExportSession(exportSession)
     }
 
     private func exportVideoStitch(
@@ -2242,14 +2343,28 @@ struct VideoExporter {
         }
 
         progressHandler?(0.88, progressMessage)
-        await exportSession.export()
+        try await awaitExportSession(exportSession)
+    }
 
-        if let error = exportSession.error {
-            throw error
-        }
-
-        guard exportSession.status == .completed else {
-            throw ExportError.exportFailed
+    /// When the render task is cancelled (e.g. **Stop**), `cancelExport()` tears down the in-flight session; relying only on `Task.checkCancellation()` inside long `AVAssetExportSession` work would not stop encoding promptly.
+    private func awaitExportSession(_ exportSession: AVAssetExportSession) async throws {
+        try await withTaskCancellationHandler {
+            await exportSession.export()
+            if let error = exportSession.error {
+                throw error
+            }
+            switch exportSession.status {
+            case .completed:
+                return
+            case .cancelled:
+                throw CancellationError()
+            case .unknown, .waiting, .exporting, .failed:
+                throw ExportError.exportFailed
+            @unknown default:
+                throw ExportError.exportFailed
+            }
+        } onCancel: {
+            exportSession.cancelExport()
         }
     }
 

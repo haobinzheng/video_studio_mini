@@ -19,6 +19,47 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-16 — Pushed: `pro-version` (export hardening + Edit Story preview/narration)
+
+- **Git:** `git push origin pro-version` (bundles the code + doc updates in the same commit as this log entry).
+- **Summary:** Per-run **`RenderedVideos/<UUID>/`** workspaces; **`await exportVideo`** (no `Task.detached`) + **`awaitExportSession`** / **`cancelExport()`** on Stop; Edit Story preview TTS budget keeps one range per block; Edit Story full export reuses **`NarrationPreview/utterance-preview-*.caf`** when full-length prep is valid; **Stop** on preview clears narration cache (prior fix). **Docs:** `docs/DESIGN_NOTES.md` aligned with behavior.
+- **Files (code):** `CapcutApp/AppViewModel.swift`, `CapcutApp/VideoExporter.swift`, `docs/GIT_PUSH_LOG.md`, `docs/DESIGN_NOTES.md`.
+
+### 2026-04-16 — Edit Story: reuse `NarrationPreview` utterance CAFs on export (no duplicate 500+ TTS)
+
+- **Issue:** **Edit Story** forced **`bypassNarrationPreviewAudio`**, so **`exportVideo`** always re-synthesized every utterance in **`RenderedVideos/<uuid>/`** even after **`prepareNarrationPreview`** had already produced the same segments in **`NarrationPreview/utterance-preview-*.caf`**. Stopping export and restarting repeated the full TTS pass.
+- **Change:** When full-length narration preview is valid (**`narrationPreviewIsFullLength`** + Edit Story descriptor), pass **`prebuiltUtteranceSourceDirectory`** → **`VideoExporter`** copies prebuilt CAFs into the export workspace instead of calling **`renderUtteranceAudio`** per segment.
+- **Files:** `CapcutApp/VideoExporter.swift`, `CapcutApp/AppViewModel.swift`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-16 — Edit Story preview: fix `invalidStoryBlockPlan` after preview TTS budget
+
+- **Cause:** **`applyPreviewNarrationSynthesisBudget`** used **`compactMap`** on per-block utterance ranges. Blocks whose utterances fell outside the preview prefix were **dropped**, so **`storyBlockUtteranceRanges.count` ≠ block count** → **`composeStoryBlockTimelineSegments`** threw **`invalidStoryBlockPlan`** (“Story block layout is invalid…”) even when the Edit tab was fully assigned.
+- **Change:** Clip each block’s range to **`0..<prefix.count`** with **`map`** (preserve one range per block; use empty **`lo..<lo`** when a block has no utterances in the sample).
+- **Files:** `CapcutApp/VideoExporter.swift`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-16 — Export: isolated workspace per session, structured await, AV cancel on Stop
+
+- **Issue:** `Task.detached` for **`exportVideo`** ignored cancellation from **Stop** / new export; **`AVAssetExportSession`** kept running; **`RenderedVideos/capcut-mini-video.mov`** (and shared intermediates) could race across runs.
+- **Change:** **`exportVideo(..., exportArtifactID:)`** writes under **`RenderedVideos/<UUID>/`** (final + intermediates). **`AppViewModel`** awaits **`exportVideo`** in the same task as narration prep (no detached). **`awaitExportSession`** wraps **`export`** with **`withTaskCancellationHandler`** → **`cancelExport()`** on task cancel. Sparse **`Task.checkCancellation()`** between major phases. Removed **`activeVideoExportTask`**.
+- **Files:** `CapcutApp/VideoExporter.swift`, `CapcutApp/AppViewModel.swift`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-16 — Stop preview: invalidate narration cache so full export rebuilds
+
+- **Issue:** After **Stop** on a stuck **preview** render, the next **final** export could skip **`prepareNarrationPreview`** (`needsPreviewRefresh` false) and jump straight into **`VideoExporter`** (merge / in-exporter narration), because cached **`narrationPreviewAudioURL` / `narrationPreviewIsFullLength`** still looked valid.
+- **Change:** **`stopActiveVideoRender`** clears narration preview state when **`isPreparingVideoPreview`** (preview pipeline only—not final export), and marks pending preview/final changes.
+- **Files:** `CapcutApp/AppViewModel.swift`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-16 — Preview video: cap Edit Story TTS + progress (fix ~16% hang)
+
+- **Cause:** **Preview** uses the same **`exportVideo`** path as final output, but **`RenderQuality.preview`** already caps **output** to **~20s** (`maximumDuration`). With **Edit Story** on, **`bypassNarrationPreviewAudio`** skips prepared preview M4A, so **`synthesizeNarrationIfNeeded`** ran **full-script** TTS (hundreds of utterances) while **`progressHandler`** stayed at **0.16** until done—looked frozen at ~16%.
+- **Change:** For **preview** quality only, **`applyPreviewNarrationSynthesisBudget`** prefixes utterances using the same **estimated** seconds per segment as pacing (budget ≈ preview cap + 12s). Per-utterance **`Synthesizing narration i of n`** updates map to **0.16–0.23**; prepared-audio path reports **Using prepared narration audio.** at **0.22**.
+- **Files:** `CapcutApp/VideoExporter.swift`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-16 — Pushed: `pro-version` @ `5ea3b4f`
+
+- **Git:** `git push origin pro-version` — range `e87e975..5ea3b4f` (commit `5ea3b4f`).
+- **Summary:** Edit Story toggle label + **Video Mode** locked to **Story** when Edit Story is on (`AppViewModel`, `ContentView`); user-visible export progress uses **Story** / **Slideshow** (`TimingMode`) instead of “real-life” copy (`VideoExporter`); `DESIGN_NOTES` + log entries above aligned.
+
 ### 2026-04-16 — Export status messages: Slideshow / Story (not “real-life”)
 
 - **VideoExporter** user-visible `progressHandler` strings now use the same labels as **Video Mode** (**Story**, **Slideshow** from `TimingMode.rawValue`, not internal “real-life” wording). Updated: building composition, mixing music, export pass, caption-burn export.

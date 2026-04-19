@@ -536,6 +536,11 @@ final class AppViewModel: NSObject, ObservableObject {
     private var narrationPreviewIsFullLength = false
     /// Increment when whole-script narration chunking changes so a cached full-length preview is not reused with stale TTS boundaries.
     private static let narrationPreviewSegmentationPolicy = "full-length-preview-no-utterance-merge-v3"
+    /// Matches `NarrationPreviewBuilder`’s workspace (`utterance-preview-*.caf`).
+    private static var narrationPreviewWorkspaceURL: URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+            .appendingPathComponent("NarrationPreview", isDirectory: true)
+    }
     private var narrationPreviewSegmentationPolicyAtBuild = ""
     private var pendingUtteranceCount = 0
     private var didLoadFullVoiceList = false
@@ -547,7 +552,6 @@ final class AppViewModel: NSObject, ObservableObject {
     private var suppressSelectedPhotoItemsReload = false
     private var pickerItemsBySourceAssetID: [UUID: PhotosPickerItem] = [:]
     private var activeVideoRenderTask: Task<Void, Never>?
-    private var activeVideoExportTask: Task<URL, Error>?
     /// Invalidated on **Stop** so `VideoExporter` / narration progress handlers cannot overwrite `statusMessage` after cancel.
     private var activeVideoRenderSessionID: UUID?
 
@@ -1306,14 +1310,23 @@ final class AppViewModel: NSObject, ObservableObject {
 
     func stopActiveVideoRender() {
         guard isExportingVideo || isPreparingVideoPreview else { return }
+        /// **Preview video** (`isPreparingVideoPreview`) uses capped narration prep and may be interrupted mid-export.
+        /// Stale `narrationPreview*` can make `needsPreviewRefresh` skip full `prepareNarrationPreview` on the next
+        /// final export. Do **not** key off `isPreparingNarrationPreview` alone—that is also true during **final**
+        /// export narration prep (`isExportingVideo`), where we must not discard a completed full-length preview.
+        let wasPreviewVideoPipeline = isPreparingVideoPreview
         activeVideoRenderSessionID = nil
         activeVideoRenderTask?.cancel()
-        activeVideoExportTask?.cancel()
         isPreparingVideoPreview = false
         isExportingVideo = false
         isPreparingNarrationPreview = false
         exportProgress = 0
         statusMessage = "Render stopped. Continue editing and start again anytime."
+        if wasPreviewVideoPipeline {
+            clearNarrationPreviewState(resetCaption: false)
+            hasPendingPreviewChanges = true
+            hasPendingFinalVideoChanges = true
+        }
     }
 
     private func runVideoRender(renderQuality: VideoExporter.RenderQuality, successMessage: String) {
@@ -1335,9 +1348,7 @@ final class AppViewModel: NSObject, ObservableObject {
         }
 
         activeVideoRenderTask?.cancel()
-        activeVideoExportTask?.cancel()
         activeVideoRenderTask = nil
-        activeVideoExportTask = nil
 
         if renderQuality == .preview {
             isPreparingVideoPreview = true
@@ -1405,7 +1416,6 @@ final class AppViewModel: NSObject, ObservableObject {
             let sessionID = UUID()
             activeVideoRenderSessionID = sessionID
             defer {
-                activeVideoExportTask = nil
                 activeVideoRenderTask = nil
                 if activeVideoRenderSessionID == sessionID {
                     activeVideoRenderSessionID = nil
@@ -1468,38 +1478,42 @@ final class AppViewModel: NSObject, ObservableObject {
                 let previewCues = (timingMode == .video || narrationText.isEmpty || bypassNarrationPreviewAudio)
                     ? []
                     : narrationPreviewCues
-                let exportTask = Task.detached(priority: .userInitiated) {
-                    try await exporter.exportVideo(
-                        mediaItems: exportMediaItems,
-                        narrationText: narrationText,
-                        backgroundMusicURL: backgroundMusicURL,
-                        backgroundMusicVolume: backgroundMusicVolume,
-                        narrationVolume: narrationVolume,
-                        videoAudioVolume: videoAudioVolume,
-                        voiceIdentifier: voiceIdentifier,
-                        speechRateMultiplier: speechRateMultiplier,
-                        aspectRatio: aspectRatio,
-                        timingMode: timingMode,
-                        includeCaptions: includeCaptions,
-                        renderQuality: renderQuality,
-                        videoModeSettings: (timingMode == .video || timingMode == .realLife) ? videoModeSettings : nil,
-                        externalCues: previewCues,
-                        externalNarrationAudioURL: previewAudioURL,
-                        captionStyle: captionStyleForExport,
-                        paragraphNarrationSegments: paragraphSegmentsForExport,
-                        storyBlockDescriptor: storyBlockDescriptorForExport,
-                        storyMusicBedSpans: storyMusicBedSpansForExport,
-                        progressHandler: { progress, message in
-                            Task { @MainActor in
-                                guard self.activeVideoRenderSessionID == sessionID else { return }
-                                self.exportProgress = progress
-                                self.statusMessage = message
-                            }
+                /// In-process `await` (not `Task.detached`) so **Stop** / new export cancellation reaches this work; `VideoExporter` cancels `AVAssetExportSession` when the task is cancelled.
+                /// Edit Story final export used to ignore prepared narration and TTS **again** in `VideoExporter`; reuse `NarrationPreview/utterance-preview-*.caf` when full-length prep matches.
+                let reusePrebuiltStoryUtterances =
+                    storyBlockDescriptorForExport != nil
+                    && narrationPreviewAudioURL != nil
+                    && narrationPreviewIsFullLength
+                let exportedURL = try await exporter.exportVideo(
+                    mediaItems: exportMediaItems,
+                    narrationText: narrationText,
+                    backgroundMusicURL: backgroundMusicURL,
+                    backgroundMusicVolume: backgroundMusicVolume,
+                    narrationVolume: narrationVolume,
+                    videoAudioVolume: videoAudioVolume,
+                    voiceIdentifier: voiceIdentifier,
+                    speechRateMultiplier: speechRateMultiplier,
+                    aspectRatio: aspectRatio,
+                    timingMode: timingMode,
+                    includeCaptions: includeCaptions,
+                    renderQuality: renderQuality,
+                    videoModeSettings: (timingMode == .video || timingMode == .realLife) ? videoModeSettings : nil,
+                    externalCues: previewCues,
+                    externalNarrationAudioURL: previewAudioURL,
+                    captionStyle: captionStyleForExport,
+                    paragraphNarrationSegments: paragraphSegmentsForExport,
+                    storyBlockDescriptor: storyBlockDescriptorForExport,
+                    storyMusicBedSpans: storyMusicBedSpansForExport,
+                    exportArtifactID: sessionID,
+                    prebuiltUtteranceSourceDirectory: reusePrebuiltStoryUtterances ? Self.narrationPreviewWorkspaceURL : nil,
+                    progressHandler: { progress, message in
+                        Task { @MainActor in
+                            guard self.activeVideoRenderSessionID == sessionID else { return }
+                            self.exportProgress = progress
+                            self.statusMessage = message
                         }
-                    )
-                }
-                activeVideoExportTask = exportTask
-                let exportedURL = try await exportTask.value
+                    }
+                )
                 guard activeVideoRenderSessionID == sessionID else { throw CancellationError() }
                 if renderQuality == .preview {
                     videoPreviewURL = exportedURL
