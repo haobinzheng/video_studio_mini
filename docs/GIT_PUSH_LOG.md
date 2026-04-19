@@ -19,9 +19,9 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
-### 2026-04-16 — Pushed: `pro-version` (export hardening + Edit Story preview/narration)
+### 2026-04-16 — Pushed: `pro-version` @ `cfad2a6` (export hardening + Edit Story preview/narration)
 
-- **Git:** `git push origin pro-version` (bundles the code + doc updates in the same commit as this log entry).
+- **Git:** `git push origin pro-version` — range `5ea3b4f..cfad2a6`.
 - **Summary:** Per-run **`RenderedVideos/<UUID>/`** workspaces; **`await exportVideo`** (no `Task.detached`) + **`awaitExportSession`** / **`cancelExport()`** on Stop; Edit Story preview TTS budget keeps one range per block; Edit Story full export reuses **`NarrationPreview/utterance-preview-*.caf`** when full-length prep is valid; **Stop** on preview clears narration cache (prior fix). **Docs:** `docs/DESIGN_NOTES.md` aligned with behavior.
 - **Files (code):** `CapcutApp/AppViewModel.swift`, `CapcutApp/VideoExporter.swift`, `docs/GIT_PUSH_LOG.md`, `docs/DESIGN_NOTES.md`.
 
