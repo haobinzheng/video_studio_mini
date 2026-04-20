@@ -263,7 +263,7 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var narrationText = """
     Welcome to FluxCut. This introduction is both a sample script and a quick user guide you can read or play out loud.
 
-    Start in Script. Type or paste your narration, then choose an iPhone voice for playback and export. The voice list comes from Apple voices available to apps on your iPhone. You can select a voice, hide voices you do not want to see, and tap Reload iPhone Voices later if you install more enhanced or premium voices in iPhone settings.
+    Start in Script. Type or paste your narration, then choose an iPhone voice for playback and export. FluxCut lists **Enhanced** and **Premium** voices you download in **Settings** (Accessibility → Spoken Content → Voices). **Siri** personas (Voice 1, Voice 2, … in Settings) are not available to third-party apps on iOS—only Apple’s own features can use them. Built-in Standard compact voices such as base Samantha are not listed here until you upgrade tier in Settings. You can hide voices you do not want, and tap Reload iPhone Voices after you change or download voices in Settings.
 
     Use Play Script to hear the current script right away. Build Preview is an optional testing tool. It creates a shorter narration preview so you can check timing and subtitle flow before making the final video.
 
@@ -316,7 +316,7 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var selectedVoiceLanguage = "" {
         didSet {
             guard oldValue != selectedVoiceLanguage else { return }
-            selectBestVoiceForSelectedLanguage()
+            reconcileSelectedVoice()
         }
     }
     @Published var selectedVoiceIdentifier = "" {
@@ -572,8 +572,10 @@ final class AppViewModel: NSObject, ObservableObject {
             availableVoices = allAvailableVoices
         }
         voiceReloadFeedback = availableVoices.isEmpty
-            ? "No enhanced or premium voices loaded yet"
-            : "\(availableVoices.count) high-quality Apple voices ready"
+            ? "No Apple voices loaded yet"
+            : SpeechVoiceLibrary.isUsingLooseVoiceFallback
+                ? "\(availableVoices.count) Apple voices ready (Standard fallback)"
+                : "\(availableVoices.count) Apple voices ready"
         if let firstVoice = availableVoices.first {
             selectedVoiceLanguage = firstVoice.languageGroup
             selectedVoiceIdentifier = firstVoice.id
@@ -595,16 +597,15 @@ final class AppViewModel: NSObject, ObservableObject {
         if availableVoices.isEmpty {
             reloadAvailableVoices(restoringHiddenVoices: false)
         }
-        selectLanguageCompatibleVoiceIfNeeded(for: narrationText)
         reconcileSelectedVoice()
         let activeVoiceIdentifier = resolvedPlayableVoiceIdentifier()
         guard !activeVoiceIdentifier.isEmpty else {
-            statusMessage = "Reload iPhone voices first, then try Play Script again."
+            statusMessage = "Choose a narration voice in the list, or reload iPhone voices."
             return
         }
-        if selectedVoiceIdentifier != activeVoiceIdentifier {
-            selectedVoiceIdentifier = activeVoiceIdentifier
-            selectedVoiceName = selectedVoiceDisplayName
+        guard SpeechVoiceLibrary.voice(for: activeVoiceIdentifier) != nil else {
+            statusMessage = "That voice is unavailable. Pick another voice or reload iPhone voices."
+            return
         }
 
         configureAudioSessionIfNeeded()
@@ -805,7 +806,7 @@ final class AppViewModel: NSObject, ObservableObject {
         narrationText = """
         Welcome to FluxCut. This introduction is both a sample script and a quick user guide you can read or play out loud.
 
-        Start in Script. Type or paste your narration, then choose an iPhone voice for playback and export. The voice list comes from Apple voices available to apps on your iPhone. You can select a voice, hide voices you do not want to see, and tap Reload iPhone Voices later if you install more enhanced or premium voices in iPhone settings.
+        Start in Script. Type or paste your narration, then choose an iPhone voice for playback and export. FluxCut lists **Enhanced** and **Premium** voices you download in **Settings** (Accessibility → Spoken Content → Voices). **Siri** personas (Voice 1, Voice 2, … in Settings) are not available to third-party apps on iOS—only Apple’s own features can use them. Built-in Standard compact voices such as base Samantha are not listed here until you upgrade tier in Settings. You can hide voices you do not want, and tap Reload iPhone Voices after you change or download voices in Settings.
 
         Use Play Script to hear the current script right away. Build Preview is an optional testing tool. It creates a shorter narration preview so you can check timing and subtitle flow before making the final video.
 
@@ -1556,20 +1557,18 @@ final class AppViewModel: NSObject, ObservableObject {
             objectWillChange.send()
             allAvailableVoices = loadedVoices
             applyVoiceFiltersAndSelection()
-            voiceReloadFeedback = "\(availableVoices.count) high-quality Apple voices loaded"
-            statusMessage = "Voice list refreshed."
-        } else {
-            let restoredFallbackVoices = SpeechVoiceLibrary.voiceOptions
-            if !restoredFallbackVoices.isEmpty {
-                objectWillChange.send()
-                allAvailableVoices = restoredFallbackVoices
-                applyVoiceFiltersAndSelection()
-                voiceReloadFeedback = "\(availableVoices.count) high-quality Apple voices loaded"
-                statusMessage = "Voice list refreshed."
+            if SpeechVoiceLibrary.isUsingLooseVoiceFallback {
+                voiceReloadFeedback = "\(availableVoices.count) Apple voices loaded (Standard fallback)"
+                statusMessage =
+                    "Voice list refreshed. Enhanced and Premium voices are not installed yet—showing Standard voices. Download them in Settings → Accessibility → Spoken Content → Voices, then reload."
             } else {
-                voiceReloadFeedback = "No enhanced or premium Apple voices found"
-                statusMessage = "No enhanced or premium Apple voices were available from the speech framework on this device."
+                voiceReloadFeedback = "\(availableVoices.count) Apple voices loaded"
+                statusMessage = "Voice list refreshed."
             }
+        } else {
+            voiceReloadFeedback = "No Apple voices found"
+            statusMessage =
+                "On your iPhone, open Settings → Accessibility → Spoken Content → Voices and download Enhanced or Premium voices for your language. Siri voices cannot be used by third-party apps. Tap Reload. On Simulator, try a physical iPhone."
         }
     }
 
@@ -1595,7 +1594,7 @@ final class AppViewModel: NSObject, ObservableObject {
             applyVoiceFiltersAndSelection()
         }
         invalidateNarrationPreviewIfNeeded()
-        voiceReloadFeedback = "\(availableVoices.count) high-quality Apple voices shown"
+        voiceReloadFeedback = "\(availableVoices.count) Apple voices shown"
         statusMessage = "Voice removed from this list. Tap Reload iPhone Voices to bring everything back."
     }
 
@@ -1664,8 +1663,10 @@ final class AppViewModel: NSObject, ObservableObject {
         return (media, map)
     }
 
-    func appendSelectedMedia(from pickerItems: [PhotosPickerItem], combinedSelection: [PhotosPickerItem]? = nil) async {
-        guard !pickerItems.isEmpty else { return }
+    /// - Returns: IDs of media rows appended to `mediaItems`, in import order (empty if nothing was added).
+    @discardableResult
+    func appendSelectedMedia(from pickerItems: [PhotosPickerItem], combinedSelection: [PhotosPickerItem]? = nil) async -> [UUID] {
+        guard !pickerItems.isEmpty else { return [] }
 
         isLoadingMediaSelection = true
         defer {
@@ -1678,7 +1679,7 @@ final class AppViewModel: NSObject, ObservableObject {
 
         guard !appendedMedia.isEmpty else {
             statusMessage = "No valid photos or videos were selected."
-            return
+            return []
         }
 
         for (id, item) in newPickerEntries {
@@ -1700,6 +1701,7 @@ final class AppViewModel: NSObject, ObservableObject {
         statusMessage = hasIncompletePickerVideoImports
             ? "Added media. Large videos are still copying into FluxCut…"
             : "\(appendedMedia.count) media item(s) added to the end of your project."
+        return appendedMedia.map(\.id)
     }
 
     private func makeMediaItem(from item: PhotosPickerItem, sourceAssetID: UUID) async -> MediaItem? {
@@ -3091,20 +3093,17 @@ final class AppViewModel: NSObject, ObservableObject {
             guard let label = voices.first?.languageLabel else { return nil }
             return VoiceLanguageOption(id: group, label: label, voiceCount: voices.count)
         }
-        .sorted { lhs, rhs in
-            SpeechVoiceLibrary.preferredLanguageRank(lhs.id) > SpeechVoiceLibrary.preferredLanguageRank(rhs.id)
-        }
+        .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
     }
 
     var voicesForSelectedLanguage: [VoiceOption] {
-        let matchingVoices = availableVoices.filter { $0.languageGroup == selectedVoiceLanguage }
-        return matchingVoices.isEmpty ? availableVoices : matchingVoices
+        availableVoices.filter { $0.languageGroup == selectedVoiceLanguage }
     }
 
     var selectedVoiceLanguageLabel: String {
         availableVoiceLanguages.first(where: { $0.id == selectedVoiceLanguage })?.label
             ?? voicesForSelectedLanguage.first?.languageLabel
-            ?? "No high-quality language available"
+            ?? "No language group available"
     }
 
     var narrationSpeedOptions: [NarrationSpeedOption] {
@@ -3494,11 +3493,12 @@ final class AppViewModel: NSObject, ObservableObject {
 
     private func reconcileSelectedVoice() {
         let matchingVoices = voicesForSelectedLanguage
-        if !matchingVoices.contains(where: { $0.id == selectedVoiceIdentifier }) {
-            selectedVoiceIdentifier = matchingVoices.first?.id ?? availableVoices.first?.id ?? ""
-        } else {
+        if matchingVoices.contains(where: { $0.id == selectedVoiceIdentifier }) {
             selectedVoiceName = selectedVoiceDisplayName
+            return
         }
+        selectedVoiceIdentifier = ""
+        selectedVoiceName = "No Apple voice selected yet."
     }
 
     private func reconcileSelectedVoiceLanguage() {
@@ -3509,65 +3509,11 @@ final class AppViewModel: NSObject, ObservableObject {
         selectedVoiceLanguage = availableLanguages.first?.id ?? ""
     }
 
-    private func selectBestVoiceForSelectedLanguage() {
-        let matchingVoices = availableVoices.filter { $0.languageGroup == selectedVoiceLanguage }
-        guard let bestVoice = matchingVoices.first else {
-            if !availableVoices.isEmpty {
-                reconcileSelectedVoiceLanguage()
-                reconcileSelectedVoice()
-            }
-            return
-        }
-
-        if selectedVoiceIdentifier != bestVoice.id {
-            selectedVoiceIdentifier = bestVoice.id
-        } else {
-            selectedVoiceName = bestVoice.displayName
-        }
-    }
-
-    private func selectLanguageCompatibleVoiceIfNeeded(for text: String) {
-        guard !availableVoices.isEmpty else { return }
-
-        if availableVoices.contains(where: { $0.id == selectedVoiceIdentifier }) {
-            return
-        }
-
-        let expectsCJKVoice = SpeechVoiceLibrary.containsCJKContent(in: text)
-        let selectedIsCompatible = availableVoices.contains {
-            $0.id == selectedVoiceIdentifier && Self.voiceOption($0, isCompatibleWithCJK: expectsCJKVoice)
-        }
-
-        if selectedIsCompatible {
-            return
-        }
-
-        if let matchingVisibleVoice = availableVoices.first(where: {
-            Self.voiceOption($0, isCompatibleWithCJK: expectsCJKVoice)
-        }) {
-            selectedVoiceLanguage = matchingVisibleVoice.languageGroup
-            selectedVoiceIdentifier = matchingVisibleVoice.id
-            selectedVoiceName = matchingVisibleVoice.displayName
-        }
-    }
-
     private func resolvedPlayableVoiceIdentifier() -> String {
-        if availableVoices.contains(where: { $0.id == selectedVoiceIdentifier }) {
-            return selectedVoiceIdentifier
+        guard availableVoices.contains(where: { $0.id == selectedVoiceIdentifier }) else {
+            return ""
         }
-        if let firstVisibleVoice = availableVoices.first?.id {
-            return firstVisibleVoice
-        }
-        if let firstAvailableVoice = allAvailableVoices.first?.id {
-            return firstAvailableVoice
-        }
-        if let firstSystemVoice = SpeechVoiceLibrary.voiceOptions.first?.id {
-            return firstSystemVoice
-        }
-        if let firstFallback = SpeechVoiceLibrary.initialVoiceOptions.first?.id {
-            return firstFallback
-        }
-        return ""
+        return selectedVoiceIdentifier
     }
 
     /// Normalizes newlines and blank lines so `StoryScriptPartition.nonEmptyParagraphs` can split on `\n\n`.
@@ -3901,17 +3847,6 @@ final class AppViewModel: NSObject, ObservableObject {
         case .unknown:
             return true
         }
-    }
-
-    private static func voiceOption(_ option: VoiceOption, isCompatibleWithCJK expectsCJKVoice: Bool) -> Bool {
-        if expectsCJKVoice {
-            return option.language.hasPrefix("zh")
-                || option.language.hasPrefix("yue")
-                || option.language.hasPrefix("wuu")
-                || option.language.hasPrefix("ja")
-                || option.language.hasPrefix("ko")
-        }
-        return option.language.hasPrefix("en")
     }
 
     var storyScriptParagraphs: [String] {
@@ -4294,14 +4229,22 @@ enum SpeechVoiceLibrary {
         return fallbackVoices
     }
 
+    /// True when the strict tier list is empty but non-novelty system voices exist (Standard / Personal Voice, etc.).
+    /// Usually means **Enhanced / Premium** are not downloaded in Settings yet; Standard keeps the picker usable.
+    static var isUsingLooseVoiceFallback: Bool {
+        preferredEnhancedPremiumVoices.isEmpty && !voiceOptions.isEmpty
+    }
+
+    /// **Enhanced** and **Premium** only — excludes **Standard** compact voices (Ralph, Samantha, …). Siri personas are not available to third-party apps via `AVSpeechSynthesizer` on iOS, so they are not listed.
     static var preferredEnhancedPremiumVoices: [AppViewModel.VoiceOption] {
         mapVoices(
-            AVSpeechSynthesisVoice.speechVoices().filter {
-                !isNoveltyVoice($0) &&
-                qualityRank(qualityLabel(for: $0)) >= 2
-            },
+            selectableEnhancedPremiumVoices(),
             isFallback: false
         )
+    }
+
+    private static func selectableEnhancedPremiumVoices() -> [AVSpeechSynthesisVoice] {
+        AVSpeechSynthesisVoice.speechVoices().filter { isSelectableVoice($0) }
     }
 
     static var initialVoiceOptions: [AppViewModel.VoiceOption] {
@@ -4313,9 +4256,8 @@ enum SpeechVoiceLibrary {
     }
 
     static func voice(for identifier: String) -> AVSpeechSynthesisVoice? {
-        AVSpeechSynthesisVoice(identifier: identifier)
-            ?? AVSpeechSynthesisVoice(language: identifier)
-            ?? defaultVoice
+        guard !identifier.isEmpty else { return nil }
+        return AVSpeechSynthesisVoice(identifier: identifier)
     }
 
     /// BCP-47 language tag from the resolved voice (drives `CaptionTextChunker` / `NLTokenizer`).
@@ -4370,7 +4312,7 @@ enum SpeechVoiceLibrary {
     }
 
     static func makeUtterance(from text: String, voiceIdentifier: String, speechRateMultiplier: Double = 1.0) -> AVSpeechUtterance {
-        let selectedVoice = resolvedVoice(for: text, preferredIdentifier: voiceIdentifier)
+        let selectedVoice = voice(for: voiceIdentifier)
         let utterance = AVSpeechUtterance(string: text)
         utterance.voice = selectedVoice
         utterance.rate = speakingRate(for: selectedVoice, multiplier: speechRateMultiplier)
@@ -4407,79 +4349,19 @@ enum SpeechVoiceLibrary {
     }
 
     private static var defaultVoice: AVSpeechSynthesisVoice? {
-        if let preferredLanguageVoice = preferredLanguageVoices().first {
-            return preferredLanguageVoice
-        }
-
-        let preferredVoices = AVSpeechSynthesisVoice.speechVoices().filter {
-            !isNoveltyVoice($0) &&
-            qualityRank(qualityLabel(for: $0)) >= 2
-        }
-        if !preferredVoices.isEmpty {
-            return preferredVoices.sorted {
-                let lhsRank = preferredNameRank($0.name)
-                let rhsRank = preferredNameRank($1.name)
-                if lhsRank != rhsRank {
-                    return lhsRank > rhsRank
-                }
-                return qualityRank(qualityLabel(for: $0)) > qualityRank(qualityLabel(for: $1))
+        let candidates = selectableEnhancedPremiumVoices()
+        if candidates.isEmpty {
+            /// Picker excludes Standard; synthesis still needs a voice if nothing else is installed.
+            return AVSpeechSynthesisVoice.speechVoices().filter { !isNoveltyVoice($0) }.sorted {
+                $0.identifier < $1.identifier
             }.first
         }
-
-        let fallbackVoices = AVSpeechSynthesisVoice.speechVoices().filter {
-            !isNoveltyVoice($0) && qualityRank(qualityLabel(for: $0)) >= 2
-        }
-        if !fallbackVoices.isEmpty {
-            return fallbackVoices.sorted {
-                let lhsRank = preferredNameRank($0.name)
-                let rhsRank = preferredNameRank($1.name)
-                if lhsRank != rhsRank {
-                    return lhsRank > rhsRank
-                }
-                let lhsLanguageRank = preferredLanguageRank($0.language)
-                let rhsLanguageRank = preferredLanguageRank($1.language)
-                if lhsLanguageRank != rhsLanguageRank {
-                    return lhsLanguageRank > rhsLanguageRank
-                }
-                return $0.name < $1.name
-            }.first
-        }
-
-        return AVSpeechSynthesisVoice.speechVoices().first(where: { !isNoveltyVoice($0) && qualityRank(qualityLabel(for: $0)) >= 2 })
-    }
-
-    private static func resolvedVoice(for text: String, preferredIdentifier: String) -> AVSpeechSynthesisVoice? {
-        let preferredVoice = voice(for: preferredIdentifier)
-        if let preferredVoice {
-            return preferredVoice
-        }
-        let expectsCJKVoice = containsCJKContent(in: text)
-
-        let candidateVoices = AVSpeechSynthesisVoice.speechVoices().filter {
-            !isNoveltyVoice($0) &&
-            qualityRank(qualityLabel(for: $0)) >= 2 &&
-            isVoice($0, compatibleWithCJK: expectsCJKVoice)
-        }
-
-        if !candidateVoices.isEmpty {
-            return candidateVoices.sorted {
-                let lhsLanguageRank = preferredLanguageRank($0.language)
-                let rhsLanguageRank = preferredLanguageRank($1.language)
-                if lhsLanguageRank != rhsLanguageRank {
-                    return lhsLanguageRank > rhsLanguageRank
-                }
-
-                let lhsQuality = qualityRank(qualityLabel(for: $0))
-                let rhsQuality = qualityRank(qualityLabel(for: $1))
-                if lhsQuality != rhsQuality {
-                    return lhsQuality > rhsQuality
-                }
-
-                return $0.name < $1.name
-            }.first
-        }
-
-        return defaultVoice
+        return candidates.sorted {
+            let lhsQ = qualitySortKey(for: $0)
+            let rhsQ = qualitySortKey(for: $1)
+            if lhsQ != rhsQ { return lhsQ > rhsQ }
+            return $0.identifier < $1.identifier
+        }.first
     }
 
     private static func chunkedText(from text: String, optimizeForLongForm: Bool) -> [String] {
@@ -4600,18 +4482,6 @@ enum SpeechVoiceLibrary {
         }
     }
 
-    private static func isVoice(_ voice: AVSpeechSynthesisVoice, compatibleWithCJK expectsCJKVoice: Bool) -> Bool {
-        if expectsCJKVoice {
-            return voice.language.hasPrefix("zh")
-                || voice.language.hasPrefix("yue")
-                || voice.language.hasPrefix("ja")
-                || voice.language.hasPrefix("ko")
-                || voice.language.hasPrefix("wuu")
-        }
-
-        return voice.language.hasPrefix("en")
-    }
-
     private static func collapseCaptionWhitespace(in text: String) -> String {
         let newlineFlattened = text.replacingOccurrences(of: "\n", with: " ")
         let collapsed = newlineFlattened.replacingOccurrences(
@@ -4634,37 +4504,38 @@ enum SpeechVoiceLibrary {
         case .enhanced:
             return "Enhanced"
         default:
-            return "Default"
+            return "Standard"
         }
     }
 
-    private static func qualityRank(_ label: String) -> Int {
-        switch label {
-        case "Premium":
+    private static func qualitySortKey(for voice: AVSpeechSynthesisVoice) -> Int {
+        switch voice.quality {
+        case .premium:
+            return 4
+        case .enhanced:
             return 3
-        case "Enhanced":
-            return 2
         default:
-            return 1
+            return 2
         }
     }
 
-    private static func preferredNameRank(_ name: String) -> Int {
-        let lowered = name.lowercased()
-        if lowered.contains("ava") { return 100 }
-        if lowered.contains("edan") || lowered.contains("evan") { return 95 }
-        if lowered.contains("fung") { return 90 }
-        if lowered.contains("liang") { return 85 }
-        if lowered.contains("samantha") { return 80 }
-        if lowered.contains("moira") { return 78 }
-        if lowered.contains("daniel") { return 76 }
-        if lowered.contains("ting-ting") { return 74 }
-        if lowered.contains("sin-ji") { return 72 }
-        if lowered.contains("mei-jia") { return 70 }
-        return 0
+    /// Picker list: **Premium** and **Enhanced** only — not **Standard** compact voices. Siri personas are not available to third-party `AVSpeechSynthesizer` apps on iOS.
+    private static func isSelectableVoice(_ voice: AVSpeechSynthesisVoice) -> Bool {
+        guard !isNoveltyVoice(voice) else { return false }
+        switch voice.quality {
+        case .premium, .enhanced:
+            return true
+        default:
+            return false
+        }
     }
 
     private static func languageLabel(for code: String) -> String {
+        let normalizedTag = code.replacingOccurrences(of: "_", with: "-").lowercased()
+        // Hong Kong Chinese TTS (Cantonese) often uses `zh-HK` instead of `yue-HK`.
+        if normalizedTag == "zh-hk" || normalizedTag == "zh-hant-hk" {
+            return "Cantonese"
+        }
         if code.hasPrefix("wuu") {
             return "Shanghainese"
         }
@@ -4725,13 +4596,11 @@ enum SpeechVoiceLibrary {
         }
     }
 
+    /// When no **Enhanced / Premium** entries match `isSelectableVoice`, include every **non-novelty** system voice
+    /// so reload never returns an empty list on a normal device. (Previously this repeated the same filter as `preferredEnhancedPremiumVoices`, so it was always empty together.)
     private static var fallbackVoices: [AppViewModel.VoiceOption] {
-        mapVoices(
-            AVSpeechSynthesisVoice.speechVoices().filter {
-                !isNoveltyVoice($0) && qualityRank(qualityLabel(for: $0)) >= 2
-            },
-            isFallback: true
-        )
+        let loose = AVSpeechSynthesisVoice.speechVoices().filter { !isNoveltyVoice($0) }
+        return mapVoices(loose, isFallback: true)
     }
 
     private static func mapVoices(_ voices: [AVSpeechSynthesisVoice], isFallback: Bool) -> [AppViewModel.VoiceOption] {
@@ -4745,25 +4614,15 @@ enum SpeechVoiceLibrary {
                     languageLabel: languageLabel(for: voice.language),
                     regionLabel: regionLabel(for: voice.language),
                     qualityLabel: qualityLabel(for: voice),
-                    sortRank: qualityRank(qualityLabel(for: voice)),
+                    sortRank: qualitySortKey(for: voice),
                     isFallback: isFallback
                 )
             }
             .sorted { lhs, rhs in
-                let lhsLanguageRank = preferredLanguageRank(lhs.language)
-                let rhsLanguageRank = preferredLanguageRank(rhs.language)
-                if lhsLanguageRank != rhsLanguageRank {
-                    return lhsLanguageRank > rhsLanguageRank
-                }
-                let lhsNameRank = preferredNameRank(lhs.name)
-                let rhsNameRank = preferredNameRank(rhs.name)
-                if lhsNameRank != rhsNameRank {
-                    return lhsNameRank > rhsNameRank
-                }
                 if lhs.sortRank != rhs.sortRank {
                     return lhs.sortRank > rhs.sortRank
                 }
-                return lhs.name < rhs.name
+                return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
             }
     }
 
@@ -4772,34 +4631,12 @@ enum SpeechVoiceLibrary {
         return noveltyVoiceKeywords.contains { lowered.contains($0) }
     }
 
-    static func preferredLanguageRank(_ language: String) -> Int {
-        switch language {
-        case let code where code.hasPrefix("en-US"):
-            return 100
-        case let code where code.hasPrefix("en-GB"):
-            return 95
-        case let code where code.hasPrefix("ja"):
-            return 92
-        case let code where code.hasPrefix("wuu"):
-            return 91
-        case let code where code.hasPrefix("zh-CN"):
-            return 90
-        case let code where code.hasPrefix("zh-HK"):
-            return 85
-        case let code where code.hasPrefix("zh"):
-            return 80
-        case let code where code.hasPrefix("yue-HK"):
-            return 75
-        case let code where code.hasPrefix("yue"):
-            return 70
-        case let code where code.hasPrefix("en"):
-            return 65
-        default:
-            return 0
-        }
-    }
-
     private static func languageGroup(for code: String) -> String {
+        let normalizedTag = code.replacingOccurrences(of: "_", with: "-").lowercased()
+        // Match Settings: Cantonese Siri may report `zh-HK`; group with `yue-*` so the Language menu shows **Cantonese**.
+        if normalizedTag == "zh-hk" || normalizedTag == "zh-hant-hk" {
+            return "yue"
+        }
         if code.hasPrefix("wuu") { return "wuu" }
         if code.hasPrefix("yue") { return "yue" }
         if code.hasPrefix("zh") { return "zh" }
@@ -4808,9 +4645,4 @@ enum SpeechVoiceLibrary {
         return Locale(identifier: code).language.languageCode?.identifier ?? code
     }
 
-    private static func preferredLanguageVoices() -> [AVSpeechSynthesisVoice] {
-        ["en-US", "en-GB", "yue-HK", "zh-CN", "zh-HK"]
-            .compactMap { AVSpeechSynthesisVoice(language: $0) }
-            .filter { !isNoveltyVoice($0) }
-    }
 }

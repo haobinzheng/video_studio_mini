@@ -19,6 +19,11 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-19 — Pushed: `pro-version` (narration voices + Edit Story assign import)
+
+- **Summary:** Narration voice list lists **Enhanced** and **Premium** only; in-app copy explains that **Siri** personas are not available to third-party `AVSpeechSynthesizer` on iOS; removed Siri bundle probing. **Edit Story → Assign:** the trailing **+** (PhotosPicker) still appends imports to the media pool and now also appends those new clips to **Assigned to this block** while the assign sheet is open; preview jumps to the last imported clip; Studio Tip text updated.
+- **Files:** `CapcutApp/AppViewModel.swift`, `CapcutApp/ContentView.swift`, `docs/GIT_PUSH_LOG.md`.
+
 ### 2026-04-16 — Pushed: `pro-version` @ `cfad2a6` (export hardening + Edit Story preview/narration)
 
 - **Git:** `git push origin pro-version` — range `5ea3b4f..cfad2a6`.

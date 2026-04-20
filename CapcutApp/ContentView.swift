@@ -253,9 +253,18 @@ struct ContentView: View {
                 }
                 Task {
                     let appendedItems = Array(newItems.dropFirst(existingItems.count))
-                    await viewModel.appendSelectedMedia(from: appendedItems, combinedSelection: newItems)
+                    let newMediaIDs = await viewModel.appendSelectedMedia(from: appendedItems, combinedSelection: newItems)
                     await MainActor.run {
                         appendPhotoItems = viewModel.selectedPhotoItems
+                        if isStoryBlockAssignSheetPresented, !newMediaIDs.isEmpty {
+                            for id in newMediaIDs where !assignSheetDraftMediaIDs.contains(id) {
+                                assignSheetDraftMediaIDs.append(id)
+                            }
+                            if let lastImported = newMediaIDs.last,
+                               let idx = viewModel.mediaItems.firstIndex(where: { $0.id == lastImported }) {
+                                assignSheetSlideIndex = idx
+                            }
+                        }
                     }
                 }
             }
@@ -1393,7 +1402,7 @@ struct ContentView: View {
                 Text("Studio Tip")
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
-                Text("Swipe the big preview to browse; videos always start when ready (Play during loading is optional early start). Tap a pool thumbnail to jump here. Use + / − on the preview to add or remove the current clip from the block, or double-tap a pool thumbnail. Assigned clips: drag to reorder; tap to preview, double-tap to remove.")
+                Text("Swipe the big preview to browse; videos always start when ready (Play during loading is optional early start). Tap a pool thumbnail to jump here. The + at the end of the strip imports into the pool and adds those clips to this block. Use + / − on the preview to add or remove the current clip from the block, or double-tap a pool thumbnail. Assigned clips: drag to reorder; tap to preview, double-tap to remove.")
                     .font(.subheadline)
                     .foregroundStyle(.primary.opacity(0.82))
             }
@@ -2436,6 +2445,11 @@ struct ContentView: View {
             .padding(.horizontal, 10)
             .padding(.vertical, 7)
             .background(Color.white.opacity(0.72), in: Capsule())
+
+            Text("Reload after downloading Enhanced or Premium in Settings → Voices. Pick the matching language above. Siri voices are not available to FluxCut on iOS.")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
 
             if let narrationLanguageWarning = viewModel.narrationLanguageWarning {
                 HStack(spacing: 8) {
