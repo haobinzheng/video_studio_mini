@@ -1,0 +1,28 @@
+---
+description: Push project code first; update GIT_PUSH_LOG and DESIGN_NOTES locally; ship those docs on the next push
+alwaysApply: true
+---
+
+# Git: what ships on each push
+
+## What to push in a “push to repo” action
+
+1. **Push only project (source) files** — app code, assets, configs, tests, and other repo-tracked project content **excluding** the two doc files below in *this* push.
+2. **Do not** include **`docs/GIT_PUSH_LOG.md`** or **`docs/DESIGN_NOTES.md`** in the **same** commit/push as the project changes they describe.
+
+## After that push (local only)
+
+3. **Update locally on disk** (same session, after the push succeeds or when the feature is done):
+   - **`docs/GIT_PUSH_LOG.md`** — checkpoint / range / summary for what just shipped.
+   - **`docs/DESIGN_NOTES.md`** — when the change warrants design notes.
+4. **Do not** `git push` those edits yet. Leave them as **local** changes (committed or uncommitted per your workflow; they must **not** go to the remote until the next “push to repo”).
+
+## Next “push to repo”
+
+5. When the user asks to **push to the repo** again, **include** the **prior** updates to **`docs/GIT_PUSH_LOG.md`** and **`docs/DESIGN_NOTES.md`** (together with any new project files) in that push—so the two files trail the code they document by **one** push cycle.
+
+## Exceptions
+
+- If the user **explicitly** asks for a **documentation-only** push or to include docs in the same push as code, follow that instruction.
+
+Rationale: keeps the remote focused on shipped code first; log and design notes record what shipped without forcing doc commits in the same push as every code change; docs catch up on the following push.
