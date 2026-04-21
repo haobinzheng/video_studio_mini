@@ -19,6 +19,49 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-20 — Slideshow: center portrait video in 16:9 frame (fix left-heavy letterbox)
+
+- **Change:** **`VideoFrameCache`** uses a **square** **`maximumSize`** (max of render edges) instead of the 16:9 **`renderSize`** so **`AVAssetImageGenerator`** does not embed 9:16 frames in a wide padded bitmap; **`centeredAspectFitRect`** replaces **`AVMakeRect`** for explicit centering using **`cgImage`** pixel dimensions.
+- **Files:** `CapcutApp/VideoExporter.swift`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-20 — Preview export: enforce ~20s cap after full-length narration prep
+
+- **Change:** Preview runs always **`timelineSegmentsTrimmed`** to **`resolvedDuration`**; **`AVAssetExportSession.timeRange`** set in **`mergeAudioAndVideo`**, **`exportStitchedComposition`**, and smooth-story **`exportRealLifeComposition`** so muxed narration cannot extend output past the video timeline (fix: second “preview” exporting full length after final export with unchanged script).
+- **Files:** `CapcutApp/VideoExporter.swift`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-20 — Edit Story on: compact sentence-aligned caption lines
+
+- **Change:** **`sentenceAlignedCaptionDisplayText`** gains **`phraseRows`** vs **`compactLines`**. Prepared / Edit-off keeps **`phraseRows`**; **`sentenceAlignedTimedCaptionSegments`** (Edit on) uses **`compactLines`** so exports avoid many stacked short phrase rows on long utterances.
+- **Files:** `CapcutApp/VideoExporter.swift`, `docs/DESIGN_NOTES.md`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-20 — Auto-rebuild narration preview when cue timing policy changes
+
+- **Change:** **`AppViewModel.narrationPreviewCueTimingPolicy`** (mirrors segmentation policy). **`needsPreviewRefresh`** forces **`prepareNarrationPreview`** if the built policy token does not match, so final export does not reuse stale cues after timing algorithm updates; users do not need to manually “preview again.”
+- **Files:** `CapcutApp/AppViewModel.swift`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-20 — Sentence-aligned captions: utterance-accurate timing (fix Edit-off drift)
+
+- **Change:** **`NarrationPreviewBuilder.buildSentenceAlignedCues`** and **`VideoExporter.sentenceAlignedTimedCaptionSegments`** no longer extend each window with **`max(utterance, minimum)`**; timing follows measured TTS length so prepared-preview export stays in sync with muxed narration.
+- **Files:** `CapcutApp/NarrationPreviewBuilder.swift`, `CapcutApp/VideoExporter.swift`, `docs/DESIGN_NOTES.md`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-20 — Export: sentence-aligned external cues use Edit-on caption path
+
+- **Change:** **`VideoExporter.sentenceAlignedCaptionDisplayText`** shared by **`sentenceAlignedTimedCaptionSegments`** and **`captionSegments(from:externalCues:)`**. Sentence-aligned voices no longer run **`formattedCaptionText`** on full preview cue strings; non–sentence-aligned unchanged.
+- **Files:** `CapcutApp/VideoExporter.swift`, `docs/DESIGN_NOTES.md`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-20 — Preview narration: oversized single segment respects duration cap
+
+- **Issue:** With **`maximumDuration`** set (e.g. quick video preview), **`cappedPreviewSegments`** always appended the **first** segment even when its **estimated** duration alone exceeded the cap (one long paragraph → one huge TTS segment). **`applyPreviewNarrationSynthesisBudget`** skipped when **`segments.count == 1`**, so preview export could synthesize far more than the ~preview-window budget.
+- **Change:** Added **`PreviewNarrationSegmentBudget.splitToFitEstimatedBudget`** ( **`narrationSegments`** + greedy prefix binary search). **`NarrationPreviewBuilder.cappedPreviewSegments`** expands segments before accumulating; **`VideoExporter.applyPreviewNarrationSynthesisBudget`** expands then prefixes (no early return for single segment). Preview is still **honored**—it uses a **bounded prefix** of the script, not silence.
+- **Files:** `CapcutApp/PreviewNarrationSegmentBudget.swift`, `CapcutApp/NarrationPreviewBuilder.swift`, `CapcutApp/VideoExporter.swift`, `CapcutApp.xcodeproj/project.pbxproj`, `docs/DESIGN_NOTES.md`, `docs/GIT_PUSH_LOG.md`.
+
+### 2026-04-20 — Captions: sentence-aligned export matches preview (Edit Story vs whole-script)
+
+- **Issue:** With **Chinese** (sentence-aligned narration), **Edit Story** final export could show **more** on-screen caption lines than **Edit Story off**, because block export **bypasses** preview subtitle cues and **`VideoExporter.sentenceAlignedTimedCaptionSegments`** used **`formattedCaptionText` per line** (requires ASCII space before balancing), while preview used **`displayCaption`** (balance without that guard)—different line counts from the same `splitForCaptions` pieces.
+- **Change:** Added **`CaptionTextChunker.displayCaptionLine`** (shared **`balancedCaptionLine`**); **`NarrationPreviewBuilder`** and **`sentenceAlignedTimedCaptionSegments`** both use it. **`VideoExporter`** empty fallback uses **`displayCaptionLine`** on normalized joined text.
+- **Follow-up (same day):** Tried **`mergeSplitCaptionLinesToAtMostTwo`** to cap rows; reverted—merging tokenizer phrases into two dense lines hurt **perceived** narration–caption sync (phrase boundaries no longer matched speech). Kept **`displayCaptionLine`** parity only.
+- **Files:** `CapcutApp/CaptionTextChunker.swift`, `CapcutApp/NarrationPreviewBuilder.swift`, `CapcutApp/VideoExporter.swift`, `docs/DESIGN_NOTES.md`, `docs/GIT_PUSH_LOG.md`.
+
 ### 2026-04-19 — Pushed: `pro-version` @ `95a9e04` (narration voices + Edit Story assign import)
 
 - **Git:** `git push origin pro-version` — range `2263d96..95a9e04`.

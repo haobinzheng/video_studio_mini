@@ -57,8 +57,12 @@ Media behavior:
 
 Caption behavior:
 
+- **Sentence-aligned** voices (Chinese / Japanese / Lao family): **`splitForCaptions`** + per-row **`displayCaptionLine`** (**`phraseRows`**) is used for **prepared** preview cues / Edit-off export. **Edit Story on** re-synth uses **`sentenceAlignedCaptionDisplayText`** with **`compactLines`**: a single **`displayCaptionLine`** pass on the whole utterance (at most two balanced lines when whitespace allows) so long blocks are not stacked as many short comma/clause rows.
+- **Prepared preview → export:** **`captionSegments(from:externalCues:)`** uses **`phraseRows`**—same layout as preview JSON—not **`formattedCaptionText`** on the whole cue.
+- **Sentence-aligned timing:** preview cues and **`sentenceAlignedTimedCaptionSegments`** use **measured utterance duration** per segment for **[start, end)** (no minimum-display floor). Flooring with **`max(utterance, min)`** had advanced the subtitle clock faster than muxed audio, causing **cumulative lag** for Edit-off prepared narration; Edit-on re-synth stayed aligned.
 - optional **display-only** tail trim removes **soft** terminators (ASCII/CJK `,` `.` `;` `:` `…` and fullwidth `．` etc.) from the **end of each caption line** using single-scalar matching so it stays reliable; it does **not** strip closing `)` `]` `}` `"` `?` `/` or similar, so parentheticals and quotes stay intact
 - **Script narration preview** (`NarrationPreviewBuilder`): caps how many sequential `AVSpeechSynthesizer.write` passes run by **merging** adjacent segments when there would otherwise be too many (long scripts used to feel “stuck”); each pass has a **timeout** so a stuck synthesizer cannot hang the UI forever; **final export** still uses the full segmented pipeline
+- **Preview duration budget:** a **single** oversized utterance (e.g. one long paragraph) no longer bypasses the cap—**`PreviewNarrationSegmentBudget.splitToFitEstimatedBudget`** splits it using **`SpeechVoiceLibrary.narrationSegments`** then greedy prefix cuts so each piece fits the per-step budget, then **`cappedPreviewSegments`** / **`applyPreviewNarrationSynthesisBudget`** apply as before (aligned with **`VideoExporter`** preview TTS budget, ~20s output + slack)
 - captions are optional for final export
 - if `Include Captions` is on:
   - FluxCut uses the safer classic story renderer

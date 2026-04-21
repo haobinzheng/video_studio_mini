@@ -536,12 +536,15 @@ final class AppViewModel: NSObject, ObservableObject {
     private var narrationPreviewIsFullLength = false
     /// Increment when whole-script narration chunking changes so a cached full-length preview is not reused with stale TTS boundaries.
     private static let narrationPreviewSegmentationPolicy = "full-length-preview-no-utterance-merge-v3"
+    /// Bump when **`NarrationPreviewBuilder` / export** subtitle **timing** rules change (e.g. sentence-aligned utterance windows) so cached preview cues are rebuilt before export.
+    private static let narrationPreviewCueTimingPolicy = "sentence-aligned-utterance-duration-v1"
     /// Matches `NarrationPreviewBuilder`’s workspace (`utterance-preview-*.caf`).
     private static var narrationPreviewWorkspaceURL: URL {
         FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
             .appendingPathComponent("NarrationPreview", isDirectory: true)
     }
     private var narrationPreviewSegmentationPolicyAtBuild = ""
+    private var narrationPreviewCueTimingPolicyAtBuild = ""
     private var pendingUtteranceCount = 0
     private var didLoadFullVoiceList = false
     private var shouldPersistNarrationDraft = true
@@ -2393,6 +2396,8 @@ final class AppViewModel: NSObject, ObservableObject {
             || narrationPreviewNeedsStoryFingerprintRefresh()
             || (narrationPreviewAudioURL != nil
                 && narrationPreviewSegmentationPolicyAtBuild != Self.narrationPreviewSegmentationPolicy)
+            || (narrationPreviewAudioURL != nil
+                && narrationPreviewCueTimingPolicyAtBuild != Self.narrationPreviewCueTimingPolicy)
     }
 
     private func currentStoryNarrationPreviewFingerprint() -> String {
@@ -2465,6 +2470,7 @@ final class AppViewModel: NSObject, ObservableObject {
         previewSourceSpeechRate = speechRateMultiplier
         narrationPreviewIsFullLength = maximumDuration == nil
         narrationPreviewSegmentationPolicyAtBuild = Self.narrationPreviewSegmentationPolicy
+        narrationPreviewCueTimingPolicyAtBuild = Self.narrationPreviewCueTimingPolicy
         statusMessage = completedMessage
     }
 
@@ -2489,6 +2495,7 @@ final class AppViewModel: NSObject, ObservableObject {
         previewSourceSpeechRate = 1.0
         narrationPreviewIsFullLength = false
         narrationPreviewSegmentationPolicyAtBuild = ""
+        narrationPreviewCueTimingPolicyAtBuild = ""
         isNarrationPreviewPlaying = false
         stopNarrationPreviewTimer()
         if resetCaption {

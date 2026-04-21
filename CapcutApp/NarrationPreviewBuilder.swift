@@ -234,10 +234,16 @@ struct NarrationPreviewBuilder {
 
     private func cappedPreviewSegments(from segments: [String], maximumDuration: TimeInterval?) -> [String] {
         guard let maximumDuration else { return segments }
+        let expanded = segments.flatMap { segment in
+            PreviewNarrationSegmentBudget.splitToFitEstimatedBudget(
+                segment,
+                maxEstimatedSeconds: maximumDuration,
+                estimate: { estimatedSeconds(for: $0) }
+            )
+        }
         var selected: [String] = []
         var accumulated: TimeInterval = 0
-
-        for segment in segments {
+        for segment in expanded {
             let estimated = estimatedSeconds(for: segment)
             if !selected.isEmpty, accumulated + estimated > maximumDuration {
                 break
@@ -245,7 +251,6 @@ struct NarrationPreviewBuilder {
             selected.append(segment)
             accumulated += estimated
         }
-
         return selected
     }
 
@@ -384,7 +389,10 @@ struct NarrationPreviewBuilder {
         return cues
     }
 
-    /// One cue per TTS utterance; cue text may include `\n` from **`splitForCaptions`** for wrapping without extra cues.
+    /// One cue per TTS utterance; cue text follows **`splitForCaptions`** rows (phrase-aligned with speech).
+    /// Cue **[start, end)** tracks **measured** TTS duration per segment (same as muxed audio). We do **not** apply a
+    /// minimum display floor here—**`max(utterance, minimumCue)`** advanced the subtitle clock faster than speech,
+    /// so prepared-preview export captions drifted behind narration while Edit-on (re-synth) stayed aligned.
     private func buildSentenceAlignedCues(
         segments: [String],
         utteranceDurations: [TimeInterval],
@@ -403,20 +411,19 @@ struct NarrationPreviewBuilder {
                 continue
             }
 
-            let safeDuration = max(utteranceDuration, minimumCueDuration(for: text))
             let start = cursor
-            let end = min(cursor + safeDuration, totalDuration)
+            let end = min(cursor + utteranceDuration, totalDuration)
             let lines = CaptionTextChunker.splitForCaptions(normalizedText: text, voiceLanguageTag: tag)
             let shown: String
             if lines.count > 1 {
                 shown = CaptionTextChunker.strippedCaptionForDisplay(
-                    lines.map { displayCaption(for: $0) }.joined(separator: "\n")
+                    lines.map { CaptionTextChunker.displayCaptionLine(for: $0) }.joined(separator: "\n")
                 )
             } else {
-                shown = CaptionTextChunker.strippedCaptionForDisplay(displayCaption(for: text))
+                shown = CaptionTextChunker.strippedCaptionForDisplay(CaptionTextChunker.displayCaptionLine(for: text))
             }
             cues.append(SubtitleCue(text: shown, start: start, end: end))
-            cursor = end
+            cursor = min(cursor + utteranceDuration, totalDuration)
         }
 
         if let lastIndex = cues.indices.last {
@@ -436,7 +443,7 @@ struct NarrationPreviewBuilder {
         let tag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
         let pieces = CaptionTextChunker.splitForCaptions(normalizedText: normalizedSegment, voiceLanguageTag: tag)
         return pieces.map { piece in
-            let display = displayCaption(for: piece)
+            let display = CaptionTextChunker.displayCaptionLine(for: piece)
             let weight: Double
             if SpeechVoiceLibrary.containsCJKContent(in: SpeechVoiceLibrary.normalizedTimingText(piece)) {
                 weight = cjkWeight(for: piece)
@@ -445,32 +452,6 @@ struct NarrationPreviewBuilder {
             }
             return CueChunk(text: display, weight: weight)
         }
-    }
-
-    private func displayCaption(for text: String) -> String {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        let words = trimmed.split(whereSeparator: \.isWhitespace).map(String.init)
-        guard words.count >= 6 else { return trimmed }
-        return balancedCaption(trimmed)
-    }
-
-    private func balancedCaption(_ text: String) -> String {
-        let normalizedText = SpeechVoiceLibrary.normalizedCaptionText(text)
-        let words = normalizedText.split(whereSeparator: \.isWhitespace).map(String.init)
-        guard words.count >= 6 else { return normalizedText }
-
-        var bestIndex = words.count / 2
-        var bestScore = Int.max
-        for index in 2..<(words.count - 1) {
-            let left = words[..<index].joined(separator: " ")
-            let right = words[index...].joined(separator: " ")
-            let score = abs(left.count - right.count)
-            if score < bestScore {
-                bestScore = score
-                bestIndex = index
-            }
-        }
-        return words[..<bestIndex].joined(separator: " ") + "\n" + words[bestIndex...].joined(separator: " ")
     }
 
     private func englishWeight(for text: String) -> Double {

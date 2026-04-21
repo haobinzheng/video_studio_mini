@@ -574,7 +574,16 @@ struct VideoExporter {
             storyUsesCaptionIntermediateFile =
                 includeCaptions && hasVideosInTimeline && (hasMixedStoryMedia || !hasPhotosInTimeline)
         }
-        let timelineSegments = resolvedDuration < totalDuration
+        /// Always trim preview runs to **`resolvedDuration`**. Relying on **`resolvedDuration < totalDuration`** alone
+        /// could skip trimming if **`CMTime`** ordering misbehaved; muxed audio longer than the video track then
+        /// stretched **`AVAssetExportSession`** output to the full narration length after a full-length preview build.
+        let shouldTrimTimelineToResolved: Bool
+        if renderQuality == .preview, renderQuality.maximumDuration != nil {
+            shouldTrimTimelineToResolved = true
+        } else {
+            shouldTrimTimelineToResolved = CMTimeCompare(resolvedDuration, totalDuration) < 0
+        }
+        let timelineSegments = shouldTrimTimelineToResolved
             ? timelineSegmentsTrimmed(to: resolvedDuration, segments: baseTimelineSegments)
             : baseTimelineSegments
         let videoPressure = videoPressure(for: timelineSegments)
@@ -1060,7 +1069,7 @@ struct VideoExporter {
             let resolvedDuration = max(audioDuration, cueDuration, CMTime(seconds: 1, preferredTimescale: 600))
             return NarrationTimeline(
                 duration: resolvedDuration,
-                captionSegments: captionSegments(from: externalCues),
+                captionSegments: captionSegments(from: externalCues, voiceIdentifier: voiceIdentifier),
                 utteranceAudioURLs: [externalNarrationAudioURL],
                 utteranceDurations: [resolvedDuration],
                 storyBlockUtteranceRanges: nil
@@ -1177,7 +1186,7 @@ struct VideoExporter {
                 totalDuration: totalDuration,
                 voiceIdentifier: voiceIdentifier
             )
-            : captionSegments(from: externalCues)
+            : captionSegments(from: externalCues, voiceIdentifier: voiceIdentifier)
         let resolvedDuration = externalCues.isEmpty
             ? totalDuration
             : max(totalDuration, CMTime(seconds: externalCues.map(\.end).max() ?? 0, preferredTimescale: 600))
@@ -1204,18 +1213,24 @@ struct VideoExporter {
         maxEstimatedSeconds: Double,
         speechRateMultiplier: Double
     ) -> (segments: [String], blockRanges: [Range<Int>]?) {
-        guard maxEstimatedSeconds > 0, segments.count > 1 else { return (segments, blockRanges) }
+        guard maxEstimatedSeconds > 0 else { return (segments, blockRanges) }
         let effectiveRate = SpeechVoiceLibrary.effectiveSpeechRateMultiplier(for: speechRateMultiplier)
+        func est(_ s: String) -> Double {
+            estimatedSecondsForSegment(s) / max(effectiveRate, 0.1)
+        }
+        let expanded = segments.flatMap { seg in
+            PreviewNarrationSegmentBudget.splitToFitEstimatedBudget(seg, maxEstimatedSeconds: maxEstimatedSeconds, estimate: est)
+        }
+        guard !expanded.isEmpty else { return (segments, blockRanges) }
         var sum = 0.0
         var k = 0
-        for seg in segments {
-            let est = estimatedSecondsForSegment(seg) / max(effectiveRate, 0.1)
-            sum += est
+        for seg in expanded {
+            sum += est(seg)
             k += 1
             if sum >= maxEstimatedSeconds { break }
         }
         k = max(k, 1)
-        let prefix = Array(segments.prefix(k))
+        let prefix = Array(expanded.prefix(k))
         guard let ranges = blockRanges else { return (prefix, nil) }
         let n = prefix.count
         let clipped: [Range<Int>] = ranges.map { r in
@@ -1501,6 +1516,7 @@ struct VideoExporter {
         exportSession.outputURL = outputURL
         exportSession.outputFileType = .mov
         exportSession.shouldOptimizeForNetworkUse = true
+        exportSession.timeRange = CMTimeRange(start: .zero, duration: totalDuration)
 
         if !audioMixParameters.isEmpty {
             let audioMix = AVMutableAudioMix()
@@ -1663,6 +1679,7 @@ struct VideoExporter {
             }
         }
 
+        let stitchExportRange = CMTimeRange(start: .zero, duration: totalDuration)
         do {
             try await exportStitchedComposition(
                 composition,
@@ -1679,6 +1696,7 @@ struct VideoExporter {
                         frameRate: frameRate,
                         preserveSourceScale: true
                     ),
+                exportTimeRange: stitchExportRange,
                 progressMessage: canAttemptStrictPassthrough
                     ? "Exporting a passthrough video stitch."
                     : "Exporting the stitched video.",
@@ -1703,6 +1721,7 @@ struct VideoExporter {
                     frameRate: frameRate,
                     preserveSourceScale: true
                 ),
+                exportTimeRange: stitchExportRange,
                 progressMessage: "Exporting the stitched video.",
                 progressHandler: progressHandler
             )
@@ -1926,6 +1945,7 @@ struct VideoExporter {
                 frameRate: frameRate,
                 preserveSourceScale: true
             ),
+            exportTimeRange: CMTimeRange(start: .zero, duration: totalDuration),
             progressMessage: "Exporting the \(timingMode.rawValue) video.",
             progressHandler: progressHandler
         )
@@ -2021,6 +2041,7 @@ struct VideoExporter {
             outputURL: outputURL,
             audioMixParameters: [],
             videoComposition: videoComposition,
+            exportTimeRange: CMTimeRange(start: .zero, duration: duration),
             progressMessage: "Exporting the \(timingMode.rawValue) video with captions.",
             progressHandler: progressHandler
         )
@@ -2317,6 +2338,7 @@ struct VideoExporter {
         outputURL: URL,
         audioMixParameters: [AVMutableAudioMixInputParameters],
         videoComposition: AVMutableVideoComposition? = nil,
+        exportTimeRange: CMTimeRange? = nil,
         progressMessage: String,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws {
@@ -2331,6 +2353,9 @@ struct VideoExporter {
         exportSession.outputURL = outputURL
         exportSession.outputFileType = .mov
         exportSession.shouldOptimizeForNetworkUse = true
+        if let exportTimeRange {
+            exportSession.timeRange = exportTimeRange
+        }
 
         if !audioMixParameters.isEmpty {
             let audioMix = AVMutableAudioMix()
@@ -2519,6 +2544,32 @@ struct VideoExporter {
         return CGSize(width: transformedBounds.width, height: transformedBounds.height)
     }
 
+    /// Pillarboxes / letterboxes: scales `image` down to fit `renderSize` and returns a **centered** rect in
+    /// UIKit-style coordinates (matches flipped bitmap context below). Uses pixel dimensions from **`cgImage`** when
+    /// present so aspect matches what **`UIImage.draw(in:)`** renders.
+    private func centeredAspectFitRect(for image: UIImage, renderSize: CGSize) -> CGRect {
+        let pixelWidth: CGFloat
+        let pixelHeight: CGFloat
+        if let cg = image.cgImage {
+            pixelWidth = CGFloat(cg.width)
+            pixelHeight = CGFloat(cg.height)
+        } else {
+            pixelWidth = image.size.width * image.scale
+            pixelHeight = image.size.height * image.scale
+        }
+        guard pixelWidth > 0, pixelHeight > 0 else {
+            return CGRect(origin: .zero, size: renderSize)
+        }
+        let rw = renderSize.width
+        let rh = renderSize.height
+        let scale = min(rw / pixelWidth, rh / pixelHeight)
+        let fw = pixelWidth * scale
+        let fh = pixelHeight * scale
+        let x = (rw - fw) / 2
+        let y = (rh - fh) / 2
+        return CGRect(x: x, y: y, width: fw, height: fh)
+    }
+
     private func makePixelBuffer(
         from image: UIImage,
         caption: String?,
@@ -2566,7 +2617,7 @@ struct VideoExporter {
         context.setFillColor(UIColor.black.cgColor)
         context.fill(CGRect(origin: .zero, size: renderSize))
 
-        let aspectFitRect = AVMakeRect(aspectRatio: image.size, insideRect: CGRect(origin: .zero, size: renderSize))
+        let aspectFitRect = centeredAspectFitRect(for: image, renderSize: renderSize)
         UIGraphicsPushContext(context)
         image.draw(in: aspectFitRect)
 
@@ -3238,18 +3289,61 @@ struct VideoExporter {
         return CMTime(seconds: seconds, preferredTimescale: 600)
     }
 
-    private func captionSegments(from externalCues: [ExternalCue]) -> [CaptionSegment] {
-        externalCues
+    private func captionSegments(from externalCues: [ExternalCue], voiceIdentifier: String) -> [CaptionSegment] {
+        let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
+        let sentenceAligned = SpeechVoiceLibrary.usesSentenceAlignedNarration(voiceLanguageTag: voiceTag)
+        return externalCues
             .sorted { $0.start < $1.start }
-            .map {
-                CaptionSegment(
-                    text: formattedCaptionText($0.text),
+            .map { cue in
+                let text: String
+                if sentenceAligned {
+                    text = sentenceAlignedCaptionDisplayText(
+                        for: cue.text,
+                        voiceIdentifier: voiceIdentifier,
+                        layout: .phraseRows
+                    )
+                } else {
+                    text = formattedCaptionText(cue.text)
+                }
+                return CaptionSegment(
+                    text: text,
                     timeRange: CMTimeRange(
-                        start: CMTime(seconds: $0.start, preferredTimescale: 600),
-                        end: CMTime(seconds: $0.end, preferredTimescale: 600)
+                        start: CMTime(seconds: cue.start, preferredTimescale: 600),
+                        end: CMTime(seconds: cue.end, preferredTimescale: 600)
                     )
                 )
             }
+    }
+
+    private enum SentenceAlignedCaptionLayout {
+        /// Matches prepared preview: **`splitForCaptions`** clause/phrase rows (can stack many short lines).
+        case phraseRows
+        /// Edit Story **on** (re-synth): one **`displayCaptionLine`** pass on the whole utterance — at most two balanced lines when space‑delimited words allow; avoids stacked micro‑rows from comma splits.
+        case compactLines
+    }
+
+    /// Sentence-aligned display string. **`phraseRows`** matches **`NarrationPreviewBuilder`**; **`compactLines`** is for timed export when utterances are long blocks.
+    private func sentenceAlignedCaptionDisplayText(
+        for rawText: String,
+        voiceIdentifier: String,
+        layout: SentenceAlignedCaptionLayout
+    ) -> String {
+        let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
+        let norm = SpeechVoiceLibrary.normalizedCaptionText(rawText)
+        guard !norm.isEmpty else { return "" }
+
+        switch layout {
+        case .compactLines:
+            return CaptionTextChunker.strippedCaptionForDisplay(CaptionTextChunker.displayCaptionLine(for: norm))
+        case .phraseRows:
+            let lines = CaptionTextChunker.splitForCaptions(normalizedText: norm, voiceLanguageTag: voiceTag)
+            if lines.count > 1 {
+                return CaptionTextChunker.strippedCaptionForDisplay(
+                    lines.map { CaptionTextChunker.displayCaptionLine(for: $0) }.joined(separator: "\n")
+                )
+            }
+            return CaptionTextChunker.strippedCaptionForDisplay(CaptionTextChunker.displayCaptionLine(for: norm))
+        }
     }
 
     private func timedCaptionSegments(
@@ -3329,15 +3423,14 @@ struct VideoExporter {
         return segments
     }
 
-    /// One timed caption per utterance (Chinese / Japanese / Lao). **`splitForCaptions`** may insert `\n` for
-    /// wrapping only—same utterance duration, so captions are not “busy” from extra time slices.
+    /// One timed caption per utterance (Chinese / Japanese / Lao). Uses **`compactLines`** layout so long Edit Story
+    /// utterances are not split into many short phrase rows (prepared preview uses **`phraseRows`**).
     private func sentenceAlignedTimedCaptionSegments(
         from texts: [String],
         utteranceDurations: [CMTime],
         totalDuration: CMTime,
         voiceIdentifier: String
     ) -> [CaptionSegment] {
-        let voiceTag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
         var segments: [CaptionSegment] = []
         var cursor = CMTime.zero
 
@@ -3354,31 +3447,33 @@ struct VideoExporter {
                 continue
             }
 
-            let minDur = CMTime(seconds: minimumCaptionSeconds(for: norm), preferredTimescale: 600)
-            var pieceDur = CMTimeMaximum(spoken, minDur)
+            // Match **`NarrationPreviewBuilder.buildSentenceAlignedCues`**: use measured utterance length only.
+            // A minimum display floor here made each window longer than speech and cumulative caption lag vs audio.
+            var pieceDur = spoken
             if pieceDur > remaining {
                 pieceDur = remaining
             }
 
             let end = cursor + pieceDur
             let timeRange = CMTimeRange(start: cursor, end: end)
-            let lines = CaptionTextChunker.splitForCaptions(normalizedText: norm, voiceLanguageTag: voiceTag)
-            let displayText: String
-            if lines.count > 1 {
-                displayText = CaptionTextChunker.strippedCaptionForDisplay(
-                    lines.map { formattedCaptionText($0) }.joined(separator: "\n")
-                )
-            } else {
-                displayText = CaptionTextChunker.strippedCaptionForDisplay(formattedCaptionText(norm))
-            }
+            let displayText = sentenceAlignedCaptionDisplayText(
+                for: rawText,
+                voiceIdentifier: voiceIdentifier,
+                layout: .compactLines
+            )
             segments.append(CaptionSegment(text: displayText, timeRange: timeRange))
             cursor = end
         }
 
         if segments.isEmpty {
+            let joined = texts.joined(separator: " ")
             return [
                 CaptionSegment(
-                    text: CaptionTextChunker.strippedCaptionForDisplay(formattedCaptionText(texts.joined(separator: " "))),
+                    text: sentenceAlignedCaptionDisplayText(
+                        for: joined,
+                        voiceIdentifier: voiceIdentifier,
+                        layout: .compactLines
+                    ),
                     timeRange: CMTimeRange(start: .zero, duration: totalDuration)
                 )
             ]

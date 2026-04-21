@@ -62,6 +62,35 @@ enum CaptionTextChunker {
             .joined(separator: "\n")
     }
 
+    /// One line of on-screen caption after **`splitForCaptions`**: balances long space-delimited phrases into two
+    /// lines (same rules as **`NarrationPreviewBuilder`** preview cues). Used by final export sentence-aligned
+    /// captions so **Edit Story** (no preview cues) matches **whole-script** export (preview cues).
+    static func displayCaptionLine(for text: String) -> String {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let words = trimmed.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard words.count >= 6 else { return trimmed }
+        return balancedCaptionLine(for: trimmed)
+    }
+
+    private static func balancedCaptionLine(for text: String) -> String {
+        let normalizedText = SpeechVoiceLibrary.normalizedCaptionText(text)
+        let words = normalizedText.split(whereSeparator: \.isWhitespace).map(String.init)
+        guard words.count >= 6 else { return normalizedText }
+
+        var bestIndex = words.count / 2
+        var bestScore = Int.max
+        for index in 2..<(words.count - 1) {
+            let left = words[..<index].joined(separator: " ")
+            let right = words[index...].joined(separator: " ")
+            let score = abs(left.count - right.count)
+            if score < bestScore {
+                bestScore = score
+                bestIndex = index
+            }
+        }
+        return words[..<bestIndex].joined(separator: " ") + "\n" + words[bestIndex...].joined(separator: " ")
+    }
+
     /// Maps `AVSpeechSynthesisVoice.language` (BCP-47) to an `NLLanguage` for tokenization.
     static func nlLanguage(forVoiceLanguageTag tag: String) -> NLLanguage? {
         let id = tag.lowercased().replacingOccurrences(of: "_", with: "-")
