@@ -13,3 +13,7 @@ xcuserdata/
 
 # App/runtime artifacts
 RenderedVideos/
+.build/
+
+# Local secrets (keep key out of git if you only store it here)
+web3forms_key

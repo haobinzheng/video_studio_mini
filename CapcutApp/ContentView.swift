@@ -5,6 +5,12 @@ import PhotosUI
 import SwiftUI
 import UniformTypeIdentifiers
 
+// MARK: - Settings (Terms of Use; Privacy Policy and Feedback are in-app screens)
+private enum AppSettingsLinks {
+    /// Standard Apple Terms (replace with your own Terms of Use URL if you publish custom terms).
+    static let termsOfUse = URL(string: "https://www.apple.com/legal/internet-services/itunes/dev/stdeula/")!
+}
+
 struct ContentView: View {
     private struct ShareableFile: Identifiable {
         let id = UUID()
@@ -15,7 +21,7 @@ struct ContentView: View {
         case narration = "Script"
         case photos = "Media"
         case music = "Music"
-        case editStory = "Edit"
+        case editStory = "Pro"
         case video = "Video"
 
         var id: String { rawValue }
@@ -86,9 +92,7 @@ struct ContentView: View {
     }
 
     private var visibleStudioSteps: [StudioStep] {
-        StudioStep.allCases.filter { step in
-            step != .editStory || viewModel.isEditStoryProEnabled
-        }
+        StudioStep.allCases
     }
 
     var body: some View {
@@ -221,6 +225,9 @@ struct ContentView: View {
                 if newStep == .video {
                     updateRenderPreviewPlayer(for: activeRenderedVideoURL)
                 }
+                if newStep == .narration {
+                    viewModel.ensureNarrationVoiceSelectedForScriptTab()
+                }
             }
             .onChange(of: viewModel.videoPreviewURL) { _, newValue in
                 updateRenderPreviewPlayer(for: newValue)
@@ -242,6 +249,12 @@ struct ContentView: View {
                 } else {
                     // Final render finished or stopped — put preview (or final) back in the player without requiring URL @Published to change.
                     updateRenderPreviewPlayer(for: activeRenderedVideoURL)
+                }
+            }
+            .onChange(of: viewModel.isEditStoryProEnabled) { _, enabled in
+                if !enabled {
+                    selectedStoryParagraphIndices = []
+                    selectedMusicStoryParagraphIndices = []
                 }
             }
             .onChange(of: appendPhotoItems) { _, newItems in
@@ -266,11 +279,6 @@ struct ContentView: View {
                             }
                         }
                     }
-                }
-            }
-            .onChange(of: viewModel.isEditStoryProEnabled) { _, enabled in
-                if !enabled, selectedStep == .editStory {
-                    selectedStep = .narration
                 }
             }
         }
@@ -338,10 +346,10 @@ struct ContentView: View {
                     isSettingsPresented = true
                 } label: {
                     Image(systemName: "gearshape")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(.system(size: 19, weight: .semibold))
                         .foregroundStyle(.primary)
-                        .frame(width: 32, height: 32)
-                        .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                        .frame(width: 40, height: 40)
+                        .background(Color.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Settings")
@@ -361,33 +369,51 @@ struct ContentView: View {
         NavigationStack {
             List {
                 Section {
-                    HStack {
-                        Text("App")
-                            .foregroundStyle(.secondary)
-                        Spacer()
-                        Text("FluxCut")
+                    NavigationLink {
+                        settingsAboutView
+                    } label: {
+                        Label("About", systemImage: "info.circle")
                     }
+
+                    Link(destination: AppSettingsLinks.termsOfUse) {
+                        Label("Terms of Use", systemImage: "doc.plaintext")
+                    }
+
+                    NavigationLink {
+                        PrivacyPolicyView()
+                    } label: {
+                        Label("Privacy Policy", systemImage: "hand.raised.fill")
+                    }
+
+                    NavigationLink {
+                        FeedbackSubmissionView()
+                    } label: {
+                        Label("Feedback", systemImage: "envelope.fill")
+                    }
+
                     HStack {
                         Text("Version")
                             .foregroundStyle(.secondary)
                         Spacer()
                         Text(appVersionLabel)
+                            .font(.body.weight(.medium))
+                            .foregroundStyle(.primary)
                     }
-                    Text("Manage voices, media, music, and exports from one place. Clear unused data here whenever storage grows too much.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                        .padding(.vertical, 4)
-                } header: {
-                    Text("About")
                 }
 
                 Section {
-                    Toggle("Show Edit tab", isOn: $viewModel.isEditStoryProEnabled)
-                    Text("Turn off to hide the Edit workspace (placeholder for a Pro entitlement later).")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    Toggle("Enable Pro Features", isOn: $viewModel.isEditStoryProEnabled)
+                    Text(
+                        "Unlocks the full Pro tab, including Edit Story with Pro features (paragraph assignments and related tools). FluxCut Pro is a one-time in-app purchase. When Pro is off, you can open the Pro tab to see how it works; actions stay locked until you purchase."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 } header: {
-                    Text("Pro (preview)")
+                    Text("FluxCut Pro")
+                } footer: {
+                    Text("Purchase will be completed through the App Store (in-app purchase). The price is shown at checkout and may vary by region or over time.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
                 }
 
                 Section {
@@ -417,6 +443,16 @@ struct ContentView: View {
                 } header: {
                     Text("Storage")
                 }
+
+                Section {
+                    NavigationLink {
+                        settingsFAQView
+                    } label: {
+                        Label("Frequently Asked Questions", systemImage: "questionmark.circle")
+                    }
+                } header: {
+                    Text("Help")
+                }
             }
             .navigationTitle("Settings")
             .navigationBarTitleDisplayMode(.inline)
@@ -431,6 +467,127 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private var settingsAboutView: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("FluxCut")
+                    .font(.title.weight(.bold))
+                Text(
+                    "A major part of FluxCut is how you can share your experiences: use Video mode and Slideshow mode, with a full script or with no script—whichever fits your story."
+                )
+                .font(.body)
+                .foregroundStyle(.primary)
+                Text(
+                    "FluxCut turns your script, photos, videos, and music into narrated videos on your iPhone. Work in Script, Media, Music, and Video, and use the Pro tab for Edit Story with Pro features when you have Pro enabled."
+                )
+                .font(.body)
+                .foregroundStyle(.primary)
+                Text(
+                    "Manage narration voices, media, music, and exports from Settings and Storage. Clear unused data whenever your device storage needs attention."
+                )
+                .font(.body)
+                .foregroundStyle(.secondary)
+                HStack {
+                    Text("Version")
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(appVersionLabel)
+                        .font(.body.weight(.semibold))
+                }
+                .padding(.top, 8)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(20)
+        }
+        .background(Color(.secondarySystemGroupedBackground))
+        .navigationTitle("About")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private var settingsFAQView: some View {
+        List {
+            Section {
+                faqRow(
+                    question: "What is FluxCut?",
+                    answer: "FluxCut is a video studio app that combines narration, media, music, and optional captions into exported videos. You write or paste a script, pick Apple voices, arrange media, add music, then preview and render in the Video tab."
+                )
+                faqRow(
+                    question: "Which voices can I use?",
+                    answer: "FluxCut lists Enhanced and Premium voices from the system. Download voices in Settings → Accessibility → Spoken Content → Voices, then tap Reload iPhone Voices in the Script tab if needed. Siri-only personas are not available to third-party apps."
+                )
+            } header: {
+                Text("Getting started")
+            }
+
+            Section {
+                faqRow(
+                    question: "What is Play Script vs Build Preview?",
+                    answer: "Play Script uses text-to-speech to hear your current script quickly. Build Preview generates a short seekable narration sample with caption cues so you can check timing before exporting—useful for longer scripts and subtitle sync."
+                )
+                faqRow(
+                    question: "What does Clean Up do?",
+                    answer: "Clean Up normalizes paragraph breaks so blank lines separate ideas (paragraphs). That matches Edit Story with Pro features and consistent narration segmentation."
+                )
+            } header: {
+                Text("Script & narration")
+            }
+
+            Section {
+                faqRow(
+                    question: "How do Media and Music work?",
+                    answer: "Media is your photo and video pool in story order. Music can be imported files, extracted video soundtracks, or the Music Library. Levels and mixes are adjusted in the Video tab for the final render."
+                )
+                faqRow(
+                    question: "What is the Pro tab?",
+                    answer: "The Pro tab hosts Edit Story with Pro features: assign script paragraphs to media blocks and optional music segments when Pro is enabled. Without Pro, you can browse the tab to see how assignments work."
+                )
+            } header: {
+                Text("Media, music & Pro")
+            }
+
+            Section {
+                faqRow(
+                    question: "What is the difference between preview and final video?",
+                    answer: "Preview is a faster, shorter render to check layout and captions. Create Video produces the full-length export at your chosen quality and aspect ratio."
+                )
+                faqRow(
+                    question: "What is Story timing mode?",
+                    answer: "Story mode paces visuals to narration. Other modes may apply when Edit Story with Pro features is off and your project supports them. With Edit Story on, Video mode is aligned to Story blocks."
+                )
+            } header: {
+                Text("Video export")
+            }
+
+            Section {
+                faqRow(
+                    question: "What is Enable Pro Features?",
+                    answer: "Pro unlocks the full Pro tab and removes free-tier script limits. Purchase is a one-time in-app purchase; price is shown in the App Store. You can enable Pro here or on the Pro tab."
+                )
+                faqRow(
+                    question: "Clear Unused Data vs Clear Current Project?",
+                    answer: "Clear Unused Data removes stale renders and cache not tied to your current project. Clear Current Project wipes the active project’s working copies, previews, and narration preview data—use when you want a fresh start."
+                )
+            } header: {
+                Text("Pro & storage")
+            }
+        }
+        .navigationTitle("FAQ")
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    @ViewBuilder
+    private func faqRow(question: String, answer: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(question)
+                .font(.subheadline.weight(.semibold))
+            Text(answer)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+        .padding(.vertical, 4)
     }
 
     private var storageSettingsView: some View {
@@ -870,6 +1027,7 @@ struct ContentView: View {
     }
 
     private func toggleStoryParagraphSelection(_ index: Int) {
+        guard viewModel.isEditStoryProEnabled, viewModel.storyUsesBlockTimeline else { return }
         if selectedStoryParagraphIndices.contains(index) {
             selectedStoryParagraphIndices.remove(index)
             return
@@ -961,7 +1119,10 @@ struct ContentView: View {
     }
 
     private func openStoryBlockAssignSheet() {
-        guard contiguousStoryParagraphSelection, !selectedStoryParagraphIndices.isEmpty else { return }
+        guard viewModel.isEditStoryProEnabled,
+              viewModel.storyUsesBlockTimeline,
+              contiguousStoryParagraphSelection,
+              !selectedStoryParagraphIndices.isEmpty else { return }
         let sorted = selectedStoryParagraphIndices.sorted()
         guard let lo = sorted.first, let hi = sorted.last else { return }
         assignSheetRange = lo...hi
@@ -1008,6 +1169,7 @@ struct ContentView: View {
     }
 
     private func toggleMusicStoryParagraphSelection(_ index: Int) {
+        guard viewModel.isEditStoryProEnabled else { return }
         if selectedMusicStoryParagraphIndices.contains(index) {
             selectedMusicStoryParagraphIndices.remove(index)
             return
@@ -1073,7 +1235,9 @@ struct ContentView: View {
     }
 
     private func openStoryMusicAssignSheet() {
-        guard contiguousMusicStoryParagraphSelection, !selectedMusicStoryParagraphIndices.isEmpty else { return }
+        guard viewModel.isEditStoryProEnabled,
+              contiguousMusicStoryParagraphSelection,
+              !selectedMusicStoryParagraphIndices.isEmpty else { return }
         let sorted = selectedMusicStoryParagraphIndices.sorted()
         guard let lo = sorted.first, let hi = sorted.last else { return }
         if let reason = viewModel.validateMusicAssignmentSelection(lo...hi) {
@@ -1818,7 +1982,12 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.orange)
-            .disabled(!contiguousStoryParagraphSelection || selectedStoryParagraphIndices.isEmpty)
+            .disabled(
+                !viewModel.isEditStoryProEnabled
+                    || !viewModel.storyUsesBlockTimeline
+                    || !contiguousStoryParagraphSelection
+                    || selectedStoryParagraphIndices.isEmpty
+            )
 
             Button {
                 viewModel.clearAllStoryEditBlocks()
@@ -1830,7 +1999,7 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
-            .disabled(!viewModel.storyUsesBlockTimeline || viewModel.storyEditBlocks.isEmpty)
+            .disabled(!viewModel.isEditStoryProEnabled || !viewModel.storyUsesBlockTimeline || viewModel.storyEditBlocks.isEmpty)
         }
     }
 
@@ -1849,7 +2018,11 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .tint(.purple)
-            .disabled(!contiguousMusicStoryParagraphSelection || selectedMusicStoryParagraphIndices.isEmpty)
+            .disabled(
+                !viewModel.isEditStoryProEnabled
+                    || !contiguousMusicStoryParagraphSelection
+                    || selectedMusicStoryParagraphIndices.isEmpty
+            )
 
             Button {
                 viewModel.clearAllStorySegmentSoundtracks()
@@ -1860,24 +2033,213 @@ struct ContentView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.bordered)
-            .disabled(!viewModel.storyUsesBlockTimeline || viewModel.storyMusicBedSegments.isEmpty)
+            .disabled(!viewModel.isEditStoryProEnabled || !viewModel.storyUsesBlockTimeline || viewModel.storyMusicBedSegments.isEmpty)
         }
+    }
+
+    private func storyMediaBlockCaption(forParagraphIndex index: Int) -> String {
+        if let b = viewModel.storyBlockOrdinal(forParagraphIndex: index) {
+            return "Block \(b)"
+        }
+        return "Unassigned"
+    }
+
+    @ViewBuilder
+    private func editStoryMediaParagraphRow(index: Int, text: String) -> some View {
+        if viewModel.isEditStoryProEnabled {
+            Button {
+                toggleStoryParagraphSelection(index)
+            } label: {
+                storyScriptParagraphRow(
+                    index: index,
+                    text: text,
+                    isSelected: selectedStoryParagraphIndices.contains(index),
+                    assignmentCaption: storyMediaBlockCaption(forParagraphIndex: index)
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        } else {
+            storyScriptParagraphRow(
+                index: index,
+                text: text,
+                isSelected: false,
+                assignmentCaption: storyMediaBlockCaption(forParagraphIndex: index)
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .opacity(0.95)
+        }
+    }
+
+    @ViewBuilder
+    private func editStoryMusicParagraphRow(index: Int, text: String) -> some View {
+        if viewModel.isEditStoryProEnabled {
+            Button {
+                toggleMusicStoryParagraphSelection(index)
+            } label: {
+                storyScriptParagraphRow(
+                    index: index,
+                    text: text,
+                    isSelected: selectedMusicStoryParagraphIndices.contains(index),
+                    assignmentCaption: viewModel.storyMusicAssignmentCaption(forParagraphIndex: index)
+                )
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+        } else {
+            storyScriptParagraphRow(
+                index: index,
+                text: text,
+                isSelected: false,
+                assignmentCaption: viewModel.storyMusicAssignmentCaption(forParagraphIndex: index)
+            )
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .opacity(0.95)
+        }
+    }
+
+    private var editStoryMediaParagraphsOpacity: Double {
+        if !viewModel.isEditStoryProEnabled {
+            return 0.55
+        }
+        return viewModel.storyUsesBlockTimeline ? 1 : 0.5
+    }
+
+    private var editStoryMediaParagraphsPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Script paragraphs")
+                .font(.headline)
+            Text(
+                viewModel.storyUsesBlockTimeline
+                    ? "Select a contiguous paragraph range, then Assign."
+                    : "Turn on Edit Story with Pro features to select paragraphs and assign media to blocks."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            DisclosureGroup(isExpanded: $editStoryHelpExpanded) {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Import and order tracks in the Music tab. Use the Music sub-tab here to assign beds to paragraphs.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                    Text("Tap paragraphs to select a contiguous range (only unassigned lines, or only lines inside one existing block—never both). Assign stays above the list while you scroll—same idea as the Script window. Use + / − on the large preview, double-tap pool thumbnails, or tap assigned clips to preview and double-tap to remove.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 2)
+            } label: {
+                Text("How assigning works")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .tint(.orange)
+            .disabled(!viewModel.isEditStoryProEnabled || !viewModel.storyUsesBlockTimeline)
+            editStoryMediaAssignButtonRow
+            if viewModel.storyScriptParagraphs.isEmpty {
+                Text("No paragraphs yet—add Script text with blank lines between ideas, or run Clean Up on pasted text.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(viewModel.storyScriptParagraphs.enumerated()), id: \.offset) { index, text in
+                            editStoryMediaParagraphRow(index: index, text: text)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxWidth: .infinity, minHeight: 120, maxHeight: Self.editStoryParagraphScrollMaxHeight)
+                .background(Color.white.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .opacity(editStoryMediaParagraphsOpacity)
+            }
+        }
+        .padding(14)
+        .background(Color.white.opacity(0.7), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+    }
+
+    private var editStoryMusicParagraphsPanel: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Text("Script paragraphs")
+                .font(.headline)
+            Text("Select a contiguous range for one music segment, then Assign.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            DisclosureGroup(isExpanded: $editStoryHelpExpanded) {
+                Text("Music spans are independent of media blocks. Select a contiguous range that is either only unassigned lines or only lines inside one existing segment (not both). Assign stays above the scrolling list. Tap Assign to set the soundtrack for that range.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 2)
+            } label: {
+                Text("How assigning works")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .tint(.orange)
+            .disabled(!viewModel.isEditStoryProEnabled)
+            editStoryMusicAssignButtonRow
+            if viewModel.storyScriptParagraphs.isEmpty {
+                Text("No paragraphs yet—add Script text with blank lines between ideas, or run Clean Up on pasted text.")
+                    .font(.subheadline)
+                    .foregroundStyle(.secondary)
+            } else {
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 8) {
+                        ForEach(Array(viewModel.storyScriptParagraphs.enumerated()), id: \.offset) { index, text in
+                            editStoryMusicParagraphRow(index: index, text: text)
+                        }
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                }
+                .frame(maxWidth: .infinity, minHeight: 120, maxHeight: Self.editStoryParagraphScrollMaxHeight)
+                .background(Color.white.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .opacity(viewModel.isEditStoryProEnabled ? 1 : 0.55)
+            }
+        }
+        .padding(14)
+        .background(Color.white.opacity(0.64), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
     private var editStorySection: some View {
         VStack(alignment: .leading, spacing: 14) {
-            Text("Edit")
+            Text("Pro")
                 .font(.title2.weight(.semibold))
 
-            VStack(alignment: .leading, spacing: 8) {
-                Toggle("Edit Story", isOn: $viewModel.storyUsesBlockTimeline)
-                    .font(.subheadline.weight(.semibold))
-                    .onChange(of: viewModel.storyUsesBlockTimeline) { _, isOn in
-                        if isOn {
-                            selectedStoryParagraphIndices = []
-                            selectedMusicStoryParagraphIndices = []
-                        }
+            if !viewModel.isEditStoryProEnabled {
+                VStack(alignment: .leading, spacing: 12) {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "lock.fill")
+                            .font(.title3)
+                            .foregroundStyle(Color.orange)
+                        Text(
+                            "Turn on Pro Features below to use Edit Story with Pro features here, or enable them in Settings. FluxCut Pro is a one-time in-app purchase. You can scroll and read below; controls stay inactive until Pro is on."
+                        )
+                        .font(.subheadline.weight(.semibold))
+                        .foregroundStyle(.primary)
+                        .fixedSize(horizontal: false, vertical: true)
                     }
+                    Toggle("Enable Pro Features", isOn: $viewModel.isEditStoryProEnabled)
+                        .font(.subheadline.weight(.semibold))
+                    Text("The App Store shows the local price when you purchase.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
+            }
+
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle("Edit Story with Pro features", isOn: $viewModel.storyUsesBlockTimeline)
+                    .font(.subheadline.weight(.semibold))
+                    .onChange(of: viewModel.storyUsesBlockTimeline) { _, _ in
+                        selectedStoryParagraphIndices = []
+                        selectedMusicStoryParagraphIndices = []
+                    }
+                    .disabled(!viewModel.isEditStoryProEnabled)
             }
             .padding(14)
             .background(Color.white.opacity(0.62), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
@@ -1904,122 +2266,15 @@ struct ContentView: View {
                     }
                 }
                 .pickerStyle(.segmented)
+                .disabled(!viewModel.isEditStoryProEnabled)
             }
 
             if !viewModel.storyUsesBlockTimeline || editStoryEditorTab == .media {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Script paragraphs")
-                        .font(.headline)
-                    Text("Select a contiguous paragraph range, then Assign.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    DisclosureGroup(isExpanded: $editStoryHelpExpanded) {
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text("Import and order tracks in the Music tab. Use the Music sub-tab here to assign beds to paragraphs.")
-                                .font(.caption2)
-                                .foregroundStyle(.secondary)
-                            Text("Tap paragraphs to select a contiguous range (only unassigned lines, or only lines inside one existing block—never both). Assign stays above the list while you scroll—same idea as the Script window. Use + / − on the large preview, double-tap pool thumbnails, or tap assigned clips to preview and double-tap to remove.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, 2)
-                    } label: {
-                        Text("How assigning works")
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .tint(.orange)
-                    editStoryMediaAssignButtonRow
-                    if viewModel.storyScriptParagraphs.isEmpty {
-                        Text("No paragraphs yet—add Script text with blank lines between ideas, or run Clean Up on pasted text.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 8) {
-                                ForEach(Array(viewModel.storyScriptParagraphs.enumerated()), id: \.offset) { index, text in
-                                    Button {
-                                        toggleStoryParagraphSelection(index)
-                                    } label: {
-                                        storyScriptParagraphRow(
-                                            index: index,
-                                            text: text,
-                                            isSelected: selectedStoryParagraphIndices.contains(index),
-                                            assignmentCaption: {
-                                                if let b = viewModel.storyBlockOrdinal(forParagraphIndex: index) {
-                                                    return "Block \(b)"
-                                                }
-                                                return "Unassigned"
-                                            }()
-                                        )
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .contentShape(Rectangle())
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 120, maxHeight: Self.editStoryParagraphScrollMaxHeight)
-                        .background(Color.white.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    }
-                }
-                .padding(14)
-                .background(Color.white.opacity(0.7), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                editStoryMediaParagraphsPanel
             }
 
             if viewModel.storyUsesBlockTimeline, editStoryEditorTab == .music {
-                VStack(alignment: .leading, spacing: 10) {
-                    Text("Script paragraphs")
-                        .font(.headline)
-                    Text("Select a contiguous range for one music segment, then Assign.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
-                    DisclosureGroup(isExpanded: $editStoryHelpExpanded) {
-                        Text("Music spans are independent of media blocks. Select a contiguous range that is either only unassigned lines or only lines inside one existing segment (not both). Assign stays above the scrolling list. Tap Assign to set the soundtrack for that range.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                            .padding(.top, 2)
-                    } label: {
-                        Text("How assigning works")
-                            .font(.subheadline.weight(.semibold))
-                    }
-                    .tint(.orange)
-                    editStoryMusicAssignButtonRow
-                    if viewModel.storyScriptParagraphs.isEmpty {
-                        Text("No paragraphs yet—add Script text with blank lines between ideas, or run Clean Up on pasted text.")
-                            .font(.subheadline)
-                            .foregroundStyle(.secondary)
-                    } else {
-                        ScrollView {
-                            LazyVStack(alignment: .leading, spacing: 8) {
-                                ForEach(Array(viewModel.storyScriptParagraphs.enumerated()), id: \.offset) { index, text in
-                                    Button {
-                                        toggleMusicStoryParagraphSelection(index)
-                                    } label: {
-                                        storyScriptParagraphRow(
-                                            index: index,
-                                            text: text,
-                                            isSelected: selectedMusicStoryParagraphIndices.contains(index),
-                                            assignmentCaption: viewModel.storyMusicAssignmentCaption(forParagraphIndex: index)
-                                        )
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .contentShape(Rectangle())
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        .frame(maxWidth: .infinity, minHeight: 120, maxHeight: Self.editStoryParagraphScrollMaxHeight)
-                        .background(Color.white.opacity(0.55), in: RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    }
-                }
-                .padding(14)
-                .background(Color.white.opacity(0.64), in: RoundedRectangle(cornerRadius: 18, style: .continuous))
+                editStoryMusicParagraphsPanel
             }
         }
         .padding(20)
@@ -2383,7 +2638,7 @@ struct ContentView: View {
             Text("Script")
                 .font(.title2.weight(.semibold))
                 .onTapGesture { isNarrationFocused = false }
-            Text("Edit Story treats a paragraph as text between blank lines. Use an empty line between ideas, or tap Clean Up to insert breaks when pasted text only has single line breaks.")
+            Text("Edit Story with Pro features uses paragraphs as text between blank lines. Use an empty line between ideas, or tap Clean Up to insert breaks when pasted text only has single line breaks.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .onTapGesture { isNarrationFocused = false }
@@ -2610,7 +2865,7 @@ struct ContentView: View {
             HStack(spacing: 10) {
                 scriptMetaPill(
                     title: "Length",
-                    value: "\(viewModel.narrationText.count) characters",
+                    value: viewModel.scriptLengthPillValue,
                     systemImage: "text.alignleft"
                 )
 
@@ -2738,6 +2993,15 @@ struct ContentView: View {
                 .scrollContentBackground(.hidden)
                 .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .focused($isNarrationFocused)
+
+            if !viewModel.isEditStoryProEnabled {
+                Text(
+                    "Free tier: up to \(AppViewModel.freeTierLatinWordLimit) words for Latin-based languages (e.g. English), or \(AppViewModel.freeTierNonLatinCharacterLimit) characters for scripts such as Chinese, Japanese, Korean, Arabic, and Hindi. Enable Pro Features above for unlimited script length and the full Pro tab (Edit Story with Pro features)."
+                )
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            }
 
             if isNarrationPreviewSectionVisible {
                 narrationPreviewSection
@@ -3612,7 +3876,7 @@ struct ContentView: View {
                     HStack(spacing: 8) {
                         Image(systemName: "rectangle.split.3x1.fill")
                             .font(.system(size: 12, weight: .bold))
-                        Text("Edit has a blocking layout issue. Open the Edit tab and fix the warnings to export.")
+                        Text("Edit Story with Pro features has a blocking layout issue. Open the Pro tab and fix the warnings to export.")
                             .font(.caption.weight(.semibold))
                     }
                     .foregroundStyle(Color.orange.opacity(0.95))

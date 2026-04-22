@@ -261,19 +261,36 @@ final class AppViewModel: NSObject, ObservableObject {
 
     @Published var mediaItems: [MediaItem] = []
     @Published var narrationText = """
-    Welcome to FluxCut. This introduction is both a sample script and a quick user guide you can read or play out loud.
+    Welcome to **FluxCut**. This introduction is long on purpose: if you read it in your head it usually takes about five or six minutes, and you can tap **Play Script** to hear the whole tour in whatever voice you choose. Replace it whenever you like, or load it again from the **Introduction** action when the script is empty. Think of the following paragraphs as a narrated map of the app.
 
-    Start in Script. Type or paste your narration, then choose an iPhone voice for playback and export. FluxCut lists **Enhanced** and **Premium** voices you download in **Settings** (Accessibility → Spoken Content → Voices). **Siri** personas (Voice 1, Voice 2, … in Settings) are not available to third-party apps on iOS—only Apple’s own features can use them. Built-in Standard compact voices such as base Samantha are not listed here until you upgrade tier in Settings. You can hide voices you do not want, and tap Reload iPhone Voices after you change or download voices in Settings.
+    **What you are building.** **FluxCut** is an iPhone studio for shareable video from your words, your photos, your video clips, and your music. Most people work in a loop: **Script**, then **Media**, then **Music**, then **Video**, with the **Pro** tab available when you want **Edit Story** tools. You can also leave the script area blank and build projects that are mostly music and pictures—**Script** helps when you want narration, but you are not required to type a script for every run.
 
-    Use Play Script to hear the current script right away. Build Preview is an optional testing tool. It creates a shorter narration preview so you can check timing and subtitle flow before making the final video.
+    **Script: text, language, and voice.** Type or paste your narration. Blank lines separate paragraphs; that shape matters for **Clean Up**, for captions, and for **Edit Story** when you align paragraphs to blocks. Choose a language group, then a voice. **FluxCut** lists **Enhanced** and **Premium** voices; download more in iOS **Settings** → **Accessibility** → **Spoken Content** → **Voices**, then return here and tap **Reload iPhone Voices**. **Siri**-style personas in Settings (**Voice 1**, **Voice 2**) are not available to third-party apps on iOS, only to Apple’s own features.
 
-    In Media, import photos and videos, then review the order. In Music, you can import normal audio files or use a video soundtrack. FluxCut can extract audio from a video and let you reuse it as music.
+    You can **hide** voices in the list, and adjust **speech** rate so the delivery matches the mood you want. **Reload iPhone Voices** if Standard voices look missing after a tier or download change.
 
-    In Video, choose the aspect ratio, preview the result, and create the final render. You can also adjust the final mix for narration, original video sound, and music.
+    **Hearing the script before the full video.** **Play Script** runs text-to-speech on the current text so you can review wording quickly. **Build Preview** is optional: it makes a shorter narration run with a seekable timeline and on-screen caption cues, which is useful to check pace and subtitle flow before a long render. The **Clean Up** control normalizes line breaks to tidy paragraph shapes when you need it. If you are on the free tier, long scripts in Latin-style languages are limited to a set word count; other writing systems can hit a character cap. **Enable Pro Features** in **Settings** lifts the script cap and unlocks the full **Pro** tab, including **Edit Story**, as described in the purchase screen. If the app ever trims the script, the status line explains the rule.
 
-    Replace this introduction with your own script any time and start building your video.
+    **Media and order.** In **Media**, pick photos and videos; the order in the list is the story order. Reorder by dragging. Each clip and still feeds the **Video** tab according to the timing mode you select.
+
+    **Music and sound beds.** In **Music**, import files, use the **Music** library, or import a **video** file and **Extract** its audio into your soundtrack. You can keep several soundtrack items when the project needs more than one background.
+
+    **Pro and Edit Story.** The **Pro** tab hosts **Edit Story**. With **Pro** on, you assign script paragraphs to media blocks and, where the project is set up for it, to music segments, so visuals and beds follow the narration. With **Pro** off, the tab is visible in a read-only way until you buy in. If you use the block-based **Edit Story** workflow, the **Video** tab may limit timing choices so exports stay consistent with the blocks; see the in-app hints and **FAQ** for how **Video**, **Story**, and **Slideshow** modes show up in your case.
+
+    **Video, timing, and final mix.** In **Video**, choose a timing mode among **Video**, **Story**, and **Slideshow** when the picker offers them. **Story** paces the edit to your narration. **Slideshow** fits a more slide-focused timing. The **Video** option appears when that export path matches your media—read the card labels. If **Edit Story** (**Pro**) is on, the app may keep you on **Story** so your assigned blocks and narration stay in sync. Set aspect ratio, whether burned-in captions are on, and a caption look; use **Preview Video** for a short check, then **Create Video** for a full run at the quality, resolution, and frame-rate you pick. A mix area balances narration, **video** sound, and the music bed. If you change script, voice, media, mix, or captions, the app drops stale file URLs so the player is not out of date—rebuild, then **share** like any other movie.
+
+    **Settings, storage, and data.** The **Settings** entry from the main screen opens **About**, **Storage**, legal links, feedback, the **Pro** switch, and version details. You can clear **unused** data or the current project from **Storage** when space is tight. The script is saved as a draft; clearing a project can remove that draft, so keep copies of final exports you care about.
+
+    **Start.** Replace this with your own script, or go straight to **Media**, **Music**, and a no-script run with **Slideshow** or **Video** if that fits. Happy editing.
     """ {
         didSet {
+            if !isEditStoryProEnabled {
+                let clamped = Self.clampedNarrationForFreeTier(narrationText, languageGroup: selectedVoiceLanguage)
+                if clamped != narrationText {
+                    narrationText = clamped
+                    return
+                }
+            }
             saveNarrationDraft()
             if oldValue != narrationText {
                 reconcileStoryEditBlocksWithScript()
@@ -330,6 +347,7 @@ final class AppViewModel: NSObject, ObservableObject {
                 stopLiveNarrationPlayback(reason: "Voice updated. Tap Play Script to hear the new selection.")
                 markAllVideoRendersDirty(reason: "Voice updated. Build a new preview or final render to hear the change.")
                 invalidateNarrationPreviewIfNeeded()
+                applyFreeTierNarrationLimitIfNeeded(announceTrim: true)
             }
         }
     }
@@ -434,11 +452,108 @@ final class AppViewModel: NSObject, ObservableObject {
 
     private static let editStoryProDefaultsKey = "fluxcut.isEditStoryProEnabled"
 
-    /// When false, the Edit tab is hidden (placeholder for StoreKit Pro).
-    @Published var isEditStoryProEnabled: Bool = UserDefaults.standard.object(forKey: "fluxcut.isEditStoryProEnabled") as? Bool ?? true {
+    /// When **false**, free-tier script limits apply and the Pro tab is view-only (assignments require Pro). Toggle in Settings labels **Enable Pro Features**; purchase is a one-time in-app buy (StoreKit integration can wire to this flag).
+    @Published var isEditStoryProEnabled: Bool = UserDefaults.standard.object(forKey: AppViewModel.editStoryProDefaultsKey) as? Bool ?? true {
         didSet {
             UserDefaults.standard.set(isEditStoryProEnabled, forKey: Self.editStoryProDefaultsKey)
+            if !isEditStoryProEnabled {
+                applyFreeTierNarrationLimitIfNeeded(announceTrim: true)
+            }
         }
+    }
+
+    /// Free tier: Latin-script languages use a **word** cap (space-separated words, e.g. English).
+    static let freeTierLatinWordLimit = 850
+    /// Free tier: non-Latin scripts (e.g. Chinese, Japanese, Korean, Arabic) use a **character** cap (Swift `Character` count).
+    static let freeTierNonLatinCharacterLimit = 1800
+
+    /// Language groups that use the character limit; all others use the word limit for the free tier.
+    private static let nonLatinScriptLanguageGroups: Set<String> = [
+        "zh", "yue", "wuu", "ja", "ko",
+        "ar", "he", "fa", "ur", "ps", "sd",
+        "hi", "bn", "pa", "ta", "te", "ml", "kn", "gu", "or", "mr", "ne", "si", "kok", "as",
+        "my", "km", "lo", "th", "bo", "dz",
+        "ru", "uk", "bg", "be", "kk", "ky", "mk", "mn", "sr", "tt", "uz",
+        "el", "hy", "ka",
+        "am", "ti",
+    ]
+
+    static func freeTierUsesCharacterCount(languageGroup: String) -> Bool {
+        nonLatinScriptLanguageGroups.contains(languageGroup.lowercased())
+    }
+
+    /// Latin-style word count (whitespace-separated tokens; `"this is a big"` → 4).
+    static func latinWordCount(in text: String) -> Int {
+        var n = 0
+        var inToken = false
+        for ch in text {
+            if ch.isWhitespace || ch.isNewline {
+                inToken = false
+            } else {
+                if !inToken {
+                    n += 1
+                    inToken = true
+                }
+            }
+        }
+        return n
+    }
+
+    private static func truncateToLatinWordCount(_ text: String, maxWords: Int) -> String {
+        guard maxWords > 0 else { return "" }
+        var wordCount = 0
+        var i = text.startIndex
+        var endOfIncludedWords = text.startIndex
+        while i < text.endIndex {
+            while i < text.endIndex, text[i].isWhitespace || text[i].isNewline {
+                i = text.index(after: i)
+            }
+            guard i < text.endIndex else { break }
+            wordCount += 1
+            if wordCount > maxWords {
+                return String(text[..<endOfIncludedWords])
+            }
+            while i < text.endIndex, !(text[i].isWhitespace || text[i].isNewline) {
+                i = text.index(after: i)
+            }
+            endOfIncludedWords = i
+        }
+        return text
+    }
+
+    static func clampedNarrationForFreeTier(_ text: String, languageGroup: String) -> String {
+        if freeTierUsesCharacterCount(languageGroup: languageGroup) {
+            guard text.count > freeTierNonLatinCharacterLimit else { return text }
+            return String(text.prefix(freeTierNonLatinCharacterLimit))
+        }
+        guard latinWordCount(in: text) > freeTierLatinWordLimit else { return text }
+        return truncateToLatinWordCount(text, maxWords: freeTierLatinWordLimit)
+    }
+
+    func applyFreeTierNarrationLimitIfNeeded(announceTrim: Bool) {
+        guard !isEditStoryProEnabled else { return }
+        let clamped = Self.clampedNarrationForFreeTier(narrationText, languageGroup: selectedVoiceLanguage)
+        guard clamped != narrationText else { return }
+        narrationText = clamped
+        if announceTrim {
+            if Self.freeTierUsesCharacterCount(languageGroup: selectedVoiceLanguage) {
+                statusMessage = "Script trimmed to the free limit (\(Self.freeTierNonLatinCharacterLimit) characters for this voice’s script type)."
+            } else {
+                statusMessage = "Script trimmed to the free limit (\(Self.freeTierLatinWordLimit) words for Latin-based languages)."
+            }
+        }
+    }
+
+    /// Script tab **Length** pill. Pro off: show current size only (do not reveal free-tier caps in the UI).
+    var scriptLengthPillValue: String {
+        if isEditStoryProEnabled {
+            return "\(narrationText.count) characters"
+        }
+        if Self.freeTierUsesCharacterCount(languageGroup: selectedVoiceLanguage) {
+            return "\(narrationText.count) characters"
+        }
+        let words = Self.latinWordCount(in: narrationText)
+        return "\(words) words"
     }
 
     /// One music bed on a contiguous **script** paragraph range (independent of media blocks).
@@ -584,6 +699,7 @@ final class AppViewModel: NSObject, ObservableObject {
             selectedVoiceIdentifier = firstVoice.id
             selectedVoiceName = firstVoice.displayName
         }
+        applyFreeTierNarrationLimitIfNeeded(announceTrim: false)
     }
 
     func playNarration() {
@@ -786,7 +902,7 @@ final class AppViewModel: NSObject, ObservableObject {
         stopLiveNarrationPlayback()
         narrationText = cleanedText
         reconcileStoryEditBlocksWithScript()
-        statusMessage = "Script cleaned. Paragraphs are separated by a blank line for Edit Story blocks."
+        statusMessage = "Script cleaned. Paragraphs are separated by a blank line for Edit Story with Pro features (blocks)."
     }
 
     private func stopLiveNarrationPlayback(reason: String? = nil) {
@@ -807,17 +923,27 @@ final class AppViewModel: NSObject, ObservableObject {
         stopLiveNarrationPlayback()
         shouldPersistNarrationDraft = false
         narrationText = """
-        Welcome to FluxCut. This introduction is both a sample script and a quick user guide you can read or play out loud.
+        Welcome to **FluxCut**. This introduction is long on purpose: if you read it in your head it usually takes about five or six minutes, and you can tap **Play Script** to hear the whole tour in whatever voice you choose. Replace it whenever you like, or load it again from the **Introduction** action when the script is empty. Think of the following paragraphs as a narrated map of the app.
 
-        Start in Script. Type or paste your narration, then choose an iPhone voice for playback and export. FluxCut lists **Enhanced** and **Premium** voices you download in **Settings** (Accessibility → Spoken Content → Voices). **Siri** personas (Voice 1, Voice 2, … in Settings) are not available to third-party apps on iOS—only Apple’s own features can use them. Built-in Standard compact voices such as base Samantha are not listed here until you upgrade tier in Settings. You can hide voices you do not want, and tap Reload iPhone Voices after you change or download voices in Settings.
+        **What you are building.** **FluxCut** is an iPhone studio for shareable video from your words, your photos, your video clips, and your music. Most people work in a loop: **Script**, then **Media**, then **Music**, then **Video**, with the **Pro** tab available when you want **Edit Story** tools. You can also leave the script area blank and build projects that are mostly music and pictures—**Script** helps when you want narration, but you are not required to type a script for every run.
 
-        Use Play Script to hear the current script right away. Build Preview is an optional testing tool. It creates a shorter narration preview so you can check timing and subtitle flow before making the final video.
+        **Script: text, language, and voice.** Type or paste your narration. Blank lines separate paragraphs; that shape matters for **Clean Up**, for captions, and for **Edit Story** when you align paragraphs to blocks. Choose a language group, then a voice. **FluxCut** lists **Enhanced** and **Premium** voices; download more in iOS **Settings** → **Accessibility** → **Spoken Content** → **Voices**, then return here and tap **Reload iPhone Voices**. **Siri**-style personas in Settings (**Voice 1**, **Voice 2**) are not available to third-party apps on iOS, only to Apple’s own features.
 
-        In Media, import photos and videos, then review the order. In Music, you can import normal audio files or use a video soundtrack. FluxCut can extract audio from a video and let you reuse it as music.
+        You can **hide** voices in the list, and adjust **speech** rate so the delivery matches the mood you want. **Reload iPhone Voices** if Standard voices look missing after a tier or download change.
 
-        In Video, choose the aspect ratio, preview the result, and create the final render. You can also adjust the final mix for narration, original video sound, and music.
+        **Hearing the script before the full video.** **Play Script** runs text-to-speech on the current text so you can review wording quickly. **Build Preview** is optional: it makes a shorter narration run with a seekable timeline and on-screen caption cues, which is useful to check pace and subtitle flow before a long render. The **Clean Up** control normalizes line breaks to tidy paragraph shapes when you need it. If you are on the free tier, long scripts in Latin-style languages are limited to a set word count; other writing systems can hit a character cap. **Enable Pro Features** in **Settings** lifts the script cap and unlocks the full **Pro** tab, including **Edit Story**, as described in the purchase screen. If the app ever trims the script, the status line explains the rule.
 
-        Replace this introduction with your own script any time and start building your video.
+        **Media and order.** In **Media**, pick photos and videos; the order in the list is the story order. Reorder by dragging. Each clip and still feeds the **Video** tab according to the timing mode you select.
+
+        **Music and sound beds.** In **Music**, import files, use the **Music** library, or import a **video** file and **Extract** its audio into your soundtrack. You can keep several soundtrack items when the project needs more than one background.
+
+        **Pro and Edit Story.** The **Pro** tab hosts **Edit Story**. With **Pro** on, you assign script paragraphs to media blocks and, where the project is set up for it, to music segments, so visuals and beds follow the narration. With **Pro** off, the tab is visible in a read-only way until you buy in. If you use the block-based **Edit Story** workflow, the **Video** tab may limit timing choices so exports stay consistent with the blocks; see the in-app hints and **FAQ** for how **Video**, **Story**, and **Slideshow** modes show up in your case.
+
+        **Video, timing, and final mix.** In **Video**, choose a timing mode among **Video**, **Story**, and **Slideshow** when the picker offers them. **Story** paces the edit to your narration. **Slideshow** fits a more slide-focused timing. The **Video** option appears when that export path matches your media—read the card labels. If **Edit Story** (**Pro**) is on, the app may keep you on **Story** so your assigned blocks and narration stay in sync. Set aspect ratio, whether burned-in captions are on, and a caption look; use **Preview Video** for a short check, then **Create Video** for a full run at the quality, resolution, and frame-rate you pick. A mix area balances narration, **video** sound, and the music bed. If you change script, voice, media, mix, or captions, the app drops stale file URLs so the player is not out of date—rebuild, then **share** like any other movie.
+
+        **Settings, storage, and data.** The **Settings** entry from the main screen opens **About**, **Storage**, legal links, feedback, the **Pro** switch, and version details. You can clear **unused** data or the current project from **Storage** when space is tight. The script is saved as a draft; clearing a project can remove that draft, so keep copies of final exports you care about.
+
+        **Start.** Replace this with your own script, or go straight to **Media**, **Music**, and a no-script run with **Slideshow** or **Video** if that fits. Happy editing.
         """
         shouldPersistNarrationDraft = true
         statusMessage = "Introduction loaded."
@@ -1406,7 +1532,7 @@ final class AppViewModel: NSObject, ObservableObject {
            selectedTimingMode == .story,
            storyBlockValidationErrors().isEmpty,
            storyBlockDescriptorForExport == nil {
-            statusMessage = "Could not build Edit Story blocks for export. Open Edit Story and assign pool media to every paragraph block, then try again."
+            statusMessage = "Could not build Edit Story with Pro features blocks for export. Turn on Edit Story with Pro features on the Pro tab and assign pool media to every paragraph block, then try again."
             exportProgress = 0
             if renderQuality == .preview {
                 isPreparingVideoPreview = false
@@ -3477,6 +3603,9 @@ final class AppViewModel: NSObject, ObservableObject {
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
         if exportedVideoURL != nil || videoPreviewURL != nil {
+            videoPreviewURL = nil
+            exportedVideoURL = nil
+            exportProgress = 0
             statusMessage = reason
         }
     }
@@ -3500,12 +3629,24 @@ final class AppViewModel: NSObject, ObservableObject {
 
     private func reconcileSelectedVoice() {
         let matchingVoices = voicesForSelectedLanguage
+        if matchingVoices.isEmpty {
+            selectedVoiceIdentifier = ""
+            selectedVoiceName = "No Apple voice selected yet."
+            return
+        }
         if matchingVoices.contains(where: { $0.id == selectedVoiceIdentifier }) {
             selectedVoiceName = selectedVoiceDisplayName
             return
         }
-        selectedVoiceIdentifier = ""
-        selectedVoiceName = "No Apple voice selected yet."
+        // After a language change (or a hidden voice), pick the first listed voice for that language so play/export always has a valid choice.
+        if let first = matchingVoices.first {
+            selectedVoiceIdentifier = first.id
+        }
+    }
+
+    /// Re-run voice selection when the user returns to the Script step (e.g. ensure a voice is chosen if the list was reconciled to empty).
+    func ensureNarrationVoiceSelectedForScriptTab() {
+        reconcileSelectedVoice()
     }
 
     private func reconcileSelectedVoiceLanguage() {
