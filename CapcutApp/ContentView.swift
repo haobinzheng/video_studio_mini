@@ -3,6 +3,7 @@ import Combine
 import Photos
 import PhotosUI
 import SwiftUI
+import UIKit
 import UniformTypeIdentifiers
 
 // MARK: - Settings (Terms of Use; Privacy Policy and Feedback are in-app screens)
@@ -134,6 +135,7 @@ struct ContentView: View {
                 }
             }
             .background(appBackground)
+            .onAppear { viewModel.reconcileProWatermarkGate() }
             .navigationTitle("")
             .navigationBarTitleDisplayMode(.inline)
             .sheet(isPresented: $isSettingsPresented) {
@@ -442,6 +444,22 @@ struct ContentView: View {
                     }
                 } header: {
                     Text("Storage")
+                }
+
+                Section {
+                    NavigationLink {
+                        WatermarkSettingsDetailView(viewModel: viewModel)
+                    } label: {
+                        HStack {
+                            Text("Watermark")
+                            Spacer()
+                            Text(viewModel.isEditStoryProEnabled ? (viewModel.isWatermarkEnabled ? "On" : "Off") : "Pro")
+                                .font(.subheadline)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                } header: {
+                    Text("Video")
                 }
 
                 Section {

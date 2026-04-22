@@ -22,6 +22,7 @@
 		A1B2C3D41E00002100000001 /* StoryScriptPartition.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001700000001 /* StoryScriptPartition.swift */; };
 		A1B2C3D41E00002300000001 /* PreviewNarrationSegmentBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001800000001 /* PreviewNarrationSegmentBudget.swift */; };
 		A1B2C3D41E00002400000001 /* SettingsSupportViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001900000001 /* SettingsSupportViews.swift */; };
+		A1B2C3D41E00002500000001 /* WatermarkSettingsDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001A00000001 /* WatermarkSettingsDetailView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -42,6 +43,7 @@
 		A1B2C3D41D00001700000001 /* StoryScriptPartition.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StoryScriptPartition.swift; sourceTree = "<group>"; };
 		A1B2C3D41D00001800000001 /* PreviewNarrationSegmentBudget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PreviewNarrationSegmentBudget.swift; sourceTree = "<group>"; };
 		A1B2C3D41D00001900000001 /* SettingsSupportViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSupportViews.swift; sourceTree = "<group>"; };
+		A1B2C3D41D00001A00000001 /* WatermarkSettingsDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatermarkSettingsDetailView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -75,6 +77,7 @@
 				A1B2C3D41D00001700000001 /* StoryScriptPartition.swift */,
 				A1B2C3D41D00001800000001 /* PreviewNarrationSegmentBudget.swift */,
 				A1B2C3D41D00001900000001 /* SettingsSupportViews.swift */,
+				A1B2C3D41D00001A00000001 /* WatermarkSettingsDetailView.swift */,
 				A1B2C3D41D00001300000001 /* SubtitleTimelineEngine.swift */,
 				A1B2C3D41D00001400000001 /* FluxCutLogoMark.swift */,
 				A1B2C3D41D00000900000001 /* SampleMusic/dream_culture.mp3 */,
@@ -177,6 +180,7 @@
 				A1B2C3D41E00002100000001 /* StoryScriptPartition.swift in Sources */,
 				A1B2C3D41E00002300000001 /* PreviewNarrationSegmentBudget.swift in Sources */,
 				A1B2C3D41E00002400000001 /* SettingsSupportViews.swift in Sources */,
+				A1B2C3D41E00002500000001 /* WatermarkSettingsDetailView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

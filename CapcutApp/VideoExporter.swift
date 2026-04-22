@@ -172,6 +172,48 @@ struct VideoExporter {
         let quality: VideoModeQuality
     }
 
+    /// User-controlled overlay (Settings): text or image, burned into every exported video frame.
+    struct WatermarkSettings: Equatable, Sendable {
+        enum Mode: String, Sendable {
+            case text
+            case image
+        }
+
+        /// Where the watermark sits within the output frame (matches Settings → Watermark “Position”). Uses UIKit-style
+        /// coordinates: origin top-left, y increases down (for **both** `CALayer` and string drawing in the flipped pixel buffer).
+        enum Anchor: String, Sendable, CaseIterable, Identifiable, Equatable {
+            case topLeft
+            case topRight
+            case bottomLeft
+            case bottomRight
+
+            var id: String { rawValue }
+        }
+
+        var isEnabled: Bool
+        var mode: Mode
+        var text: String
+        var imageFileURL: URL?
+        var anchor: Anchor
+        /// 0.0...1.0: master strength (opacity) for the overlay; UI typically exposes ~0.1...1.0. PNG alpha is preserved and then multiplied by this.
+        var opacity: CGFloat
+        /// ~0.35...4.0: multiplies the resolution-based text/image size (FluxCut Pro; non‑Pro export uses 1.0).
+        var sizeScale: CGFloat
+
+        var isRenderable: Bool {
+            guard isEnabled else { return false }
+            switch mode {
+            case .text:
+                return !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            case .image:
+                guard let url = imageFileURL, FileManager.default.isReadableFile(atPath: url.path) else {
+                    return false
+                }
+                return true
+            }
+        }
+    }
+
     struct MediaItem {
         enum Kind {
             case photo
@@ -392,6 +434,7 @@ struct VideoExporter {
         exportArtifactID: UUID,
         /// When set (e.g. `Documents/NarrationPreview` after full-length **prepareNarrationPreview**), Edit Story export copies `utterance-preview-*.caf` instead of re-synthesizing hundreds of segments.
         prebuiltUtteranceSourceDirectory: URL? = nil,
+        watermarkSettings: WatermarkSettings? = nil,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws -> URL {
         guard !mediaItems.isEmpty else {
@@ -416,6 +459,7 @@ struct VideoExporter {
                 maximumDuration: renderQuality.maximumDuration,
                 videoModeSettings: renderQuality == .preview ? nil : videoModeSettings,
                 outputURL: finalURL,
+                watermarkSettings: watermarkSettings,
                 progressHandler: progressHandler
             )
             progressHandler?(1.0, "Finalizing exported video.")
@@ -639,6 +683,10 @@ struct VideoExporter {
                 fallbackRenderSize: renderProfile.renderSize,
                 fallbackFrameRate: renderProfile.frameRate
             )
+            let willBurnCaptionsAfter = includeCaptions && (timingMode == .realLife || storyUsesCaptionIntermediateFile)
+            let watermarkInComposition: WatermarkSettings? = (willBurnCaptionsAfter && (watermarkSettings?.isRenderable == true))
+                ? nil
+                : watermarkSettings
             let smoothOutputURL: URL
             if includeCaptions && (timingMode == .realLife || storyUsesCaptionIntermediateFile) {
                 let captionBaseName: String
@@ -669,6 +717,7 @@ struct VideoExporter {
                 outputURL: smoothOutputURL,
                 storySegmentMusic: storySegmentMusicSlots,
                 timingMode: timingMode,
+                watermarkSettings: watermarkInComposition,
                 progressHandler: progressHandler
             )
 
@@ -684,6 +733,7 @@ struct VideoExporter {
                     captionStyle: captionStyle,
                     outputURL: finalURL,
                     timingMode: timingMode,
+                    watermarkSettings: watermarkSettings,
                     progressHandler: progressHandler
                 )
             }
@@ -703,6 +753,7 @@ struct VideoExporter {
             frameRate: renderProfile.frameRate,
             videoSampleStride: renderProfile.videoSampleStride,
             captionStyle: captionStyle,
+            watermarkSettings: watermarkSettings,
             progressHandler: progressHandler,
             outputURL: slideshowURL
         )
@@ -1289,6 +1340,7 @@ struct VideoExporter {
         frameRate: Int32,
         videoSampleStride: Int32,
         captionStyle: CaptionStyle = .normal,
+        watermarkSettings: WatermarkSettings? = nil,
         progressHandler: ((Double, String) -> Void)?,
         outputURL: URL
     ) async throws {
@@ -1353,7 +1405,13 @@ struct VideoExporter {
                 videoFrameCache: videoFrameCache
             )
             try autoreleasepool {
-                let pixelBuffer = try makePixelBuffer(from: image, caption: caption, renderSize: renderSize, captionStyle: captionStyle)
+                let pixelBuffer = try makePixelBuffer(
+                    from: image,
+                    caption: caption,
+                    renderSize: renderSize,
+                    captionStyle: captionStyle,
+                    watermarkSettings: watermarkSettings
+                )
                 if !adaptor.append(pixelBuffer, withPresentationTime: presentationTime) {
                     throw writer.error ?? ExportError.videoWriterSetupFailed
                 }
@@ -1535,6 +1593,7 @@ struct VideoExporter {
         maximumDuration: CMTime?,
         videoModeSettings: VideoModeExportSettings?,
         outputURL: URL,
+        watermarkSettings: WatermarkSettings? = nil,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws {
         if FileManager.default.fileExists(atPath: outputURL.path) {
@@ -1694,7 +1753,8 @@ struct VideoExporter {
                         totalDuration: totalDuration,
                         targetRenderSize: videoModeRenderSize,
                         frameRate: frameRate,
-                        preserveSourceScale: true
+                        preserveSourceScale: true,
+                        watermarkSettings: watermarkSettings
                     ),
                 exportTimeRange: stitchExportRange,
                 progressMessage: canAttemptStrictPassthrough
@@ -1719,7 +1779,8 @@ struct VideoExporter {
                     totalDuration: totalDuration,
                     targetRenderSize: videoModeRenderSize,
                     frameRate: frameRate,
-                    preserveSourceScale: true
+                    preserveSourceScale: true,
+                    watermarkSettings: watermarkSettings
                 ),
                 exportTimeRange: stitchExportRange,
                 progressMessage: "Exporting the stitched video.",
@@ -1743,6 +1804,7 @@ struct VideoExporter {
         outputURL: URL,
         storySegmentMusic: [StorySegmentMusicSlot]? = nil,
         timingMode: TimingMode,
+        watermarkSettings: WatermarkSettings? = nil,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws {
         let composition = AVMutableComposition()
@@ -1772,7 +1834,8 @@ struct VideoExporter {
                     duration: segment.timeRange.duration,
                     renderSize: renderSize,
                     frameRate: frameRate,
-                    outputURL: photoClipURL
+                    outputURL: photoClipURL,
+                    watermarkSettings: watermarkSettings
                 )
 
                 let photoAsset = AVURLAsset(url: photoClipURL)
@@ -1943,7 +2006,8 @@ struct VideoExporter {
                 totalDuration: totalDuration,
                 targetRenderSize: realLifeRenderSize,
                 frameRate: frameRate,
-                preserveSourceScale: true
+                preserveSourceScale: true,
+                watermarkSettings: watermarkSettings
             ),
             exportTimeRange: CMTimeRange(start: .zero, duration: totalDuration),
             progressMessage: "Exporting the \(timingMode.rawValue) video.",
@@ -1959,6 +2023,7 @@ struct VideoExporter {
         captionStyle: CaptionStyle,
         outputURL: URL,
         timingMode: TimingMode,
+        watermarkSettings: WatermarkSettings? = nil,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws {
         if FileManager.default.fileExists(atPath: outputURL.path) {
@@ -2029,6 +2094,10 @@ struct VideoExporter {
             captionStyle: captionStyle
         )
         parentLayer.addSublayer(captionsLayer)
+
+        if let wms = watermarkSettings, wms.isRenderable, let wmLayer = makeStaticWatermarkLayer(renderSize: videoComposition.renderSize, settings: wms) {
+            parentLayer.addSublayer(wmLayer)
+        }
 
         videoComposition.animationTool = AVVideoCompositionCoreAnimationTool(
             postProcessingAsVideoLayer: videoLayer,
@@ -2313,7 +2382,8 @@ struct VideoExporter {
         duration: CMTime,
         renderSize: CGSize,
         frameRate: Int32,
-        outputURL: URL
+        outputURL: URL,
+        watermarkSettings: WatermarkSettings? = nil
     ) async throws {
         let photoItem = MediaItem(previewImage: image, kind: .photo)
         let timelineSegment = TimelineSegment(
@@ -2327,6 +2397,8 @@ struct VideoExporter {
             renderSize: renderSize,
             frameRate: frameRate,
             videoSampleStride: 1,
+            captionStyle: .normal,
+            watermarkSettings: watermarkSettings,
             progressHandler: nil,
             outputURL: outputURL
         )
@@ -2404,7 +2476,8 @@ struct VideoExporter {
             totalDuration: totalDuration,
             targetRenderSize: nil,
             frameRate: 30,
-            preserveSourceScale: false
+            preserveSourceScale: false,
+            watermarkSettings: nil
         )
     }
 
@@ -2414,7 +2487,8 @@ struct VideoExporter {
         totalDuration: CMTime,
         targetRenderSize: CGSize?,
         frameRate: Int32,
-        preserveSourceScale: Bool
+        preserveSourceScale: Bool,
+        watermarkSettings: WatermarkSettings? = nil
     ) -> AVMutableVideoComposition {
         let renderSize = segmentLayouts.reduce(CGSize.zero) { currentMax, layout in
             let transformedBounds = CGRect(origin: .zero, size: layout.naturalSize)
@@ -2451,6 +2525,24 @@ struct VideoExporter {
         videoComposition.instructions = [instruction]
         videoComposition.renderSize = safeRenderSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: frameRate)
+
+        if let wms = watermarkSettings, wms.isRenderable, let wmLayer = makeStaticWatermarkLayer(
+            renderSize: videoComposition.renderSize,
+            settings: wms
+        ) {
+            let parentLayer = CALayer()
+            parentLayer.frame = CGRect(origin: .zero, size: videoComposition.renderSize)
+            parentLayer.masksToBounds = true
+            let videoLayer = CALayer()
+            videoLayer.frame = parentLayer.frame
+            parentLayer.addSublayer(videoLayer)
+            parentLayer.addSublayer(wmLayer)
+            videoComposition.animationTool = AVVideoCompositionCoreAnimationTool(
+                postProcessingAsVideoLayer: videoLayer,
+                in: parentLayer
+            )
+        }
+
         return videoComposition
     }
 
@@ -2570,11 +2662,221 @@ struct VideoExporter {
         return CGRect(x: x, y: y, width: fw, height: fh)
     }
 
+    // MARK: - Watermark layout (output pixels, scales with render size; no hardcoded “logo px” for all exports)
+
+    /// Inset from each edge in **output** pixel space, clamped for safe margins on TV / players (tuned so brand marks read like typical web/video corner logos).
+    private static func safeOutputPadding(_ renderSize: CGSize) -> CGFloat {
+        let m = min(renderSize.width, renderSize.height)
+        let fromScale = m * 0.012
+        return min(28, max(10, fromScale))
+    }
+
+    private static func clampedWatermarkSizeScale(_ scale: CGFloat) -> CGFloat {
+        min(4.0, max(0.35, scale))
+    }
+
+    /// Longest side of a uniform scale to final output. Reference: ~70px on the **short** side at 1080p (× `sizeScale` up to 4×), then scales with output size; cap allows large 4K marks.
+    private static func watermarkImageMaxOutputSpan(_ renderSize: CGSize, sizeScale: CGFloat) -> CGFloat {
+        let m = min(renderSize.width, renderSize.height)
+        let at1080: CGFloat = 70
+        let ref: CGFloat = 1080
+        let s = clampedWatermarkSizeScale(sizeScale)
+        // Hard cap relative to frame so a “YouTube-style” mark can be reached without unbounded size.
+        let cap = min(0.32 * m, 768)
+        return max(28, min(cap, at1080 * (m / ref) * s))
+    }
+
+    /// Settings preview: same formula as final export. Pass the preview **card** size (e.g. from `GeometryReader`).
+    static func referenceWatermarkImageMaxSpanForPreview(previewSize: CGSize, sizeScale: CGFloat = 1.0) -> CGFloat {
+        watermarkImageMaxOutputSpan(previewSize, sizeScale: sizeScale)
+    }
+
+    private static func layoutWatermarkText(
+        _ text: String,
+        renderSize: CGSize,
+        sizeScale: CGFloat
+    ) -> (string: NSAttributedString, size: CGSize) {
+        let m = min(renderSize.width, renderSize.height)
+        let baseAt1080: CGFloat = 18
+        let ref: CGFloat = 1080
+        let scale = clampedWatermarkSizeScale(sizeScale)
+        let fontSize = max(9, min(160, baseAt1080 * (m / ref) * scale))
+        let font = UIFont.systemFont(ofSize: fontSize, weight: .semibold)
+        let shadow = NSShadow()
+        shadow.shadowColor = UIColor.black.withAlphaComponent(0.5)
+        shadow.shadowOffset = CGSize(width: 0, height: 1.2)
+        shadow.shadowBlurRadius = 1.2
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        let str = NSAttributedString(string: trimmed, attributes: [
+            .font: font,
+            .foregroundColor: UIColor.white,
+            .shadow: shadow
+        ])
+        let maxW = renderSize.width * 0.48
+        let bounding = str.boundingRect(
+            with: CGSize(width: maxW, height: .greatestFiniteMagnitude),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            context: nil
+        )
+        let w = min(ceil(bounding.width) + 4, maxW)
+        let h = ceil(bounding.height) + 2
+        return (str, CGSize(width: w, height: h))
+    }
+
+    /// Uniformly fits the image into `maxSide` on the long side. **Allows upscaling** so small source PNGs still reach the target span (no `min(..., 1)` cap).
+    private static func sizeForWatermarkImage(_ image: UIImage, maxSide: CGFloat) -> CGSize {
+        let w = max(image.size.width, 1)
+        let h = max(image.size.height, 1)
+        let s = min(maxSide / w, maxSide / h)
+        return CGSize(width: w * s, height: h * s)
+    }
+
+    private static func watermarkFrame(
+        contentSize: CGSize,
+        renderSize: CGSize,
+        anchor: WatermarkSettings.Anchor
+    ) -> CGRect {
+        let pad = safeOutputPadding(renderSize)
+        let w = contentSize.width
+        let h = contentSize.height
+        let W = renderSize.width
+        let H = renderSize.height
+        let x: CGFloat
+        let y: CGFloat
+        switch anchor {
+        case .topLeft: x = pad; y = pad
+        case .topRight: x = W - w - pad; y = pad
+        case .bottomLeft: x = pad; y = H - h - pad
+        case .bottomRight: x = W - w - pad; y = H - h - pad
+        }
+        return CGRect(x: x, y: y, width: w, height: h)
+    }
+
+    private static func textAlignmentForWatermark(_ anchor: WatermarkSettings.Anchor) -> CATextLayerAlignmentMode {
+        switch anchor {
+        case .topLeft, .bottomLeft: return .left
+        case .topRight, .bottomRight: return .right
+        }
+    }
+
+    private func makeStaticWatermarkLayer(renderSize: CGSize, settings: WatermarkSettings) -> CALayer? {
+        let o = min(1, max(0, settings.opacity))
+        switch settings.mode {
+        case .text:
+            let t = settings.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !t.isEmpty else { return nil }
+            let (attr, s) = Self.layoutWatermarkText(
+                t,
+                renderSize: renderSize,
+                sizeScale: settings.sizeScale
+            )
+            let textLayer = CATextLayer()
+            textLayer.contentsScale = UIScreen.main.scale
+            textLayer.string = attr
+            textLayer.alignmentMode = Self.textAlignmentForWatermark(settings.anchor)
+            textLayer.isWrapped = true
+            textLayer.isOpaque = false
+            textLayer.backgroundColor = nil
+            textLayer.frame = Self.watermarkFrame(
+                contentSize: s,
+                renderSize: renderSize,
+                anchor: settings.anchor
+            )
+            textLayer.opacity = Float(o)
+            return textLayer
+        case .image:
+            guard let url = settings.imageFileURL,
+                  let image = UIImage(contentsOfFile: url.path),
+                  let cg = image.cgImage else { return nil }
+            let maxSpan = Self.watermarkImageMaxOutputSpan(renderSize, sizeScale: settings.sizeScale)
+            let out = Self.sizeForWatermarkImage(image, maxSide: maxSpan)
+            let imageLayer = CALayer()
+            imageLayer.contents = cg
+            imageLayer.contentsGravity = .resizeAspect
+            imageLayer.isOpaque = false
+            imageLayer.frame = Self.watermarkFrame(
+                contentSize: out,
+                renderSize: renderSize,
+                anchor: settings.anchor
+            )
+            imageLayer.opacity = Float(o)
+            // Helps dark logos on dark video (separate from user opacity)
+            imageLayer.masksToBounds = false
+            imageLayer.shadowColor = UIColor.black.cgColor
+            imageLayer.shadowOffset = CGSize(width: 0, height: 1)
+            imageLayer.shadowRadius = 3.5
+            imageLayer.shadowOpacity = 0.55
+            imageLayer.shadowPath = UIBezierPath(
+                rect: CGRect(origin: .zero, size: out)
+            ).cgPath
+            return imageLayer
+        }
+    }
+
+    private func drawWatermarkInPixelBuffer(
+        _ settings: WatermarkSettings,
+        in context: CGContext,
+        renderSize: CGSize
+    ) {
+        UIGraphicsPushContext(context)
+        let o = min(1, max(0, settings.opacity))
+        switch settings.mode {
+        case .text:
+            let t = settings.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !t.isEmpty else {
+                UIGraphicsPopContext()
+                return
+            }
+            let (attr, s) = Self.layoutWatermarkText(
+                t,
+                renderSize: renderSize,
+                sizeScale: settings.sizeScale
+            )
+            let textRect = Self.watermarkFrame(
+                contentSize: s,
+                renderSize: renderSize,
+                anchor: settings.anchor
+            )
+            context.saveGState()
+            context.setAlpha(o)
+            attr.draw(
+                with: textRect,
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                context: nil
+            )
+            context.restoreGState()
+        case .image:
+            guard let url = settings.imageFileURL, let image = UIImage(contentsOfFile: url.path) else {
+                UIGraphicsPopContext()
+                return
+            }
+            let maxSpan = Self.watermarkImageMaxOutputSpan(renderSize, sizeScale: settings.sizeScale)
+            let out = Self.sizeForWatermarkImage(image, maxSide: maxSpan)
+            let r = Self.watermarkFrame(
+                contentSize: out,
+                renderSize: renderSize,
+                anchor: settings.anchor
+            )
+            // Slight drop shadow + premultiplied PNG: blend at user opacity; image alpha is preserved.
+            context.saveGState()
+            let shadow = UIColor.black.withAlphaComponent(0.5)
+            context.setShadow(
+                offset: CGSize(width: 0, height: 1.5),
+                blur: 3.2,
+                color: shadow.cgColor
+            )
+            image.draw(in: r, blendMode: .normal, alpha: o)
+            context.restoreGState()
+        }
+        UIGraphicsPopContext()
+    }
+
     private func makePixelBuffer(
         from image: UIImage,
         caption: String?,
         renderSize: CGSize,
-        captionStyle: CaptionStyle
+        captionStyle: CaptionStyle,
+        watermarkSettings: WatermarkSettings? = nil
     ) throws -> CVPixelBuffer {
         var pixelBuffer: CVPixelBuffer?
         let attributes = [
@@ -2623,6 +2925,9 @@ struct VideoExporter {
 
         if let caption, !caption.isEmpty {
             drawCaption(caption, in: context, renderSize: renderSize, captionStyle: captionStyle)
+        }
+        if let wms = watermarkSettings, wms.isRenderable {
+            drawWatermarkInPixelBuffer(wms, in: context, renderSize: renderSize)
         }
         UIGraphicsPopContext()
 

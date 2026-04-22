@@ -450,6 +450,188 @@ final class AppViewModel: NSObject, ObservableObject {
         }
     }
 
+    enum WatermarkKind: String, CaseIterable, Identifiable {
+        case text
+        case image
+
+        var id: String { rawValue }
+        var label: String { self == .text ? "Text" : "Image" }
+    }
+
+    private static let watermarkEnabledKey = "fluxcut.watermarkEnabled"
+    private static let watermarkKindKey = "fluxcut.watermarkKind"
+    private static let watermarkTextKey = "fluxcut.watermarkText"
+    private static let watermarkImageFilenameKey = "fluxcut.watermarkImageFilename"
+    private static let watermarkAnchorKey = "fluxcut.watermarkAnchor"
+    private static let watermarkOpacityKey = "fluxcut.watermarkOpacity"
+    private static let watermarkSizeScaleKey = "fluxcut.watermarkSizeScale"
+
+    @Published var isWatermarkEnabled: Bool = UserDefaults.standard.object(forKey: AppViewModel.watermarkEnabledKey) as? Bool ?? false {
+        didSet {
+            if oldValue != isWatermarkEnabled {
+                UserDefaults.standard.set(isWatermarkEnabled, forKey: Self.watermarkEnabledKey)
+                markAllVideoRendersDirty(reason: "Watermark setting changed. Build a new preview or final render to see the update.")
+            }
+        }
+    }
+
+    @Published var watermarkKind: WatermarkKind = (UserDefaults.standard.string(forKey: AppViewModel.watermarkKindKey)).flatMap(WatermarkKind.init(rawValue:)) ?? .text {
+        didSet {
+            if oldValue != watermarkKind {
+                UserDefaults.standard.set(watermarkKind.rawValue, forKey: Self.watermarkKindKey)
+                markAllVideoRendersDirty(reason: "Watermark type changed. Build a new preview or final render to see the update.")
+            }
+        }
+    }
+
+    @Published var watermarkText: String = UserDefaults.standard.string(forKey: AppViewModel.watermarkTextKey) ?? "Preview" {
+        didSet {
+            if oldValue != watermarkText {
+                UserDefaults.standard.set(watermarkText, forKey: Self.watermarkTextKey)
+                if isWatermarkEnabled, watermarkKind == .text {
+                    markAllVideoRendersDirty(reason: "Watermark text changed. Build a new preview or final render to see the update.")
+                }
+            }
+        }
+    }
+
+    @Published var watermarkPosition: VideoExporter.WatermarkSettings.Anchor = (UserDefaults.standard
+        .string(forKey: AppViewModel.watermarkAnchorKey))
+        .flatMap(VideoExporter.WatermarkSettings.Anchor.init(rawValue:)) ?? .topRight
+    {
+        didSet {
+            if oldValue != watermarkPosition {
+                UserDefaults.standard.set(watermarkPosition.rawValue, forKey: Self.watermarkAnchorKey)
+                if isWatermarkEnabled {
+                    markAllVideoRendersDirty(reason: "Watermark position changed. Build a new preview or final render to see the update.")
+                }
+            }
+        }
+    }
+
+    /// 0.1...1.0: overall strength of the burned-in watermark (applies to text; PNG alpha is preserved and then multiplied by this).
+    @Published var watermarkOpacity: Double = (UserDefaults.standard.object(forKey: AppViewModel.watermarkOpacityKey) as? Double)
+        .map { min(1, max(0.1, $0)) } ?? 0.85
+    {
+        didSet {
+            if oldValue != watermarkOpacity {
+                UserDefaults.standard.set(watermarkOpacity, forKey: Self.watermarkOpacityKey)
+                if isWatermarkEnabled {
+                    markAllVideoRendersDirty(reason: "Watermark appearance changed. Build a new preview or final render to see the update.")
+                }
+            }
+        }
+    }
+
+    /// ~0.35...4.0: multiplies the resolution-based watermark size (Pro only; non‑Pro export uses 1.0).
+    @Published var watermarkSizeScale: Double = (UserDefaults.standard
+        .object(forKey: AppViewModel.watermarkSizeScaleKey) as? Double)
+        .map { min(4, max(0.35, $0)) } ?? 1.0
+    {
+        didSet {
+            if oldValue != watermarkSizeScale {
+                UserDefaults.standard.set(watermarkSizeScale, forKey: Self.watermarkSizeScaleKey)
+                if isWatermarkEnabled, isEditStoryProEnabled {
+                    markAllVideoRendersDirty(reason: "Watermark size changed. Build a new preview or final render to see the update.")
+                }
+            }
+        }
+    }
+
+    var hasWatermarkImageOnDisk: Bool {
+        if let n = UserDefaults.standard.string(forKey: Self.watermarkImageFilenameKey) {
+            return FileManager.default.isReadableFile(atPath: watermarkImageStorageURL(relativeName: n).path)
+        }
+        return false
+    }
+
+    func watermarkImageURLForExport() -> URL? {
+        guard hasWatermarkImageOnDisk,
+              let n = UserDefaults.standard.string(forKey: Self.watermarkImageFilenameKey) else { return nil }
+        return watermarkImageStorageURL(relativeName: n)
+    }
+
+    func videoWatermarkSettingsForExport() -> VideoExporter.WatermarkSettings {
+        let pro = isEditStoryProEnabled
+        return VideoExporter.WatermarkSettings(
+            isEnabled: pro && isWatermarkEnabled,
+            mode: watermarkKind == .text ? .text : .image,
+            text: watermarkText,
+            imageFileURL: watermarkKind == .image ? watermarkImageURLForExport() : nil,
+            anchor: watermarkPosition,
+            opacity: CGFloat(watermarkOpacity),
+            sizeScale: pro ? CGFloat(watermarkSizeScale) : 1.0
+        )
+    }
+
+    /// Ensures watermark is off in UserDefaults/UX when Pro is off (e.g. first launch, StoreKit reverts to free tier).
+    func reconcileProWatermarkGate() {
+        if !isEditStoryProEnabled, isWatermarkEnabled { isWatermarkEnabled = false }
+    }
+
+    @discardableResult
+    func importWatermarkImageFile(from sourceURL: URL) throws -> Bool {
+        try ensureWatermarkStorageDirectory()
+        let dest = Self.watermarkImageStorageRoot.appendingPathComponent("watermark.png")
+        if FileManager.default.fileExists(atPath: dest.path) {
+            try FileManager.default.removeItem(at: dest)
+        }
+        try AppViewModelCopyUtilities.copyFileResolvingLargeSources(from: sourceURL, to: dest)
+        UserDefaults.standard.set("watermark.png", forKey: Self.watermarkImageFilenameKey)
+        watermarkKind = .image
+        if isWatermarkEnabled {
+            markAllVideoRendersDirty(reason: "Watermark image updated. Build a new preview or final render to see the update.")
+        }
+        objectWillChange.send()
+        return true
+    }
+
+    @discardableResult
+    func importWatermarkImageData(_ data: Data) throws -> Bool {
+        try ensureWatermarkStorageDirectory()
+        let dest = Self.watermarkImageStorageRoot.appendingPathComponent("watermark.png")
+        if FileManager.default.fileExists(atPath: dest.path) {
+            try FileManager.default.removeItem(at: dest)
+        }
+        try data.write(to: dest, options: .atomic)
+        UserDefaults.standard.set("watermark.png", forKey: Self.watermarkImageFilenameKey)
+        watermarkKind = .image
+        if isWatermarkEnabled {
+            markAllVideoRendersDirty(reason: "Watermark image updated. Build a new preview or final render to see the update.")
+        }
+        objectWillChange.send()
+        return true
+    }
+
+    func clearWatermarkImageFile() {
+        if let n = UserDefaults.standard.string(forKey: Self.watermarkImageFilenameKey) {
+            let url = watermarkImageStorageURL(relativeName: n)
+            try? FileManager.default.removeItem(at: url)
+        }
+        UserDefaults.standard.removeObject(forKey: Self.watermarkImageFilenameKey)
+        if isWatermarkEnabled, watermarkKind == .image {
+            markAllVideoRendersDirty(reason: "Watermark image removed. Build a new preview or final render to see the update.")
+        }
+        objectWillChange.send()
+    }
+
+    private static var watermarkImageStorageRoot: URL {
+        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+            ?? FileManager.default.temporaryDirectory
+        return base.appendingPathComponent("FluxCut/Watermark", isDirectory: true)
+    }
+
+    private func watermarkImageStorageURL(relativeName: String) -> URL {
+        Self.watermarkImageStorageRoot.appendingPathComponent(relativeName)
+    }
+
+    private func ensureWatermarkStorageDirectory() throws {
+        try FileManager.default.createDirectory(
+            at: Self.watermarkImageStorageRoot,
+            withIntermediateDirectories: true
+        )
+    }
+
     private static let editStoryProDefaultsKey = "fluxcut.isEditStoryProEnabled"
 
     /// When **false**, free-tier script limits apply and the Pro tab is view-only (assignments require Pro). Toggle in Settings labels **Enable Pro Features**; purchase is a one-time in-app buy (StoreKit integration can wire to this flag).
@@ -458,6 +640,7 @@ final class AppViewModel: NSObject, ObservableObject {
             UserDefaults.standard.set(isEditStoryProEnabled, forKey: Self.editStoryProDefaultsKey)
             if !isEditStoryProEnabled {
                 applyFreeTierNarrationLimitIfNeeded(announceTrim: true)
+                if isWatermarkEnabled { isWatermarkEnabled = false }
             }
         }
     }
@@ -1636,6 +1819,7 @@ final class AppViewModel: NSObject, ObservableObject {
                     storyMusicBedSpans: storyMusicBedSpansForExport,
                     exportArtifactID: sessionID,
                     prebuiltUtteranceSourceDirectory: reusePrebuiltStoryUtterances ? Self.narrationPreviewWorkspaceURL : nil,
+                    watermarkSettings: videoWatermarkSettingsForExport(),
                     progressHandler: { progress, message in
                         Task { @MainActor in
                             guard self.activeVideoRenderSessionID == sessionID else { return }
