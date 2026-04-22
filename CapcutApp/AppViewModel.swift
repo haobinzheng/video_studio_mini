@@ -259,8 +259,31 @@ final class AppViewModel: NSObject, ObservableObject {
         let duration: TimeInterval
     }
 
-    @Published var mediaItems: [MediaItem] = []
-    @Published var narrationText = """
+    // MARK: - Default script / Introduction
+    private static let defaultNarrationIntroductionBasic: String = """
+    Welcome to **FluxCut**. This introduction is long on purpose: if you read it in your head it may take a few minutes, and you can tap **Play Script** to hear the whole tour in whatever voice you choose. Replace it whenever you like, or load it again from the **Introduction** action when the script is empty. Think of the following paragraphs as a narrated map of the app.
+
+    **What you are building.** **FluxCut** is an iPhone studio for shareable video from your words, your photos, your video clips, and your music. Most people work in a loop: **Script**, then **Media**, then **Music**, then **Video**, with the **Pro** tab available when you want **Edit Story** tools. You can also leave the script area blank and build projects that are mostly music and pictures—**Script** helps when you want narration, but you are not required to type a script for every run.
+
+    **Script: text, language, and voice.** Type or paste your narration. Blank lines separate paragraphs; that shape matters for **Clean Up**, for captions, and for **Edit Story** when you align paragraphs to blocks. Choose a language group, then a voice. **FluxCut** lists **Enhanced** and **Premium** voices; download more in iOS **Settings** → **Accessibility** → **Spoken Content** → **Voices**, then return here and tap **Reload iPhone Voices**. **Siri**-style personas in Settings (**Voice 1**, **Voice 2**) are not available to third-party apps on iOS, only to Apple’s own features.
+
+    You can **hide** voices in the list, and adjust **speech** rate so the delivery matches the mood you want. **Reload iPhone Voices** if Standard voices look missing after a tier or download change.
+
+    **Hearing the script before the full video.** **Play Script** runs text-to-speech on the current text so you can review wording quickly. **Build Preview** is optional: it makes a shorter narration run with a seekable timeline and on-screen caption cues, which is useful to check pace and subtitle flow before a long render. The **Clean Up** control normalizes line breaks to tidy paragraph shapes when you need it. On the free plan, a script cap applies: Latin-style languages use a **word** limit, others use a **character** limit; the status line says which. **Purchase FluxCut Pro** in **Settings** lifts the cap and unlocks **Pro** and **Edit Story** as in the product screen. If a trim happens, the status line explains the rule.
+
+    **Media and order.** In **Media**, pick photos and videos; the order in the list is the story order. Reorder by dragging. Each clip and still feeds the **Video** tab according to the timing mode you select.
+
+    **Music and sound beds.** In **Music**, import files, use the **Music** library, or import a **video** file and **Extract** its audio into your soundtrack. You can keep several soundtrack items when the project needs more than one background.
+
+    **Pro and Edit Story.** The **Pro** tab hosts **Edit Story**. With **Pro** on, you assign script paragraphs to media blocks and, where the project is set up for it, to music segments, so visuals and beds follow the narration. With **Pro** off, the tab is visible in a read-only way until you buy in. If you use the block-based **Edit Story** workflow, the **Video** tab may limit timing choices so exports stay consistent with the blocks; see the in-app hints and **FAQ** for how **Video**, **Story**, and **Slideshow** modes show up in your case.
+
+    **Video, timing, and final mix.** In **Video**, choose a timing mode among **Video**, **Story**, and **Slideshow** when the picker offers them. **Story** paces the edit to your narration. **Slideshow** fits a more slide-focused timing. The **Video** option appears when that export path matches your media—read the card labels. If **Edit Story** (**Pro**) is on, the app may keep you on **Story** so your assigned blocks and narration stay in sync. Set aspect ratio, whether burned-in captions are on, and a caption look; use **Preview Video** for a short check, then **Create Video** for a full run at the quality, resolution, and frame-rate you pick. A mix area balances narration, **video** sound, and the music bed. If you change script, voice, media, mix, or captions, the app drops stale file URLs so the player is not out of date—rebuild, then **share** like any other movie.
+
+    **Settings, storage, and data.** The **Settings** entry from the main screen opens **About**, **Storage**, legal links, feedback, the **Pro** switch, and version details. You can clear **unused** data or the current project from **Storage** when space is tight. The script is saved as a draft; clearing a project can remove that draft, so keep copies of final exports you care about. This default **Introduction** is sized to stay near the **eight-hundred** word mark for Latin-style writing so it typically fits the free cap with headroom. **Pro** in **Settings** also unlocks a longer default script and full **Edit Story** tools when you are ready to grow past the public limits.
+
+    **Start.** Replace this with your own script, or go straight to **Media**, **Music**, and a no-script run with **Slideshow** or **Video** if that fits. Happy editing.
+    """
+    private static let defaultNarrationIntroductionPro: String = """
     Welcome to **FluxCut**. This introduction is long on purpose: if you read it in your head it usually takes about five or six minutes, and you can tap **Play Script** to hear the whole tour in whatever voice you choose. Replace it whenever you like, or load it again from the **Introduction** action when the script is empty. Think of the following paragraphs as a narrated map of the app.
 
     **What you are building.** **FluxCut** is an iPhone studio for shareable video from your words, your photos, your video clips, and your music. Most people work in a loop: **Script**, then **Media**, then **Music**, then **Video**, with the **Pro** tab available when you want **Edit Story** tools. You can also leave the script area blank and build projects that are mostly music and pictures—**Script** helps when you want narration, but you are not required to type a script for every run.
@@ -269,7 +292,7 @@ final class AppViewModel: NSObject, ObservableObject {
 
     You can **hide** voices in the list, and adjust **speech** rate so the delivery matches the mood you want. **Reload iPhone Voices** if Standard voices look missing after a tier or download change.
 
-    **Hearing the script before the full video.** **Play Script** runs text-to-speech on the current text so you can review wording quickly. **Build Preview** is optional: it makes a shorter narration run with a seekable timeline and on-screen caption cues, which is useful to check pace and subtitle flow before a long render. The **Clean Up** control normalizes line breaks to tidy paragraph shapes when you need it. If you are on the free tier, long scripts in Latin-style languages are limited to a set word count; other writing systems can hit a character cap. **Enable Pro Features** in **Settings** lifts the script cap and unlocks the full **Pro** tab, including **Edit Story**, as described in the purchase screen. If the app ever trims the script, the status line explains the rule.
+    **Hearing the script before the full video.** **Play Script** runs text-to-speech on the current text so you can review wording quickly. **Build Preview** is optional: it makes a shorter narration run with a seekable timeline and on-screen caption cues, which is useful to check pace and subtitle flow before a long render. The **Clean Up** control normalizes line breaks to tidy paragraph shapes when you need it. If you are on the free tier, long scripts in Latin-style languages are limited to a set word count; other writing systems can hit a character cap. **Purchase FluxCut Pro** in **Settings** (one-time in-app purchase) lifts the script cap and unlocks the full **Pro** tab, including **Edit Story**, as described in the purchase screen. If the app ever trims the script, the status line explains the rule.
 
     **Media and order.** In **Media**, pick photos and videos; the order in the list is the story order. Reorder by dragging. Each clip and still feeds the **Video** tab according to the timing mode you select.
 
@@ -281,8 +304,22 @@ final class AppViewModel: NSObject, ObservableObject {
 
     **Settings, storage, and data.** The **Settings** entry from the main screen opens **About**, **Storage**, legal links, feedback, the **Pro** switch, and version details. You can clear **unused** data or the current project from **Storage** when space is tight. The script is saved as a draft; clearing a project can remove that draft, so keep copies of final exports you care about.
 
+    **More on block editing and timing.** A block in **Edit Story** is how you pin a **paragraph** to a **shot** and, when the project supports it, to a **segment** of a **soundtrack**. If you break a long paragraph in two, expect to revisit the block map: the Pro surface shows which paragraph drives which part of the timeline, but changing the text changes the count of paragraphs, so a quick re-check keeps picture and line in sync. When the app keeps you on **Story** timing, it is protecting that alignment, not blocking creativity—switching to another mode in those cases can produce exports that do not match your intent.
+
+    **Previews, quality, and patience.** The **Video** page lets you make a small **Preview Video** and a full **Create Video** pass. Higher **resolution** and **frame** **rate** settings cost more time and more storage on device. If you run out of space, clear room in **Storage** under **Settings** before a long run. A failed or cancelled export is usually safe to retry after a preview succeeds; the status line is the first place to read what happened.
+
+    **Watermark, Pro, and what to ship.** Free-tier **exports** may show a **watermark**; **Pro** and the **Settings** controls for watermark behavior are described in the app. For client or public delivery, use the same tier and the same **Settings** you want viewers to see so there are no surprises.
+
+    **When things feel wrong, check these first.** **Reload iPhone Voices** if the voice list is stale, **rebuild** preview or final after any change to **script, voice, media, mix, or captions**, and read the **card** help on the **Video** page when a **mode** name is unfamiliar. The **FAQ** in **Settings** collects edge cases that the labels alone do not have room to explain. **Feedback** in **Settings** is there if a bug is blocking you.
+
+    **A longer Pro-only closing.** This Pro introduction is the extended tour, roughly twelve hundred words. The **free**-tier default script is sized near eight hundred words so you can have a full walkthrough on the public cap, while this copy assumes you have lifted the cap and you have the **Pro** tab for **Edit Story**. You can still replace every word here, or return through **Introduction** to reload. Thank you for using **FluxCut Pro**; now go make something worth sharing.
+
     **Start.** Replace this with your own script, or go straight to **Media**, **Music**, and a no-script run with **Slideshow** or **Video** if that fits. Happy editing.
-    """ {
+    """
+
+    @Published var mediaItems: [MediaItem] = []
+    @Published var narrationText = AppViewModel.defaultNarrationIntroductionBasic
+    {
         didSet {
             if !isEditStoryProEnabled {
                 let clamped = Self.clampedNarrationForFreeTier(narrationText, languageGroup: selectedVoiceLanguage)
@@ -632,17 +669,20 @@ final class AppViewModel: NSObject, ObservableObject {
         )
     }
 
-    private static let editStoryProDefaultsKey = "fluxcut.isEditStoryProEnabled"
-
-    /// When **false**, free-tier script limits apply and the Pro tab is view-only (assignments require Pro). Toggle in Settings labels **Enable Pro Features**; purchase is a one-time in-app buy (StoreKit integration can wire to this flag).
-    @Published var isEditStoryProEnabled: Bool = UserDefaults.standard.object(forKey: AppViewModel.editStoryProDefaultsKey) as? Bool ?? true {
+    /// Unlocked by a verified **non-consumable** in-app purchase (`ProEntitlementManager`). **Not** persisted in UserDefaults; `Transaction.currentEntitlements` is the source of truth after launch sync.
+    @Published var isEditStoryProEnabled: Bool = false {
         didSet {
-            UserDefaults.standard.set(isEditStoryProEnabled, forKey: Self.editStoryProDefaultsKey)
             if !isEditStoryProEnabled {
                 applyFreeTierNarrationLimitIfNeeded(announceTrim: true)
                 if isWatermarkEnabled { isWatermarkEnabled = false }
             }
         }
+    }
+
+    /// Call only from `ProEntitlementManager` when StoreKit entitlements change.
+    func setProUnlockedFromStoreKitPurchase(_ unlocked: Bool) {
+        if isEditStoryProEnabled == unlocked { return }
+        isEditStoryProEnabled = unlocked
     }
 
     /// Free tier: Latin-script languages use a **word** cap (space-separated words, e.g. English).
@@ -1105,29 +1145,7 @@ final class AppViewModel: NSObject, ObservableObject {
     func loadSampleNarration() {
         stopLiveNarrationPlayback()
         shouldPersistNarrationDraft = false
-        narrationText = """
-        Welcome to **FluxCut**. This introduction is long on purpose: if you read it in your head it usually takes about five or six minutes, and you can tap **Play Script** to hear the whole tour in whatever voice you choose. Replace it whenever you like, or load it again from the **Introduction** action when the script is empty. Think of the following paragraphs as a narrated map of the app.
-
-        **What you are building.** **FluxCut** is an iPhone studio for shareable video from your words, your photos, your video clips, and your music. Most people work in a loop: **Script**, then **Media**, then **Music**, then **Video**, with the **Pro** tab available when you want **Edit Story** tools. You can also leave the script area blank and build projects that are mostly music and pictures—**Script** helps when you want narration, but you are not required to type a script for every run.
-
-        **Script: text, language, and voice.** Type or paste your narration. Blank lines separate paragraphs; that shape matters for **Clean Up**, for captions, and for **Edit Story** when you align paragraphs to blocks. Choose a language group, then a voice. **FluxCut** lists **Enhanced** and **Premium** voices; download more in iOS **Settings** → **Accessibility** → **Spoken Content** → **Voices**, then return here and tap **Reload iPhone Voices**. **Siri**-style personas in Settings (**Voice 1**, **Voice 2**) are not available to third-party apps on iOS, only to Apple’s own features.
-
-        You can **hide** voices in the list, and adjust **speech** rate so the delivery matches the mood you want. **Reload iPhone Voices** if Standard voices look missing after a tier or download change.
-
-        **Hearing the script before the full video.** **Play Script** runs text-to-speech on the current text so you can review wording quickly. **Build Preview** is optional: it makes a shorter narration run with a seekable timeline and on-screen caption cues, which is useful to check pace and subtitle flow before a long render. The **Clean Up** control normalizes line breaks to tidy paragraph shapes when you need it. If you are on the free tier, long scripts in Latin-style languages are limited to a set word count; other writing systems can hit a character cap. **Enable Pro Features** in **Settings** lifts the script cap and unlocks the full **Pro** tab, including **Edit Story**, as described in the purchase screen. If the app ever trims the script, the status line explains the rule.
-
-        **Media and order.** In **Media**, pick photos and videos; the order in the list is the story order. Reorder by dragging. Each clip and still feeds the **Video** tab according to the timing mode you select.
-
-        **Music and sound beds.** In **Music**, import files, use the **Music** library, or import a **video** file and **Extract** its audio into your soundtrack. You can keep several soundtrack items when the project needs more than one background.
-
-        **Pro and Edit Story.** The **Pro** tab hosts **Edit Story**. With **Pro** on, you assign script paragraphs to media blocks and, where the project is set up for it, to music segments, so visuals and beds follow the narration. With **Pro** off, the tab is visible in a read-only way until you buy in. If you use the block-based **Edit Story** workflow, the **Video** tab may limit timing choices so exports stay consistent with the blocks; see the in-app hints and **FAQ** for how **Video**, **Story**, and **Slideshow** modes show up in your case.
-
-        **Video, timing, and final mix.** In **Video**, choose a timing mode among **Video**, **Story**, and **Slideshow** when the picker offers them. **Story** paces the edit to your narration. **Slideshow** fits a more slide-focused timing. The **Video** option appears when that export path matches your media—read the card labels. If **Edit Story** (**Pro**) is on, the app may keep you on **Story** so your assigned blocks and narration stay in sync. Set aspect ratio, whether burned-in captions are on, and a caption look; use **Preview Video** for a short check, then **Create Video** for a full run at the quality, resolution, and frame-rate you pick. A mix area balances narration, **video** sound, and the music bed. If you change script, voice, media, mix, or captions, the app drops stale file URLs so the player is not out of date—rebuild, then **share** like any other movie.
-
-        **Settings, storage, and data.** The **Settings** entry from the main screen opens **About**, **Storage**, legal links, feedback, the **Pro** switch, and version details. You can clear **unused** data or the current project from **Storage** when space is tight. The script is saved as a draft; clearing a project can remove that draft, so keep copies of final exports you care about.
-
-        **Start.** Replace this with your own script, or go straight to **Media**, **Music**, and a no-script run with **Slideshow** or **Video** if that fits. Happy editing.
-        """
+        narrationText = isEditStoryProEnabled ? Self.defaultNarrationIntroductionPro : Self.defaultNarrationIntroductionBasic
         shouldPersistNarrationDraft = true
         statusMessage = "Introduction loaded."
     }
@@ -1208,6 +1226,7 @@ final class AppViewModel: NSObject, ObservableObject {
             try prepareAudioPlayer(with: bundledURL)
             hasPendingPreviewChanges = true
             hasPendingFinalVideoChanges = true
+            clearRenderedVideoFileReferencesIfPresent()
             statusMessage = "\(track.name) is ready to play."
         } catch {
             statusMessage = "Could not load bundled sample music."
@@ -1226,6 +1245,7 @@ final class AppViewModel: NSObject, ObservableObject {
         isImportingMusic = false
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
+        clearRenderedVideoFileReferencesIfPresent()
         statusMessage = "Music cleared. Your video will export without background music."
     }
 
@@ -1420,6 +1440,7 @@ final class AppViewModel: NSObject, ObservableObject {
 
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
+        clearRenderedVideoFileReferencesIfPresent()
         statusMessage = mediaItems.isEmpty
             ? "All media removed from the project."
             : "Media item removed from the project."
@@ -1440,6 +1461,7 @@ final class AppViewModel: NSObject, ObservableObject {
         refreshSelectedPhotoItemsFromMediaItems()
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
+        clearRenderedVideoFileReferencesIfPresent()
         statusMessage = "Media duplicated and inserted after the current item."
     }
 
@@ -1476,6 +1498,7 @@ final class AppViewModel: NSObject, ObservableObject {
         cleanupStaleMediaVideoCopies(from: previousMediaItems, keeping: [])
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
+        clearRenderedVideoFileReferencesIfPresent()
         statusMessage = "Media cleared. Import a new set whenever you're ready."
     }
 
@@ -1601,6 +1624,7 @@ final class AppViewModel: NSObject, ObservableObject {
         currentSlideIndex = mediaItems.firstIndex(where: { $0.id == sourceID }) ?? 0
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
+        clearRenderedVideoFileReferencesIfPresent()
         statusMessage = "Media order updated."
     }
 
@@ -1924,6 +1948,9 @@ final class AppViewModel: NSObject, ObservableObject {
             mediaItems = []
             currentSlideIndex = 0
             cleanupStaleMediaVideoCopies(from: previousMediaItems, keeping: [])
+            hasPendingPreviewChanges = true
+            hasPendingFinalVideoChanges = true
+            clearRenderedVideoFileReferencesIfPresent()
             statusMessage = "Media cleared. Pick new photos or videos to continue."
             return
         }
@@ -1937,6 +1964,7 @@ final class AppViewModel: NSObject, ObservableObject {
         cleanupStaleMediaVideoCopies(from: previousMediaItems, keeping: loadedMedia)
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
+        clearRenderedVideoFileReferencesIfPresent()
         if loadedMedia.isEmpty {
             statusMessage = "No valid photos or videos were selected."
         } else if hasIncompletePickerVideoImports {
@@ -2000,6 +2028,7 @@ final class AppViewModel: NSObject, ObservableObject {
         }
 
         mediaItems = previousMediaItems + appendedMedia
+        clearRenderedVideoFileReferencesIfPresent()
 
         if let combinedSelection {
             suppressSelectedPhotoItemsReload = true
@@ -2538,7 +2567,8 @@ final class AppViewModel: NSObject, ObservableObject {
         guard url.deletingLastPathComponent().standardizedFileURL == documents.standardizedFileURL else { return nil }
         guard !url.hasDirectoryPath else { return nil }
         guard !url.lastPathComponent.hasPrefix("picked-video-") else { return nil }
-        guard !url.lastPathComponent.hasPrefix("capcut-mini-") else { return nil }
+        let name = url.lastPathComponent
+        if name.hasPrefix("fluxcut-mini-") || name.hasPrefix("capcut-mini-") { return nil }
         guard !url.lastPathComponent.hasPrefix(".") else { return nil }
 
         let ext = url.pathExtension.lowercased()
@@ -2635,6 +2665,7 @@ final class AppViewModel: NSObject, ObservableObject {
 
         hasPendingPreviewChanges = true
         hasPendingFinalVideoChanges = true
+        clearRenderedVideoFileReferencesIfPresent()
 
         let count = mediaItems.count
         statusMessage = count == 1 ? "1 media item ready for your project." : "\(count) media item(s) ready for your project."
@@ -2655,6 +2686,9 @@ final class AppViewModel: NSObject, ObservableObject {
         currentSlideIndex = min(currentSlideIndex, max(0, mediaItems.count - 1))
         cleanupStaleMediaVideoCopies(from: previous, keeping: mediaItems)
         refreshSelectedPhotoItemsFromMediaItems()
+        hasPendingPreviewChanges = true
+        hasPendingFinalVideoChanges = true
+        clearRenderedVideoFileReferencesIfPresent()
     }
 
     private func prefetchVideoThumbnailFromLibrary(sourceAssetID: UUID, asset: PHAsset) async {
@@ -3136,6 +3170,7 @@ final class AppViewModel: NSObject, ObservableObject {
             try prepareAudioPlayer(with: prepared.url)
             hasPendingPreviewChanges = true
             hasPendingFinalVideoChanges = true
+            clearRenderedVideoFileReferencesIfPresent()
             statusMessage = items.count > 1
                 ? "Combined soundtrack is ready to play."
                 : "\(prepared.baseName) is ready to play."
@@ -3791,6 +3826,17 @@ final class AppViewModel: NSObject, ObservableObject {
             exportedVideoURL = nil
             exportProgress = 0
             statusMessage = reason
+        }
+    }
+
+    /// Clears cached preview / final file URLs so the **Video** tab does not play a **stale final export** when
+    /// `activeRenderedVideoURL` in `ContentView` prefers `exportedVideoURL` over a newer `videoPreviewURL`.
+    /// Not tied to Pro: same behavior for free and Pro after media, order, or in-flight media row updates.
+    private func clearRenderedVideoFileReferencesIfPresent() {
+        if exportedVideoURL != nil || videoPreviewURL != nil {
+            videoPreviewURL = nil
+            exportedVideoURL = nil
+            exportProgress = 0
         }
     }
 

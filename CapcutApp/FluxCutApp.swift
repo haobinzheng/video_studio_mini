@@ -1,14 +1,20 @@
 import SwiftUI
 
 @main
-struct CapcutApp: App {
+struct FluxCutApp: App {
     @StateObject private var viewModel = AppViewModel()
+    @StateObject private var proIAP = ProEntitlementManager()
     @State private var showsLaunchSplash = true
 
     var body: some Scene {
         WindowGroup {
             ZStack {
                 ContentView(viewModel: viewModel)
+                    .environmentObject(proIAP)
+                    .task {
+                        proIAP.bind(viewModel: viewModel)
+                        await proIAP.start()
+                    }
 
                 if showsLaunchSplash {
                     LaunchSplashView()
@@ -91,5 +97,4 @@ private struct LaunchSplashView: View {
             }
         }
     }
-
 }

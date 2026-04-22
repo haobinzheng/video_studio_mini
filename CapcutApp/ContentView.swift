@@ -29,6 +29,7 @@ struct ContentView: View {
     }
 
     @ObservedObject var viewModel: AppViewModel
+    @EnvironmentObject private var proIAP: ProEntitlementManager
     @State private var isMusicLibraryImporterPresented = false
     @State private var selectedMusicVideoItem: PhotosPickerItem?
     @State private var extractedSoundtrackShareFile: ShareableFile?
@@ -367,6 +368,66 @@ struct ContentView: View {
         .background(Color.white.opacity(0.58), in: RoundedRectangle(cornerRadius: 22, style: .continuous))
     }
 
+    @ViewBuilder
+    private var fluxCutProIAPBlock: some View {
+        if viewModel.isEditStoryProEnabled {
+            HStack(alignment: .center, spacing: 10) {
+                Image(systemName: "checkmark.seal.fill")
+                    .font(.title2)
+                    .foregroundStyle(.green)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("FluxCut Pro is active")
+                        .font(.subheadline.weight(.semibold))
+                    Text("Edit Story, full script, and watermark tools are available.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            VStack(alignment: .leading, spacing: 10) {
+                if proIAP.isLoadingProducts {
+                    ProgressView("Contacting the App Store…")
+                } else if proIAP.product == nil {
+                    Text("Product not loaded. Add the in-app purchase in App Store Connect, or use a StoreKit .storekit file in Xcode for testing.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Button {
+                    Task { await proIAP.purchase() }
+                } label: {
+                    HStack {
+                        if proIAP.purchaseInProgress {
+                            ProgressView()
+                        }
+                        Text("Unlock FluxCut Pro")
+                            .fontWeight(.semibold)
+                    }
+                    .frame(maxWidth: .infinity)
+                }
+                .buttonStyle(.borderedProminent)
+                .disabled(proIAP.purchaseInProgress)
+                Button("Restore purchases") {
+                    Task { await proIAP.restorePurchases() }
+                }
+                .disabled(proIAP.restoreInProgress)
+                if proIAP.restoreInProgress {
+                    ProgressView()
+                        .controlSize(.small)
+                }
+                if let err = proIAP.lastErrorMessage, !err.isEmpty {
+                    Text(err)
+                        .font(.caption2)
+                        .foregroundStyle(.red)
+                } else if let s = proIAP.lastStatusMessage, !s.isEmpty {
+                    Text(s)
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                }
+            }
+        }
+    }
+
     private var settingsSheet: some View {
         NavigationStack {
             List {
@@ -404,16 +465,11 @@ struct ContentView: View {
                 }
 
                 Section {
-                    Toggle("Enable Pro Features", isOn: $viewModel.isEditStoryProEnabled)
-                    Text(
-                        "Unlocks the full Pro tab, including Edit Story with Pro features (paragraph assignments and related tools). FluxCut Pro is a one-time in-app purchase. When Pro is off, you can open the Pro tab to see how it works; actions stay locked until you purchase."
-                    )
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                    fluxCutProIAPBlock
                 } header: {
                     Text("FluxCut Pro")
                 } footer: {
-                    Text("Purchase will be completed through the App Store (in-app purchase). The price is shown at checkout and may vary by region or over time.")
+                    Text("Unlocks the full Pro tab, unlimited script length, watermarks, and related tools. Purchase is a one-time in-app buy through the App Store. Use the same Apple ID and tap Restore on a new device. Mark strength in Watermark settings means opacity: lower = more see-through the video.")
                         .font(.caption2)
                         .foregroundStyle(.secondary)
                 }
@@ -580,8 +636,8 @@ struct ContentView: View {
 
             Section {
                 faqRow(
-                    question: "What is Enable Pro Features?",
-                    answer: "Pro unlocks the full Pro tab and removes free-tier script limits. Purchase is a one-time in-app purchase; price is shown in the App Store. You can enable Pro here or on the Pro tab."
+                    question: "What is FluxCut Pro?",
+                    answer: "FluxCut Pro is a one-time in-app purchase that unlocks the full Pro tab, removes free-tier script limits, and includes watermarking and related tools. Buy in Settings under FluxCut Pro, or in the Pro tab, then use Restore on a new device with the same Apple ID."
                 )
                 faqRow(
                     question: "Clear Unused Data vs Clear Current Project?",
@@ -2232,18 +2288,13 @@ struct ContentView: View {
                             .font(.title3)
                             .foregroundStyle(Color.orange)
                         Text(
-                            "Turn on Pro Features below to use Edit Story with Pro features here, or enable them in Settings. FluxCut Pro is a one-time in-app purchase. You can scroll and read below; controls stay inactive until Pro is on."
+                            "Unlock FluxCut Pro to use Edit Story, unlock the full script, and use watermarks. You can read the sections below; controls stay inactive until you purchase or restore."
                         )
                         .font(.subheadline.weight(.semibold))
                         .foregroundStyle(.primary)
                         .fixedSize(horizontal: false, vertical: true)
                     }
-                    Toggle("Enable Pro Features", isOn: $viewModel.isEditStoryProEnabled)
-                        .font(.subheadline.weight(.semibold))
-                    Text("The App Store shows the local price when you purchase.")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                    fluxCutProIAPBlock
                 }
                 .padding(12)
                 .frame(maxWidth: .infinity, alignment: .leading)
@@ -3011,15 +3062,6 @@ struct ContentView: View {
                 .scrollContentBackground(.hidden)
                 .background(Color.white, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
                 .focused($isNarrationFocused)
-
-            if !viewModel.isEditStoryProEnabled {
-                Text(
-                    "Free tier: up to \(AppViewModel.freeTierLatinWordLimit) words for Latin-based languages (e.g. English), or \(AppViewModel.freeTierNonLatinCharacterLimit) characters for scripts such as Chinese, Japanese, Korean, Arabic, and Hindi. Enable Pro Features above for unlimited script length and the full Pro tab (Edit Story with Pro features)."
-                )
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
-            }
 
             if isNarrationPreviewSectionVisible {
                 narrationPreviewSection

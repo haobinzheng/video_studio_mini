@@ -35,9 +35,9 @@ struct VideoExporter {
         var outputFileName: String {
             switch self {
             case .preview:
-                return "capcut-mini-preview.mov"
+                return "fluxcut-mini-preview.mov"
             case .finalStandard, .finalHigh:
-                return "capcut-mini-video.mov"
+                return "fluxcut-mini-video.mov"
             }
         }
 

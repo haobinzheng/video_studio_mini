@@ -1,0 +1,42 @@
+{
+  "appPolicies" : {
+    "eula" : "",
+    "policies" : [
+
+    ]
+  },
+  "identifier" : "A1B2C3D4",
+  "nonRenewingSubscriptions" : [
+
+  ],
+  "products" : [
+    {
+      "displayPrice" : "4.99",
+      "familyShareable" : false,
+      "internalID" : "E5F6A7B8",
+      "localizations" : [
+        {
+          "description" : "Unlocks FluxCut Pro editing features on this device.",
+          "displayName" : "FluxCut Pro",
+          "locale" : "en_US"
+        }
+      ],
+      "productID" : "com.haobin.fluxcut.20260401.mike.pro",
+      "referenceName" : "FluxCut Pro",
+      "type" : "NonConsumable"
+    }
+  ],
+  "settings" : {
+    "_askToBuyEnabled" : false,
+    "_failTransactionsEnabled" : false,
+    "_storeKitErrorsEnabled" : false,
+    "_storeKitConfigurationFileID" : "A1B2C3D4"
+  },
+  "subscriptionGroups" : [
+
+  ],
+  "version" : {
+    "major" : 3,
+    "minor" : 0
+  }
+}

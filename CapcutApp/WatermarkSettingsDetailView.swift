@@ -22,7 +22,7 @@ struct WatermarkSettingsDetailView: View {
         List {
             if !isWatermarkProUnlocked {
                 Section {
-                    Text("Adding a watermark to exports is a FluxCut Pro feature. Turn on “Enable Pro Features” in the Pro & purchases section, then you can use watermarks in exported videos.")
+                    Text("Adding a watermark to exports is a FluxCut Pro feature. Purchase FluxCut Pro in Settings (FluxCut Pro), then you can use watermarks in exported videos.")
                         .font(.subheadline)
                         .foregroundStyle(.primary)
                 }
