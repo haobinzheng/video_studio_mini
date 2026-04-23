@@ -232,11 +232,14 @@ struct ContentView: View {
                     viewModel.ensureNarrationVoiceSelectedForScriptTab()
                 }
             }
-            .onChange(of: viewModel.videoPreviewURL) { _, newValue in
-                updateRenderPreviewPlayer(for: newValue)
+            .onChange(of: viewModel.videoPreviewURL) { _, _ in
+                updateRenderPreviewPlayer(for: activeRenderedVideoURL)
             }
-            .onChange(of: viewModel.exportedVideoURL) { _, newValue in
-                updateRenderPreviewPlayer(for: newValue ?? viewModel.videoPreviewURL)
+            .onChange(of: viewModel.exportedVideoURL) { _, _ in
+                updateRenderPreviewPlayer(for: activeRenderedVideoURL)
+            }
+            .onChange(of: viewModel.hasPendingFinalVideoChanges) { _, _ in
+                updateRenderPreviewPlayer(for: activeRenderedVideoURL)
             }
             .onChange(of: viewModel.isPreparingVideoPreview) { _, isPreparing in
                 if isPreparing {
@@ -589,7 +592,7 @@ struct ContentView: View {
                 )
                 faqRow(
                     question: "Which voices can I use?",
-                    answer: "FluxCut lists Enhanced and Premium voices from the system. Download voices in Settings → Accessibility → Spoken Content → Voices, then tap Reload iPhone Voices in the Script tab if needed. Siri-only personas are not available to third-party apps."
+                    answer: "FluxCut lists Enhanced and Premium voices from the system. Add or download voices in Settings → Accessibility → VoiceOver → Speech (for example Add Rotor Voice on iOS 26.3.1), then tap Reload iPhone Voices in the Script tab if needed. Siri-only personas are not available to third-party apps."
                 )
             } header: {
                 Text("Getting started")
@@ -1023,13 +1026,13 @@ struct ContentView: View {
             Color.black.opacity(0.96)
                 .ignoresSafeArea()
 
-            FullscreenPlayerContainer(player: renderPreviewPlayer)
+            RenderPlayerViewController(player: renderPreviewPlayer)
                 .ignoresSafeArea()
 
             VStack(spacing: 0) {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text(viewModel.exportedVideoURL != nil ? "Final Video" : "Preview Sample")
+                        Text(isVideoCardPlayingFinalExport ? "Final Video" : "Preview Sample")
                             .font(.headline.weight(.bold))
                             .foregroundStyle(.white)
                         Text("Fullscreen playback")
@@ -2772,7 +2775,7 @@ struct ContentView: View {
             .padding(.vertical, 7)
             .background(Color.white.opacity(0.72), in: Capsule())
 
-            Text("Reload after downloading Enhanced or Premium in Settings → Voices. Pick the matching language above. Siri voices are not available to FluxCut on iOS.")
+            Text("Reload after adding Enhanced or Premium under Settings → Accessibility → VoiceOver → Speech (e.g. Add Rotor Voice on iOS 26.3.1). Pick the matching language above. Siri voices are not available to FluxCut on iOS.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -4165,11 +4168,13 @@ struct ContentView: View {
             if let displayedVideoURL = activeRenderedVideoURL {
                 VStack(alignment: .leading, spacing: 10) {
                     ZStack(alignment: .topLeading) {
-                        VideoPlayer(player: renderPreviewPlayer)
+                        RenderPlayerViewController(player: renderPreviewPlayer)
+                            .frame(maxWidth: .infinity)
                             .frame(height: 320)
+                            .background(Color.black)
                             .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
 
-                        Text(viewModel.exportedVideoURL != nil ? "Final Video" : "Preview Sample")
+                        Text(isVideoCardPlayingFinalExport ? "Final Video" : "Preview Sample")
                             .font(.caption.weight(.bold))
                             .foregroundStyle(.white)
                             .padding(.horizontal, 12)
@@ -4210,7 +4215,7 @@ struct ContentView: View {
                     }
 
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(viewModel.exportedVideoURL != nil ? "Final Video" : "Preview Video")
+                        Text(isVideoCardPlayingFinalExport ? "Final Video" : "Preview Video")
                             .font(.caption.weight(.semibold))
                             .foregroundStyle(.secondary)
                         if let fileSize = formattedFileSize(for: displayedVideoURL) {
@@ -4293,12 +4298,23 @@ struct ContentView: View {
         return formatter.string(fromByteCount: Int64(fileSize))
     }
 
+    /// Resolved URL for the Video tab player. When the final export is **stale** (`hasPendingFinalVideoChanges`) but a preview file exists, show the preview so a fresh ~20s sample is visible instead of a stale final blocking it.
     private var activeRenderedVideoURL: URL? {
         guard !viewModel.isExportingVideo, !viewModel.isPreparingVideoPreview else {
             return nil
         }
-
+        if viewModel.hasPendingFinalVideoChanges, let preview = viewModel.videoPreviewURL {
+            return preview
+        }
         return viewModel.exportedVideoURL ?? viewModel.videoPreviewURL
+    }
+
+    /// Whether the in-tab / fullscreen player is actually playing the on-disk **final** export (vs a preview sample file).
+    private var isVideoCardPlayingFinalExport: Bool {
+        guard !viewModel.isExportingVideo, !viewModel.isPreparingVideoPreview,
+              let active = activeRenderedVideoURL,
+              let final = viewModel.exportedVideoURL else { return false }
+        return active.standardizedFileURL == final.standardizedFileURL
     }
 
     private func updateRenderPreviewPlayer(for url: URL?) {
@@ -4404,7 +4420,8 @@ private struct ShareSheet: UIViewControllerRepresentable {
     func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }
 
-private struct FullscreenPlayerContainer: UIViewControllerRepresentable {
+/// `AVPlayerViewController` with **resizeAspect** for correct letterboxing. Used for Video tab + fullscreen; avoids SwiftUI `VideoPlayer` layout issues with some exports.
+private struct RenderPlayerViewController: UIViewControllerRepresentable {
     let player: AVPlayer
 
     func makeUIViewController(context: Context) -> AVPlayerViewController {

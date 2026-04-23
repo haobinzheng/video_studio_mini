@@ -458,6 +458,8 @@ struct VideoExporter {
                 videoAudioVolume: videoAudioVolume,
                 maximumDuration: renderQuality.maximumDuration,
                 videoModeSettings: renderQuality == .preview ? nil : videoModeSettings,
+                renderQuality: renderQuality,
+                aspectRatio: aspectRatio,
                 outputURL: finalURL,
                 watermarkSettings: watermarkSettings,
                 progressHandler: progressHandler
@@ -717,6 +719,7 @@ struct VideoExporter {
                 outputURL: smoothOutputURL,
                 storySegmentMusic: storySegmentMusicSlots,
                 timingMode: timingMode,
+                preserveSourceScale: videoModeSettings == nil,
                 watermarkSettings: watermarkInComposition,
                 progressHandler: progressHandler
             )
@@ -1585,6 +1588,102 @@ struct VideoExporter {
         try await awaitExportSession(exportSession)
     }
 
+    /// Output dimensions for **Video** stitch. **Frame rate** and **encoder** output are still `VideoModeExportSettings`
+    /// (user `frameRate` + `quality` → `AVAssetExportPreset*`). **Pixel size** is driven by:
+    /// - **Preview** (`videoModeSettings == nil`): `RenderQuality` minimum (960×540 / 1280×720 / etc.) + media, no user cap.
+    /// - **Final** (`videoModeSettings != nil`): Combine stitch + `preferredMediaDriven` **only** when their aspect
+    ///   matches (independent per-axis `max` produced 3840×3840 for portrait vs landscape). Then **uniform** scale
+    ///   to the user `Resolution` (never per-axis `min(·,user)`; that made 4K exports stay tiny, e.g. 640 instead of
+    ///   3840×2160).
+    private func exportVideoStitchOutputSize(
+        videoModeFromStitch: CGSize,
+        mediaItems: [MediaItem],
+        aspectRatio: AspectRatio,
+        renderQuality: RenderQuality,
+        videoModeSettings: VideoModeExportSettings?
+    ) -> CGSize {
+        let mediaDrivenMinimum: CGSize = {
+            if let s = videoModeSettings {
+                return s.resolution.renderSize
+            }
+            return renderQuality.renderSize(for: aspectRatio)
+        }()
+        let mediaDriven = preferredMediaDrivenRenderSize(
+            for: mediaItems,
+            aspectRatio: aspectRatio,
+            minimumSize: mediaDrivenMinimum
+        )
+        var merged: CGSize
+        if Self.aspectRatiosAreClose(videoModeFromStitch, mediaDriven) {
+            merged = CGSize(
+                width: max(videoModeFromStitch.width, mediaDriven.width),
+                height: max(videoModeFromStitch.height, mediaDriven.height)
+            )
+        } else {
+            merged = videoModeFromStitch
+        }
+        guard let user = videoModeSettings?.resolution.renderSize else {
+            return merged
+        }
+        return outputSizeFittingUserResolution(
+            merged,
+            user: user,
+            stitchOrientationSize: videoModeFromStitch
+        )
+    }
+
+    private static func aspectRatiosAreClose(_ a: CGSize, _ b: CGSize) -> Bool {
+        let aw = max(a.width, 1)
+        let ah = max(a.height, 1)
+        let bw = max(b.width, 1)
+        let bh = max(b.height, 1)
+        let ar = aw / ah
+        let br = bw / bh
+        return abs(ar - br) / max(ar, br) < 0.08
+    }
+
+    /// **Scales up** (cover) then **in** (contain) so the result **fits the user** `Resolution` with one transform.
+    /// For stitch vs. user **orientation mismatch**, use **stitch** dimensions and only cap the **longest side** to
+    /// the user’s longest side (4K = 3840) so portrait 4K exports stay 2160×3840, not 2160×2160.
+    private func outputSizeFittingUserResolution(
+        _ merged: CGSize,
+        user: CGSize,
+        stitchOrientationSize: CGSize
+    ) -> CGSize {
+        let uw = max(user.width, 1)
+        let uh = max(user.height, 1)
+        var working = merged
+        if !Self.aspectRatiosAreClose(merged, user) {
+            working = stitchOrientationSize
+        }
+        let w0 = max(working.width, 1)
+        let h0 = max(working.height, 1)
+        if Self.aspectRatiosAreClose(working, user) {
+            let sCover = max(uw / w0, uh / h0)
+            var s = CGSize(width: w0 * sCover, height: h0 * sCover)
+            let sIn = min(1, uw / s.width, uh / s.height)
+            s = CGSize(width: s.width * sIn, height: s.height * sIn)
+            return Self.evenPixelSize(s.width, s.height)
+        }
+        // Match the user’s longest side to their chosen resolution. Do **not** clamp with `min(1,·)` here: when the
+        // stitch box is still small (e.g. 640×360) but the user picked 4K, we must **upscale** to 3840 on the long
+        // edge. The old `min(1,·)` only ever downscaled and left 4K exports at the stitch’s native tiny size.
+        let capLong = max(uw, uh)
+        let longIn = max(w0, h0)
+        let t = capLong / longIn
+        return Self.evenPixelSize(
+            stitchOrientationSize.width * t,
+            stitchOrientationSize.height * t
+        )
+    }
+
+    private static func evenPixelSize(_ w: CGFloat, _ h: CGFloat) -> CGSize {
+        CGSize(
+            width: max(2, (w / 2).rounded(.toNearestOrAwayFromZero) * 2),
+            height: max(2, (h / 2).rounded(.toNearestOrAwayFromZero) * 2)
+        )
+    }
+
     private func exportVideoStitch(
         mediaItems: [MediaItem],
         backgroundMusicURL: URL?,
@@ -1592,6 +1691,8 @@ struct VideoExporter {
         videoAudioVolume: Double,
         maximumDuration: CMTime?,
         videoModeSettings: VideoModeExportSettings?,
+        renderQuality: RenderQuality,
+        aspectRatio: AspectRatio,
         outputURL: URL,
         watermarkSettings: WatermarkSettings? = nil,
         progressHandler: ((Double, String) -> Void)? = nil
@@ -1698,6 +1799,13 @@ struct VideoExporter {
             for: segmentLayouts,
             requestedResolution: videoModeSettings?.resolution.renderSize
         )
+        let finalRenderSize = exportVideoStitchOutputSize(
+            videoModeFromStitch: videoModeRenderSize,
+            mediaItems: mediaItems,
+            aspectRatio: aspectRatio,
+            renderQuality: renderQuality,
+            videoModeSettings: videoModeSettings
+        )
         let canAttemptStrictPassthrough = false
         let frameRate = videoModeSettings?.frameRate.value ?? 30
         let presetName = videoModeSettings?.quality.exportPresetName ?? AVAssetExportPresetHighestQuality
@@ -1751,9 +1859,10 @@ struct VideoExporter {
                         for: compositionVideoTrack,
                         segmentLayouts: segmentLayouts,
                         totalDuration: totalDuration,
-                        targetRenderSize: videoModeRenderSize,
+                        targetRenderSize: finalRenderSize,
                         frameRate: frameRate,
-                        preserveSourceScale: true,
+                        // Final “4K/1080p/720p” from Video mode: scale **up** so the picture fills the output; `true` kept only for preview.
+                        preserveSourceScale: videoModeSettings == nil,
                         watermarkSettings: watermarkSettings
                     ),
                 exportTimeRange: stitchExportRange,
@@ -1777,9 +1886,9 @@ struct VideoExporter {
                     for: compositionVideoTrack,
                     segmentLayouts: segmentLayouts,
                     totalDuration: totalDuration,
-                    targetRenderSize: videoModeRenderSize,
+                    targetRenderSize: finalRenderSize,
                     frameRate: frameRate,
-                    preserveSourceScale: true,
+                    preserveSourceScale: videoModeSettings == nil,
                     watermarkSettings: watermarkSettings
                 ),
                 exportTimeRange: stitchExportRange,
@@ -1804,6 +1913,8 @@ struct VideoExporter {
         outputURL: URL,
         storySegmentMusic: [StorySegmentMusicSlot]? = nil,
         timingMode: TimingMode,
+        /// When `false`, source video is **upscaled** (as needed) to **fill** `renderSize` (same as “scale to fit” without a 1× cap). When `true`, resolution is not increased above native (`min(fit,1)`), so 720p in a 4K frame stays a small picture—used for preview.
+        preserveSourceScale: Bool,
         watermarkSettings: WatermarkSettings? = nil,
         progressHandler: ((Double, String) -> Void)? = nil
     ) async throws {
@@ -2006,7 +2117,7 @@ struct VideoExporter {
                 totalDuration: totalDuration,
                 targetRenderSize: realLifeRenderSize,
                 frameRate: frameRate,
-                preserveSourceScale: true,
+                preserveSourceScale: preserveSourceScale,
                 watermarkSettings: watermarkSettings
             ),
             exportTimeRange: CMTimeRange(start: .zero, duration: totalDuration),
@@ -3981,8 +4092,16 @@ struct VideoExporter {
             (videoPressure.totalVideoSeconds > 600 || videoPressure.longestClipSeconds > 240)
 
         if timingMode == .video {
+            let stitchApprox = videoModeSettings?.resolution.renderSize ?? baseSize
+            let renderSize = exportVideoStitchOutputSize(
+                videoModeFromStitch: stitchApprox,
+                mediaItems: mediaItems,
+                aspectRatio: aspectRatio,
+                renderQuality: quality,
+                videoModeSettings: videoModeSettings
+            )
             return RenderProfile(
-                renderSize: preferredMediaDrivenRenderSize(for: mediaItems, aspectRatio: aspectRatio, minimumSize: baseSize),
+                renderSize: renderSize,
                 frameRate: baseRate,
                 longFormOptimized: false,
                 videoSampleStride: hasHeavyVideoLoad || seconds > 900 ? 2 : 1
@@ -3995,6 +4114,23 @@ struct VideoExporter {
                 return false
             }
             if isPhotoOnlyRealLife {
+                if let vms = videoModeSettings {
+                    let userFloor = vms.resolution.renderSize
+                    return RenderProfile(
+                        renderSize: outputSizeFittingUserResolution(
+                            preferredMediaDrivenRenderSize(
+                                for: mediaItems,
+                                aspectRatio: aspectRatio,
+                                minimumSize: userFloor
+                            ),
+                            user: userFloor,
+                            stitchOrientationSize: userFloor
+                        ),
+                        frameRate: vms.frameRate.value,
+                        longFormOptimized: false,
+                        videoSampleStride: 1
+                    )
+                }
                 let photoMinimumSize: CGSize = {
                     switch quality {
                     case .preview:
@@ -4193,16 +4329,39 @@ struct VideoExporter {
             requestedSettings.quality == .high
 
         if narrationIsLonger && selectedIsHeavyCombo {
+            let cap = VideoModeResolution.p1080.renderSize
+            let merged: CGSize
+            if Self.aspectRatiosAreClose(cap, fallbackRenderSize) {
+                merged = CGSize(
+                    width: max(cap.width, fallbackRenderSize.width),
+                    height: max(cap.height, fallbackRenderSize.height)
+                )
+            } else {
+                merged = cap
+            }
+            let renderSize = outputSizeFittingUserResolution(merged, user: cap, stitchOrientationSize: cap)
             return EffectiveSlideshowExportSettings(
                 frameRate: VideoModeFrameRate.fps30.value,
-                renderSize: VideoModeResolution.p1080.renderSize,
+                renderSize: renderSize,
                 presetName: VideoModeQuality.high.exportPresetName
             )
         }
 
+        let userPick = requestedSettings.resolution.renderSize
+        let merged: CGSize
+        if Self.aspectRatiosAreClose(userPick, fallbackRenderSize) {
+            merged = CGSize(
+                width: max(userPick.width, fallbackRenderSize.width),
+                height: max(userPick.height, fallbackRenderSize.height)
+            )
+        } else {
+            merged = userPick
+        }
+        let renderSize = outputSizeFittingUserResolution(merged, user: userPick, stitchOrientationSize: userPick)
         return EffectiveSlideshowExportSettings(
             frameRate: requestedSettings.frameRate.value,
-            renderSize: requestedSettings.resolution.renderSize,
+            /// User **Resolution** is the cap; `fallback` is the media floor. Apply **uniform** fit (not per-axis `min`), same as **Video** stitch, so 4K Slideshows are not shrunk to 640.
+            renderSize: renderSize,
             presetName: requestedSettings.quality.exportPresetName
         )
     }

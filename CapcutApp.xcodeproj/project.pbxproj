@@ -24,6 +24,7 @@
 		A1B2C3D41E00002400000001 /* SettingsSupportViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001900000001 /* SettingsSupportViews.swift */; };
 		A1B2C3D41E00002500000001 /* WatermarkSettingsDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001A00000001 /* WatermarkSettingsDetailView.swift */; };
 		A1B2C3D41E00002600000001 /* ProEntitlementManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001B00000001 /* ProEntitlementManager.swift */; };
+		A1B2C3D41E00002700000001 /* PrivacyInfo.xcprivacy in Resources */ = {isa = PBXBuildFile; fileRef = A1B2C3D41D00001C00000001 /* PrivacyInfo.xcprivacy */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -47,6 +48,7 @@
 		A1B2C3D41D00001900000001 /* SettingsSupportViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsSupportViews.swift; sourceTree = "<group>"; };
 		A1B2C3D41D00001A00000001 /* WatermarkSettingsDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WatermarkSettingsDetailView.swift; sourceTree = "<group>"; };
 		A1B2C3D41D00001B00000001 /* ProEntitlementManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProEntitlementManager.swift; sourceTree = "<group>"; };
+		A1B2C3D41D00001C00000001 /* PrivacyInfo.xcprivacy */ = {isa = PBXFileReference; lastKnownFileType = text.xml; path = PrivacyInfo.xcprivacy; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -90,6 +92,7 @@
 				A1B2C3D41D00000400000001 /* Assets.xcassets */,
 				A1B2C3D41D00000600000001 /* Preview Assets.xcassets */,
 				A1B2C3D41D00000500000001 /* Info.plist */,
+				A1B2C3D41D00001C00000001 /* PrivacyInfo.xcprivacy */,
 			);
 			path = CapcutApp;
 			sourceTree = "<group>";
@@ -164,6 +167,7 @@
 				A1B2C3D41E00000500000001 /* Preview Assets.xcassets in Resources */,
 				A1B2C3D41E00000700000001 /* SampleMusic/dream_culture.mp3 in Resources */,
 				A1B2C3D41E00000800000001 /* SampleMusic/local_forecast.mp3 in Resources */,
+				A1B2C3D41E00002700000001 /* PrivacyInfo.xcprivacy in Resources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

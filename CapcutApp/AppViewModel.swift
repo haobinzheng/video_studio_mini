@@ -263,9 +263,9 @@ final class AppViewModel: NSObject, ObservableObject {
     private static let defaultNarrationIntroductionBasic: String = """
     Welcome to **FluxCut**. This introduction is long on purpose: if you read it in your head it may take a few minutes, and you can tap **Play Script** to hear the whole tour in whatever voice you choose. Replace it whenever you like, or load it again from the **Introduction** action when the script is empty. Think of the following paragraphs as a narrated map of the app.
 
-    **What you are building.** **FluxCut** is an iPhone studio for shareable video from your words, your photos, your video clips, and your music. Most people work in a loop: **Script**, then **Media**, then **Music**, then **Video**, with the **Pro** tab available when you want **Edit Story** tools. You can also leave the script area blank and build projects that are mostly music and pictures—**Script** helps when you want narration, but you are not required to type a script for every run.
+    **What you are building.** **FluxCut** is an iPhone studio for shareable video from your words, your photos, your video clips, and your music. Most people work in a loop: **Script**, then **Media**, then **Music**, then **Video**, with the **Pro** tab available when you want **Edit Story** tools. You can also leave the script area blank and build projects that are mostly music and pictures—**Script** helps when you want narration, but you are not required to type a script for every run. **World languages** are a first-class feature: you can narrate in the languages Apple’s on-device speech supports, including **English**, **Chinese**, **Hindi and other Indic languages**, **Arabic**, and more—set the right **Language** in **Script**, then a matching **voice**.
 
-    **Script: text, language, and voice.** Type or paste your narration. Blank lines separate paragraphs; that shape matters for **Clean Up**, for captions, and for **Edit Story** when you align paragraphs to blocks. Choose a language group, then a voice. **FluxCut** lists **Enhanced** and **Premium** voices; download more in iOS **Settings** → **Accessibility** → **Spoken Content** → **Voices**, then return here and tap **Reload iPhone Voices**. **Siri**-style personas in Settings (**Voice 1**, **Voice 2**) are not available to third-party apps on iOS, only to Apple’s own features.
+    **Script: text, language, and voice.** Type or paste your narration. Blank lines separate paragraphs; that shape matters for **Clean Up**, for captions, and for **Edit Story** when you align paragraphs to blocks. Choose a language group, then a voice. **FluxCut** lists **Enhanced** and **Premium** voices; download or add more in iOS **Settings** → **Accessibility** → **VoiceOver** → **Speech** (for example **Add Rotor Voice** on iOS 26.3.1), then return here and tap **Reload iPhone Voices**. **Siri**-style personas in Settings (**Voice 1**, **Voice 2**) are not available to third-party apps on iOS, only to Apple’s own features.
 
     You can **hide** voices in the list, and adjust **speech** rate so the delivery matches the mood you want. **Reload iPhone Voices** if Standard voices look missing after a tier or download change.
 
@@ -286,9 +286,9 @@ final class AppViewModel: NSObject, ObservableObject {
     private static let defaultNarrationIntroductionPro: String = """
     Welcome to **FluxCut**. This introduction is long on purpose: if you read it in your head it usually takes about five or six minutes, and you can tap **Play Script** to hear the whole tour in whatever voice you choose. Replace it whenever you like, or load it again from the **Introduction** action when the script is empty. Think of the following paragraphs as a narrated map of the app.
 
-    **What you are building.** **FluxCut** is an iPhone studio for shareable video from your words, your photos, your video clips, and your music. Most people work in a loop: **Script**, then **Media**, then **Music**, then **Video**, with the **Pro** tab available when you want **Edit Story** tools. You can also leave the script area blank and build projects that are mostly music and pictures—**Script** helps when you want narration, but you are not required to type a script for every run.
+    **What you are building.** **FluxCut** is an iPhone studio for shareable video from your words, your photos, your video clips, and your music. Most people work in a loop: **Script**, then **Media**, then **Music**, then **Video**, with the **Pro** tab available when you want **Edit Story** tools. You can also leave the script area blank and build projects that are mostly music and pictures—**Script** helps when you want narration, but you are not required to type a script for every run. **World languages** are a first-class feature: you can narrate in the languages Apple’s on-device speech supports, including **English**, **Chinese**, **Hindi and other Indic languages**, **Arabic**, and more—set the right **Language** in **Script**, then a matching **voice**.
 
-    **Script: text, language, and voice.** Type or paste your narration. Blank lines separate paragraphs; that shape matters for **Clean Up**, for captions, and for **Edit Story** when you align paragraphs to blocks. Choose a language group, then a voice. **FluxCut** lists **Enhanced** and **Premium** voices; download more in iOS **Settings** → **Accessibility** → **Spoken Content** → **Voices**, then return here and tap **Reload iPhone Voices**. **Siri**-style personas in Settings (**Voice 1**, **Voice 2**) are not available to third-party apps on iOS, only to Apple’s own features.
+    **Script: text, language, and voice.** Type or paste your narration. Blank lines separate paragraphs; that shape matters for **Clean Up**, for captions, and for **Edit Story** when you align paragraphs to blocks. Choose a language group, then a voice. **FluxCut** lists **Enhanced** and **Premium** voices; download or add more in iOS **Settings** → **Accessibility** → **VoiceOver** → **Speech** (for example **Add Rotor Voice** on iOS 26.3.1), then return here and tap **Reload iPhone Voices**. **Siri**-style personas in Settings (**Voice 1**, **Voice 2**) are not available to third-party apps on iOS, only to Apple’s own features.
 
     You can **hide** voices in the list, and adjust **speech** rate so the delivery matches the mood you want. **Reload iPhone Voices** if Standard voices look missing after a tier or download change.
 
@@ -1897,7 +1897,7 @@ final class AppViewModel: NSObject, ObservableObject {
             if SpeechVoiceLibrary.isUsingLooseVoiceFallback {
                 voiceReloadFeedback = "\(availableVoices.count) Apple voices loaded (Standard fallback)"
                 statusMessage =
-                    "Voice list refreshed. Enhanced and Premium voices are not installed yet—showing Standard voices. Download them in Settings → Accessibility → Spoken Content → Voices, then reload."
+                    "Voice list refreshed. Enhanced and Premium voices are not installed yet—showing Standard voices. Add or download them in Settings → Accessibility → VoiceOver → Speech (e.g. Add Rotor Voice on iOS 26.3.1), then reload."
             } else {
                 voiceReloadFeedback = "\(availableVoices.count) Apple voices loaded"
                 statusMessage = "Voice list refreshed."
@@ -1905,7 +1905,7 @@ final class AppViewModel: NSObject, ObservableObject {
         } else {
             voiceReloadFeedback = "No Apple voices found"
             statusMessage =
-                "On your iPhone, open Settings → Accessibility → Spoken Content → Voices and download Enhanced or Premium voices for your language. Siri voices cannot be used by third-party apps. Tap Reload. On Simulator, try a physical iPhone."
+                "On your iPhone, open Settings → Accessibility → VoiceOver → Speech, add or download voices for your language (e.g. Add Rotor Voice on iOS 26.3.1). Siri voices cannot be used by third-party apps. Tap Reload. On Simulator, try a physical iPhone."
         }
     }
 
