@@ -1627,6 +1627,7 @@ struct ContentView: View {
                         Text(assignSheetBlockScriptText)
                             .font(.subheadline)
                             .foregroundStyle(.primary)
+                            .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                     }
                     .frame(minHeight: 72, maxHeight: 160)
@@ -1829,6 +1830,7 @@ struct ContentView: View {
                                 Text(musicAssignSheetScriptText)
                                     .font(.subheadline)
                                     .foregroundStyle(.primary)
+                                    .textSelection(.enabled)
                                     .frame(maxWidth: .infinity, alignment: .leading)
                             }
                             .frame(minHeight: 72, maxHeight: 200)
