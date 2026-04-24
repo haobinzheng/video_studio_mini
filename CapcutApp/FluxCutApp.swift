@@ -22,6 +22,8 @@ struct FluxCutApp: App {
                         .zIndex(10)
                 }
             }
+            // 1B: match UIUserInterfaceStyle in Info.plist so SwiftUI .primary / labels stay dark on our light cards.
+            .preferredColorScheme(.light)
             .task {
                 guard showsLaunchSplash else { return }
                 try? await Task.sleep(nanoseconds: 1_400_000_000)

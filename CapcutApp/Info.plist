@@ -22,6 +22,9 @@
 	<string>$(CURRENT_PROJECT_VERSION)</string>
 	<key>LSRequiresIPhoneOS</key>
 	<true/>
+	<!-- 1B: entire UI is designed for light surfaces; keep light when the device uses Dark Mode. -->
+	<key>UIUserInterfaceStyle</key>
+	<string>Light</string>
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>Select photos and video for your FluxCut project.</string>
 	<key>UIApplicationSceneManifest</key>
