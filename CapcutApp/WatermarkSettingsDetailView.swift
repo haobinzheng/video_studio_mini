@@ -138,9 +138,9 @@ struct WatermarkSettingsDetailView: View {
                 defer { importPickerItem = nil }
                 if let data = try? await item.loadTransferable(type: Data.self) {
                     if let image = UIImage(data: data), let png = image.pngData() {
-                        try? viewModel.importWatermarkImageData(png)
+                        _ = try? viewModel.importWatermarkImageData(png)
                     } else {
-                        try? viewModel.importWatermarkImageData(data)
+                        _ = try? viewModel.importWatermarkImageData(data)
                     }
                 }
             }

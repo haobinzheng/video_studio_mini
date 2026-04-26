@@ -4,7 +4,7 @@ import NaturalLanguage
 /// Shared caption line splitting: `NLTokenizer` for languages where word boundaries are not space-delimited
 /// (Chinese, Japanese, Korean, Lao, Thai, etc.); legacy whitespace / fixed character splitting otherwise.
 enum CaptionTextChunker {
-    private static let phraseSeparators = CharacterSet(charactersIn: ",，、")
+    private static let phraseSeparators: Set<Character> = [",", "，", "、"]
     private static let maxLegacyWords = 12
     private static let maxLegacyCJKCharacters = 10
 
@@ -25,6 +25,21 @@ enum CaptionTextChunker {
 
     /// Below this length, keep one segment even if it contains ， (avoids chopping short phrases).
     private static let minScriptLengthToSplitOnLightPauses = 24
+
+    /// `,` / `。`-style clause breaks must **not** split `1,100`, `1.3`, or `1，234` in the middle of the number token.
+    private static func isNumberInteriorDelimiter(_ chars: [Character], at i: Int) -> Bool {
+        guard i >= 0, i < chars.count else { return false }
+        let d = chars[i]
+        if d == "." || d == "．" {
+            guard i > 0, i + 1 < chars.count else { return false }
+            return chars[i - 1].isNumber && chars[i + 1].isNumber
+        }
+        if d == "," || d == "，" {
+            guard i > 0, i + 1 < chars.count else { return false }
+            return chars[i - 1].isNumber && chars[i + 1].isNumber
+        }
+        return false
+    }
 
     /// Merge short leading / middle fragments into the next chunk (e.g. avoid a lone "然而" before a longer clause).
     private static let minClauseGraphemesBeforeStandalone = 8
@@ -169,20 +184,31 @@ enum CaptionTextChunker {
     }
 
     /// Splits when a delimiter is seen; each segment includes its closing delimiter (e.g. `。`).
+    /// Skips a split when the delimiter is inside a number (`1,100`, `1.3`, `1．5`).
     private static func splitOnTrailingDelimiters(_ text: String, delimiters: Set<Character>) -> [String] {
+        let chars = Array(text)
         var segments: [String] = []
-        var current = ""
-        for ch in text {
+        var current: [Character] = []
+        var i = 0
+        while i < chars.count {
+            let ch = chars[i]
+            if delimiters.contains(ch), isNumberInteriorDelimiter(chars, at: i) {
+                current.append(ch)
+                i += 1
+                continue
+            }
             current.append(ch)
             if delimiters.contains(ch) {
-                let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                let s = String(current)
+                let trimmed = s.trimmingCharacters(in: .whitespacesAndNewlines)
                 if !trimmed.isEmpty {
                     segments.append(trimmed)
                 }
-                current = ""
+                current = []
             }
+            i += 1
         }
-        let tail = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        let tail = String(current).trimmingCharacters(in: .whitespacesAndNewlines)
         if !tail.isEmpty {
             segments.append(tail)
         }
@@ -190,11 +216,22 @@ enum CaptionTextChunker {
     }
 
     private static func splitOnCommaPhrases(_ text: String) -> [String] {
-        let phrases = text
-            .components(separatedBy: phraseSeparators)
-            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-            .filter { !$0.isEmpty }
-        return phrases.isEmpty ? [text] : phrases
+        let chars = Array(text)
+        var pieces: [String] = []
+        var current: [Character] = []
+        for i in chars.indices {
+            let ch = chars[i]
+            if phraseSeparators.contains(ch), !isNumberInteriorDelimiter(chars, at: i) {
+                let t = String(current).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !t.isEmpty { pieces.append(t) }
+                current = []
+            } else {
+                current.append(ch)
+            }
+        }
+        let last = String(current).trimmingCharacters(in: .whitespacesAndNewlines)
+        if !last.isEmpty { pieces.append(last) }
+        return pieces.isEmpty ? [text] : pieces
     }
 
     /// TTS segment list for **sentence-aligned** narration (Chinese, Japanese, Lao family): one utterance per sentence when possible.

@@ -198,13 +198,11 @@ struct ContentView: View {
             }
             .onChange(of: selectedMusicVideoItem) { _, newValue in
                 guard let newValue else { return }
-                Task {
-                    let extractedURL = await viewModel.extractSoundtrackForExport(from: newValue)
-                    await MainActor.run {
-                        selectedMusicVideoItem = nil
-                        if let extractedURL {
-                            extractedSoundtrackShareFile = ShareableFile(url: extractedURL)
-                        }
+                let picked = newValue
+                selectedMusicVideoItem = nil
+                Task { @MainActor in
+                    if let url = await viewModel.extractSoundtrackForExport(from: picked) {
+                        extractedSoundtrackShareFile = ShareableFile(url: url)
                     }
                 }
             }
@@ -911,7 +909,8 @@ struct ContentView: View {
                 allowsMultipleSelection: true
             ) { result in
                 if case let .success(urls) = result, !urls.isEmpty {
-                    viewModel.importMusicToLibrary(from: urls)
+                    // Synchronous security-scoped access + copy; do not use `importMusicToLibrary` (it defers with `Task` and breaks scoped URLs).
+                    viewModel.ingestPickedFilesIntoMusicLibraryFromFileImporter(urls)
                     selectedStep = .music
                 }
             }
@@ -971,7 +970,7 @@ struct ContentView: View {
                     }
                     .buttonStyle(.bordered)
                     .tint(Color(red: 0.44, green: 0.36, blue: 0.78))
-                    .disabled(viewModel.isImportingMusic)
+                    .disabled(viewModel.isImportingMusic || viewModel.isExtractingSoundtrackInBackground)
 
                     Button {
                         isMusicLibraryImporterPresented = true
@@ -982,7 +981,7 @@ struct ContentView: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Color(red: 0.19, green: 0.48, blue: 0.82))
-                    .disabled(viewModel.isImportingMusic)
+                    .disabled(viewModel.isImportingMusic || viewModel.isExtractingSoundtrackInBackground)
                 }
                 .padding(.horizontal, 16)
                 .padding(.top, 10)
@@ -990,6 +989,38 @@ struct ContentView: View {
                 .background(.ultraThinMaterial)
             }
         }
+        .overlay {
+            if viewModel.isExtractingSoundtrackInBackground {
+                musicLibrarySoundtrackExtractionOverlay
+            }
+        }
+        .animation(.easeInOut(duration: 0.22), value: viewModel.isExtractingSoundtrackInBackground)
+    }
+
+    /// Shown on the Music Library sheet while a video is being prepared and audio is extracted, before the system Save/share sheet appears.
+    private var musicLibrarySoundtrackExtractionOverlay: some View {
+        ZStack {
+            Color.black.opacity(0.4)
+                .ignoresSafeArea()
+            VStack(spacing: 16) {
+                ProgressView()
+                    .controlSize(.large)
+                Text(
+                    viewModel.statusMessage.isEmpty
+                        ? "Preparing and extracting audio…"
+                        : viewModel.statusMessage
+                )
+                .font(.subheadline.weight(.semibold))
+                .multilineTextAlignment(.center)
+                .foregroundStyle(.primary)
+            }
+            .padding(24)
+            .frame(maxWidth: 300)
+            .background(.ultraThickMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .shadow(color: .black.opacity(0.15), radius: 20, y: 8)
+        }
+        .transition(.opacity)
+        .accessibilityElement(children: .combine)
     }
 
     private var filteredMusicLibraryItems: [AppViewModel.MusicLibraryItem] {
@@ -3459,6 +3490,9 @@ struct ContentView: View {
                 if viewModel.isImportingMusic {
                     musicImportingPill
                 }
+                if viewModel.isExtractingSoundtrackInBackground {
+                    musicSoundtrackExtractingPill
+                }
                 if !viewModel.soundtrackItems.isEmpty {
                     soundtrackQueueCard
                 }
@@ -3652,6 +3686,20 @@ struct ContentView: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 7)
+        .background(Color.white.opacity(0.72), in: Capsule())
+    }
+
+    private var musicSoundtrackExtractingPill: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .scaleEffect(0.8)
+            Text("Extracting the soundtrack. Stay on Music Library; the Save sheet appears when the file is ready.")
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(Color.purple.opacity(0.95))
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 7)
+        .frame(maxWidth: .infinity, alignment: .leading)
         .background(Color.white.opacity(0.72), in: Capsule())
     }
 

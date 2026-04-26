@@ -71,9 +71,39 @@ enum PreviewNarrationSegmentBudget {
                 hi = mid - 1
             }
         }
-        let cut = text.index(text.startIndex, offsetBy: lo, limitedBy: text.endIndex) ?? text.endIndex
+        var cut = text.index(text.startIndex, offsetBy: lo, limitedBy: text.endIndex) ?? text.endIndex
+        cut = advanceSplitIndexPastInterruptedNumberIfNeeded(text, proposedEnd: cut)
         let prefix = String(text[..<cut]).trimmingCharacters(in: .whitespacesAndNewlines)
         let rest = String(text[cut...]).trimmingCharacters(in: .whitespacesAndNewlines)
         return (prefix, rest)
+    }
+
+    /// If the binary-search cut lands just before a `,` / `.` between two digits (`1|，100`, `1|.3`), move the cut to the end of the number token so TTS is not split mid-value.
+    private static func advanceSplitIndexPastInterruptedNumberIfNeeded(_ text: String, proposedEnd: String.Index) -> String.Index {
+        guard proposedEnd < text.endIndex, proposedEnd > text.startIndex else { return proposedEnd }
+        var j = proposedEnd
+        if j < text.endIndex, (text[j] == "," || text[j] == "." || text[j] == "，") {
+            let before = text.index(before: j)
+            if text[before].isNumber {
+                let afterComma = text.index(after: j)
+                if afterComma < text.endIndex, text[afterComma].isNumber {
+                    var k = afterComma
+                    while k < text.endIndex, text[k].isNumber {
+                        k = text.index(after: k)
+                    }
+                    while k < text.endIndex, (text[k] == "," || text[k] == "." || text[k] == "，") {
+                        let n = text.index(after: k)
+                        if n < text.endIndex, text[n].isNumber {
+                            k = n
+                            while k < text.endIndex, text[k].isNumber {
+                                k = text.index(after: k)
+                            }
+                        } else { break }
+                    }
+                    j = k
+                }
+            }
+        }
+        return j
     }
 }
