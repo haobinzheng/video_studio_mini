@@ -4689,15 +4689,183 @@ enum SpeechVoiceLibrary {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// BCP-47 two-letter (or `zh`/`yue` / `lzh` prefix) subtag for TTS heuristics.
+    private static func bcp47PrimaryLanguageCode(forVoiceIdentifier identifier: String) -> String {
+        let tag = (voice(for: identifier)?.language ?? "en")
+            .replacingOccurrences(of: "_", with: "-")
+            .lowercased()
+        return String(tag.split(separator: "-", maxSplits: 1, omittingEmptySubsequences: false).first ?? Substring("en"))
+    }
+
+    /// Locales that typically write `23,9` for a decimal; English-style usually writes `1,000` (thousand) instead.
+    private static func languageUsesCommaAsDecimalInSpeech(_ bcp: String) -> Bool {
+        let lang: String
+        if bcp.hasPrefix("lzh") {
+            lang = "lzh"
+        } else {
+            lang = bcp
+        }
+        switch lang {
+        case "de", "fr", "es", "it", "pt", "pl", "cs", "sk", "ro", "hu", "hr", "sl", "et", "lv", "lt", "ru", "be", "uk", "bg", "da", "sv", "no", "nb", "nn", "is", "fi", "el", "tr", "ar", "he", "id", "ms", "vi", "sq", "ca", "eu", "gsw", "lzh", "yue", "wuu", "hak", "nan":
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Spoken separator + USD label + range connector, tailored to the **selected TTS voice** (not the on-screen app UI language).
+    private static func ttsNumberLocale(forVoiceIdentifier identifier: String) -> (dec: String, usd: String, range: String, useComma: Bool) {
+        let raw = bcp47PrimaryLanguageCode(forVoiceIdentifier: identifier)
+        let useComma = languageUsesCommaAsDecimalInSpeech(raw)
+        if raw == "yue" || raw == "wuu" || raw == "hak" || raw == "nan" || raw.hasPrefix("lzh") {
+            return (dec: "點", usd: "美元", range: "到", useComma: useComma)
+        }
+        let lang = String(raw.split(separator: "-").first ?? "en")
+        switch lang {
+        case "de", "gsw", "swg": return ("Komma", "Dollar", "bis", useComma)
+        case "fr", "nrf", "pcd": return ("virgule", "dollars", "à", useComma)
+        case "ca", "eu": return ("coma", "dòlars", "a", useComma)
+        case "es": return (useComma ? "coma" : "punto", "dólares", "a", useComma)
+        case "it": return ("virgola", "dollari", "a", useComma)
+        case "pt", "mwl": return ("vírgula", "dólares", "a", useComma)
+        case "nl", "vls", "zea": return ("komma", "dollar", "tot", useComma)
+        case "pl": return ("przecinek", "dolarów", "do", useComma)
+        case "cs": return ("čárka", "dolarů", "do", useComma)
+        case "sk": return ("čiarka", "dolarov", "do", useComma)
+        case "ro": return ("virgulă", "dolari", "la", useComma)
+        case "tr": return ("virgül", "dolar", "ile", useComma)
+        case "ru", "be", "uk", "kk", "ab": return ("запятая", "долларов", "до", useComma) // read by Cyrillic TTS; avoids odd Latin
+        case "ja": return ("ポイント", "ドル", "から", useComma)
+        case "ko": return ("점", "달러", "에서", useComma) // 23.9 → 23 점 9
+        case "zh": return ("点", "美元", "到", useComma)
+        case "ar", "aao", "ary", "he": return ("نقطة", "دولار", "إلى", useComma)
+        default: return ("point", "dollars", "to", useComma)
+        }
+    }
+
+    /// Rewrites text for `AVSpeechSynthesizer` so a decimal is not a phrase boundary, using words that match the **utterance** voice.
+    /// On-screen copy is unchanged. Uses Latin or native script for “decimal”/currency as needed for the voice.
+    private static func replaceRegexMatches(
+        in source: String,
+        pattern: String,
+        options: NSRegularExpression.Options = [],
+        replacement: ([String]) -> String
+    ) -> String {
+        guard let regex = try? NSRegularExpression(pattern: pattern, options: options) else { return source }
+        let searchRange = NSRange(source.startIndex..., in: source)
+        let matches = regex.matches(in: source, options: [], range: searchRange)
+        guard !matches.isEmpty else { return source }
+
+        let output = NSMutableString(string: source)
+        for match in matches.reversed() {
+            var groups: [String] = []
+            groups.reserveCapacity(match.numberOfRanges)
+            for index in 0..<match.numberOfRanges {
+                let range = match.range(at: index)
+                if range.location != NSNotFound, let swiftRange = Range(range, in: source) {
+                    groups.append(String(source[swiftRange]))
+                } else {
+                    groups.append("")
+                }
+            }
+            output.replaceCharacters(in: match.range, with: replacement(groups))
+        }
+        return output as String
+    }
+
+    private static func spacedFractionDigits(_ digits: String) -> String {
+        digits.map(String.init).joined(separator: " ")
+    }
+
+    private static func textForSpeechSynthesis(_ text: String, voiceIdentifier: String) -> String {
+        let loc = ttsNumberLocale(forVoiceIdentifier: voiceIdentifier)
+        let dec = loc.dec
+        let usd = loc.usd
+        let rangeWord = loc.range
+        let useComma = loc.useComma
+        // Scale words: English + common intl. loanwords (milliard / Mrd / Mille, etc.); kept as a CAPTURING group for `$3`.
+        // Includes common typo "tillion" so "$2.6 tillion" still speaks as one phrase.
+        let scaleGroup = #"([Tt]rillion|[Tt]illion|milliards?|Milliarde?n?|milliard|milliards?|[Bb]illions?|[Mm]illions?|[Tt]housand|tausend|mille)"#
+
+        var s = text
+        // Normalize numeric ranges first so `2.3-3.5` / `$2.3-$3.5` keeps the connector in speech.
+        s = replaceRegexMatches(
+            in: s,
+            pattern: #"(?<![0-9])(\$?[0-9]+[.,][0-9]+)\s*[-–—]\s*(\$?[0-9]+[.,][0-9]+)(?![0-9])"#
+        ) { groups in
+            let lhs = groups.count > 1 ? groups[1] : ""
+            let rhs = groups.count > 2 ? groups[2] : ""
+            return "\(lhs) \(rangeWord) \(rhs)"
+        }
+
+        if useComma {
+            s = replaceRegexMatches(
+                in: s,
+                pattern: #"\$([0-9]+),([0-9]{1,2})(?![0-9])\s+"# + scaleGroup + #"\b"#,
+                options: [.caseInsensitive]
+            ) { groups in
+                let integerPart = groups.count > 1 ? groups[1] : ""
+                let fractionPart = groups.count > 2 ? spacedFractionDigits(groups[2]) : ""
+                let scaleWord = groups.count > 3 ? groups[3] : ""
+                return "\(integerPart) \(dec) \(fractionPart) \(scaleWord) \(usd)"
+            }
+            s = replaceRegexMatches(
+                in: s,
+                pattern: #"\$([0-9]+),([0-9]{1,2})(?![0-9])"# // e.g. $29,8; “1,000” is not matched (3rd digit blocks)
+            ) { groups in
+                let integerPart = groups.count > 1 ? groups[1] : ""
+                let fractionPart = groups.count > 2 ? spacedFractionDigits(groups[2]) : ""
+                return "\(integerPart) \(dec) \(fractionPart) \(usd)"
+            }
+        }
+        s = replaceRegexMatches(
+            in: s,
+            pattern: #"\$([0-9]+)\.([0-9]+)(?!\.[0-9])\s+"# + scaleGroup + #"\b"#,
+            options: [.caseInsensitive]
+        ) { groups in
+            let integerPart = groups.count > 1 ? groups[1] : ""
+            let fractionPart = groups.count > 2 ? spacedFractionDigits(groups[2]) : ""
+            let scaleWord = groups.count > 3 ? groups[3] : ""
+            return "\(integerPart) \(dec) \(fractionPart) \(scaleWord) \(usd)"
+        }
+        s = replaceRegexMatches(
+            in: s,
+            pattern: #"\$([0-9]+)\.([0-9]+)(?!\.[0-9])"#
+        ) { groups in
+            let integerPart = groups.count > 1 ? groups[1] : ""
+            let fractionPart = groups.count > 2 ? spacedFractionDigits(groups[2]) : ""
+            return "\(integerPart) \(dec) \(fractionPart) \(usd)"
+        }
+        if useComma {
+            s = replaceRegexMatches(
+                in: s,
+                pattern: #"(?<![0-9$€₽₹])([0-9]+),([0-9]{1,2})(?![0-9])(?!,\d)"#
+            ) { groups in
+                let integerPart = groups.count > 1 ? groups[1] : ""
+                let fractionPart = groups.count > 2 ? spacedFractionDigits(groups[2]) : ""
+                return "\(integerPart) \(dec) \(fractionPart)"
+            }
+        }
+        // Same for all voices: one decimal token (blocks `1.2.3`-style, not a lone sentence `.` after the fraction); allows `3.14`, `1.00`.
+        let plainDot = #"(?<![0-9$€])([0-9]+)\.([0-9]+)(?!\.\d)"#
+        s = replaceRegexMatches(in: s, pattern: plainDot) { groups in
+            let integerPart = groups.count > 1 ? groups[1] : ""
+            let fractionPart = groups.count > 2 ? spacedFractionDigits(groups[2]) : ""
+            return "\(integerPart) \(dec) \(fractionPart)"
+        }
+        return s
+    }
+
     static func makeUtterance(from text: String, voiceIdentifier: String, speechRateMultiplier: Double = 1.0) -> AVSpeechUtterance {
+        let spoken = textForSpeechSynthesis(text, voiceIdentifier: voiceIdentifier)
         let selectedVoice = voice(for: voiceIdentifier)
-        let utterance = AVSpeechUtterance(string: text)
+        let utterance = AVSpeechUtterance(string: spoken)
         utterance.voice = selectedVoice
         utterance.rate = speakingRate(for: selectedVoice, multiplier: speechRateMultiplier)
         utterance.pitchMultiplier = 1.0
         utterance.volume = 1.0
         utterance.preUtteranceDelay = 0.02
-        utterance.postUtteranceDelay = postUtteranceDelay(for: text.last)
+        utterance.postUtteranceDelay = postUtteranceDelay(for: spoken.last)
         return utterance
     }
 
@@ -4742,13 +4910,48 @@ enum SpeechVoiceLibrary {
         }.first
     }
 
+    /// Splits on sentence punctuation like `components(separatedBy:)` but **does not** split on `.` when it is a decimal separator (`2.6`, `$2.6`, `12.34`).
+    private static func narrationPiecesByPunctuationPreservingDecimalPoints(in normalized: String) -> [String] {
+        guard !normalized.isEmpty else { return [] }
+        let separators: Set<Character> = [".", "!", "?", ";", "。", "！", "？", "；", "\n"]
+        let chars = Array(normalized)
+        var pieces: [String] = []
+        var current = ""
+        current.reserveCapacity(chars.count)
+
+        var i = chars.startIndex
+        while i < chars.endIndex {
+            let ch = chars[i]
+            if separators.contains(ch) {
+                let isAsciiDecimalDot = ch == "."
+                let prevIsDigit = i > chars.startIndex && chars[chars.index(before: i)].isNumber
+                let j = chars.index(after: i)
+                let nextIsDigit = j < chars.endIndex && chars[j].isNumber
+                if isAsciiDecimalDot && prevIsDigit && nextIsDigit {
+                    current.append(ch)
+                    i = j
+                    continue
+                }
+                let trimmed = current.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !trimmed.isEmpty { pieces.append(trimmed) }
+                current.removeAll(keepingCapacity: true)
+                i = j
+                continue
+            }
+            current.append(ch)
+            i = chars.index(after: i)
+        }
+        let tail = current.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !tail.isEmpty { pieces.append(tail) }
+        return pieces
+    }
+
     private static func chunkedText(from text: String, optimizeForLongForm: Bool) -> [String] {
         let normalized = normalizedCaptionText(text)
 
         guard !normalized.isEmpty else { return [] }
 
-        let punctuation = CharacterSet(charactersIn: ".!?;。！？；\n")
-        let pieces = normalized.components(separatedBy: punctuation)
+        let pieces = narrationPiecesByPunctuationPreservingDecimalPoints(in: normalized)
         let chunks = pieces
             .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
             .filter { !$0.isEmpty }
