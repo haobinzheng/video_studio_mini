@@ -45,6 +45,14 @@ struct ContentView: View {
     @State private var voicePendingHide: AppViewModel.VoiceOption?
     @State private var musicLibrarySearchText = ""
     @State private var pendingMusicLibraryDeletion: AppViewModel.MusicLibraryItem?
+    @State private var musicLibraryItemToRename: AppViewModel.MusicLibraryItem?
+    @State private var musicLibraryRenameDraft: String = ""
+    /// `all` | `unfiled` | a user folder name (Pro: filter by single-level `FluxCutMusicFolders` name).
+    @State private var musicLibraryListScope: String = "all"
+    @State private var isNewMusicFolderSheetPresented = false
+    @State private var newMusicFolderNameDraft = ""
+    @State private var musicFolderRenameContext: String?
+    @State private var musicFolderRenameDraft = ""
     @State private var pendingMediaDeletion: AppViewModel.MediaItem?
     @State private var selectedMusicLibraryItemIDs: Set<String> = []
     @State private var previewingMusicLibraryItemID: String?
@@ -817,6 +825,21 @@ struct ContentView: View {
                         }
                         .padding(.vertical, 6)
                     }
+
+                    if viewModel.isEditStoryProEnabled {
+                        Picker("Location", selection: $musicLibraryListScope) {
+                            Text("All music").tag("all")
+                            Text("Unfiled").tag("unfiled")
+                            ForEach(viewModel.musicLibraryProFolderNames(), id: \.self) { name in
+                                Text(name).tag(name)
+                            }
+                        }
+                        .pickerStyle(.menu)
+                    } else {
+                        Text("FluxCut Pro: organize imports into one-level folders with Move and New folder.")
+                            .font(.caption.weight(.semibold))
+                            .foregroundStyle(.secondary)
+                    }
                 }
 
                 ForEach(filteredMusicLibraryItems) { item in
@@ -890,6 +913,38 @@ struct ContentView: View {
                         }
                     }
                     .buttonStyle(.plain)
+                    .contextMenu {
+                        if item.source == .imported {
+                            if viewModel.isEditStoryProEnabled {
+                                Menu {
+                                    Button("Unfiled (library root)") {
+                                        viewModel.moveMusicLibraryItemToProFolder(item, folderName: nil)
+                                    }
+                                    ForEach(
+                                        viewModel.musicLibraryProFolderNames().filter { $0 != item.libraryFolderName },
+                                        id: \.self
+                                    ) { name in
+                                        Button(name) {
+                                            viewModel.moveMusicLibraryItemToProFolder(item, folderName: name)
+                                        }
+                                    }
+                                } label: {
+                                    Label("Move to folder", systemImage: "folder")
+                                }
+                            }
+                            Button {
+                                musicLibraryItemToRename = item
+                                musicLibraryRenameDraft = item.name
+                            } label: {
+                                Label("Rename", systemImage: "pencil")
+                            }
+                            Button(role: .destructive) {
+                                pendingMusicLibraryDeletion = item
+                            } label: {
+                                Label("Delete", systemImage: "trash")
+                            }
+                        }
+                    }
                     .swipeActions(edge: .trailing, allowsFullSwipe: false) {
                         if item.source == .imported {
                             Button(role: .destructive) {
@@ -918,6 +973,9 @@ struct ContentView: View {
             .onAppear {
                 viewModel.refreshMusicLibrary()
             }
+            .onChange(of: viewModel.isEditStoryProEnabled) { _, pro in
+                if !pro { musicLibraryListScope = "all" }
+            }
             .alert(item: $pendingMusicLibraryDeletion) { item in
                 Alert(
                     title: Text("Delete Music?"),
@@ -927,6 +985,63 @@ struct ContentView: View {
                     },
                     secondaryButton: .cancel()
                 )
+            }
+            .sheet(item: $musicLibraryItemToRename) { item in
+                musicLibraryRenameContent(for: item)
+            }
+            .sheet(isPresented: $isNewMusicFolderSheetPresented) {
+                NavigationStack {
+                    Form {
+                        TextField("Folder name", text: $newMusicFolderNameDraft)
+                            .textInputAutocapitalization(.words)
+                    }
+                    .navigationTitle("New folder")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") {
+                                isNewMusicFolderSheetPresented = false
+                                newMusicFolderNameDraft = ""
+                            }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Create") {
+                                viewModel.createMusicLibraryFolder(named: newMusicFolderNameDraft)
+                                newMusicFolderNameDraft = ""
+                                isNewMusicFolderSheetPresented = false
+                            }
+                        }
+                    }
+                }
+            }
+            .sheet(isPresented: Binding(
+                get: { musicFolderRenameContext != nil },
+                set: { if !$0 { musicFolderRenameContext = nil; musicFolderRenameDraft = "" } }
+            )) {
+                NavigationStack {
+                    Form {
+                        TextField("New name", text: $musicFolderRenameDraft)
+                            .textInputAutocapitalization(.words)
+                    }
+                    .navigationTitle("Rename folder")
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .cancellationAction) {
+                            Button("Cancel") { musicFolderRenameContext = nil }
+                        }
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("Save") {
+                                if let from = musicFolderRenameContext {
+                                    viewModel.renameMusicLibraryProFolder(from: from, to: musicFolderRenameDraft)
+                                }
+                                musicFolderRenameContext = nil
+                            }
+                        }
+                    }
+                }
+                .onAppear {
+                    if let from = musicFolderRenameContext { musicFolderRenameDraft = from }
+                }
             }
             .sheet(item: $extractedSoundtrackShareFile) { file in
                 ShareSheet(items: [file.url])
@@ -945,27 +1060,61 @@ struct ContentView: View {
                     .fontWeight(.semibold)
                 }
                 ToolbarItem(placement: .navigationBarTrailing) {
+                    if viewModel.isEditStoryProEnabled {
+                        Menu {
+                            Button {
+                                isNewMusicFolderSheetPresented = true
+                            } label: {
+                                Label("New folder", systemImage: "folder.badge.plus")
+                            }
+                            Divider()
+                            ForEach(viewModel.musicLibraryProFolderNames(), id: \.self) { name in
+                                Button("Rename “\(name)”…") {
+                                    musicFolderRenameContext = name
+                                }
+                                if viewModel.isMusicLibraryFolderEmpty(named: name) {
+                                    Button("Delete “\(name)”", role: .destructive) {
+                                        viewModel.deleteEmptyMusicLibraryFolder(named: name)
+                                    }
+                                }
+                            }
+                        } label: {
+                            Image(systemName: "folder.badge.plus")
+                                .fontWeight(.semibold)
+                        }
+                    }
+                }
+            }
+            // Add (+) lives in the bottom bar so it stays visible while Music Library search is active (trailing
+            // toolbar items are often hidden with `.searchable`).
+            .safeAreaInset(edge: .bottom) {
+                HStack(spacing: 8) {
                     Button {
                         guard !selectedMusicLibrarySelections.isEmpty else { return }
                         viewModel.addMusicLibraryItems(selectedMusicLibrarySelections)
                         selectedMusicLibraryItemIDs = []
                         isMusicBrowserPresented = false
                     } label: {
-                        Image(systemName: "plus.circle.fill")
-                            .fontWeight(.semibold)
+                        Label("Add", systemImage: "plus.circle.fill")
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
+                            .frame(maxWidth: .infinity)
                     }
+                    .buttonStyle(.borderedProminent)
+                    .tint(Color(red: 0.12, green: 0.62, blue: 0.38))
                     .disabled(selectedMusicLibrarySelections.isEmpty)
-                }
-            }
-            .safeAreaInset(edge: .bottom) {
-                HStack(spacing: 12) {
+                    .opacity(selectedMusicLibrarySelections.isEmpty ? 0.45 : 1)
+
                     PhotosPicker(
                         selection: $selectedMusicVideoItem,
                         matching: .videos,
                         photoLibrary: PHPhotoLibrary.shared()
                     ) {
-                        Label("Extract Soundtracks", systemImage: "film.badge.plus")
+                        Label("Soundtracks", systemImage: "film.badge.plus")
                             .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.bordered)
@@ -977,13 +1126,15 @@ struct ContentView: View {
                     } label: {
                         Label("Import", systemImage: "square.and.arrow.down")
                             .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.85)
                             .frame(maxWidth: .infinity)
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(Color(red: 0.19, green: 0.48, blue: 0.82))
                     .disabled(viewModel.isImportingMusic || viewModel.isExtractingSoundtrackInBackground)
                 }
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 12)
                 .padding(.top, 10)
                 .padding(.bottom, 12)
                 .background(.ultraThinMaterial)
@@ -1023,10 +1174,55 @@ struct ContentView: View {
         .accessibilityElement(children: .combine)
     }
 
+    @ViewBuilder
+    private func musicLibraryRenameContent(for item: AppViewModel.MusicLibraryItem) -> some View {
+        NavigationStack {
+            Form {
+                TextField("Name", text: $musicLibraryRenameDraft)
+                    .textInputAutocapitalization(.words)
+            }
+            .navigationTitle("Rename Track")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { musicLibraryItemToRename = nil }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        let draft = musicLibraryRenameDraft
+                        viewModel.renameMusicLibraryItem(item, to: draft)
+                        musicLibraryItemToRename = nil
+                        selectedMusicLibraryItemIDs.remove(item.id)
+                        if previewingMusicLibraryItemID == item.id {
+                            previewingMusicLibraryItemID = nil
+                        }
+                    }
+                }
+            }
+        }
+        .onAppear {
+            musicLibraryRenameDraft = item.name
+        }
+    }
+
     private var filteredMusicLibraryItems: [AppViewModel.MusicLibraryItem] {
         let query = musicLibrarySearchText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !query.isEmpty else { return viewModel.musicLibraryItems }
-        return viewModel.musicLibraryItems.filter { item in
+        var list: [AppViewModel.MusicLibraryItem] = {
+            if viewModel.isEditStoryProEnabled {
+                switch musicLibraryListScope {
+                case "unfiled":
+                    return viewModel.musicLibraryItems.filter { $0.libraryFolderName == nil }
+                case "all":
+                    return viewModel.musicLibraryItems
+                default:
+                    let f = musicLibraryListScope
+                    return viewModel.musicLibraryItems.filter { $0.libraryFolderName == f }
+                }
+            }
+            return viewModel.musicLibraryItems
+        }()
+        guard !query.isEmpty else { return list }
+        return list.filter { item in
             item.name.localizedCaseInsensitiveContains(query)
                 || (item.description?.localizedCaseInsensitiveContains(query) ?? false)
         }

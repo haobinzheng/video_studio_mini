@@ -364,8 +364,8 @@ final class AppViewModel: NSObject, ObservableObject {
         let fileExtension: String
     }
 
-    struct MusicLibraryItem: Identifiable, Equatable {
-        enum Source: String {
+    struct MusicLibraryItem: Identifiable, Equatable, Hashable {
+        enum Source: String, Hashable {
             case builtIn = "Built-In"
             case imported = "Imported"
             case extracted = "Extracted"
@@ -377,6 +377,8 @@ final class AppViewModel: NSObject, ObservableObject {
         let description: String?
         let url: URL
         let source: Source
+        /// `nil` = file is at the Documents root (unfiled). A non-`nil` value is the single-level folder name under `FluxCutMusicFolders/`.
+        let libraryFolderName: String?
     }
 
     struct SoundtrackItem: Identifiable, Equatable {
@@ -1481,6 +1483,359 @@ final class AppViewModel: NSObject, ObservableObject {
         }
     }
 
+    /// Renames a user-saved file in the app Documents root (imported library entries). Resolves a safe filename, moves the file, and updates the soundtrack queue / active music URL when they point at the old path.
+    func renameMusicLibraryItem(_ item: MusicLibraryItem, to newDisplayName: String) {
+        guard item.source == .imported else { return }
+        let trimmed = newDisplayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            statusMessage = "Name cannot be empty."
+            return
+        }
+
+        let ext = item.url.pathExtension.isEmpty ? "m4a" : item.url.pathExtension
+        var base = trimmed
+        let lower = base.lowercased()
+        for extCandidate in [ext.lowercased(), "m4a", "mp3", "wav", "aac", "aif", "aiff", "caf", "m4b", "aifc"] {
+            let suffix = ".\(extCandidate)"
+            if lower.hasSuffix(suffix) {
+                base = String(base.dropLast(suffix.count)).trimmingCharacters(in: .whitespacesAndNewlines)
+                break
+            }
+        }
+        guard !base.isEmpty else {
+            statusMessage = "Name cannot be empty."
+            return
+        }
+
+        let safeBase = Self.sanitizedMusicFileBaseName(base)
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        var destination = documents.appendingPathComponent("\(safeBase).\(ext)")
+
+        let sourceStandard = item.url.standardizedFileURL
+        if destination.standardizedFileURL == sourceStandard {
+            return
+        }
+
+        if FileManager.default.fileExists(atPath: destination.path) {
+            statusMessage = "That name is already in use. Choose a different name."
+            musicLibraryFeedback = statusMessage
+            return
+        }
+
+        stopMusicSilently()
+
+        do {
+            try FileManager.default.moveItem(at: item.url, to: destination)
+            let newPath = destination.standardizedFileURL
+            let newDisplayName = Self.displayMusicName(for: newPath)
+            let needRebuild = applyMusicLibraryFileMoveFromRename(from: sourceStandard, to: newPath, newName: newDisplayName)
+            if needRebuild {
+                Task { @MainActor in
+                    await self.rebuildCombinedSoundtrack(
+                        from: self.soundtrackItems,
+                        startedMessage: "Updating soundtrack after rename…"
+                    )
+                    self.musicLibraryFeedback = "Track renamed in Music Library."
+                    self.refreshMusicLibrary()
+                }
+            } else {
+                statusMessage = "Track renamed in Music Library."
+                musicLibraryFeedback = "Track renamed in Music Library."
+                refreshMusicLibrary()
+            }
+        } catch {
+            let e = error.localizedDescription
+            let msg = e.isEmpty ? "Could not rename that track." : e
+            statusMessage = msg
+            musicLibraryFeedback = msg
+            refreshMusicLibrary()
+        }
+    }
+
+    /// Returns `true` if the current soundtrack queue references the file and should be re-merged; otherwise updates `importedMusicURL` when that alone pointed at the file.
+    private func applyMusicLibraryFileMoveFromRename(from oldURL: URL, to newURL: URL, newName: String) -> Bool {
+        let oldS = oldURL.standardizedFileURL
+        let newS = newURL.standardizedFileURL
+        var queueChanged = false
+        if !soundtrackItems.isEmpty {
+            var next: [SoundtrackItem] = []
+            for s in soundtrackItems {
+                if s.url.standardizedFileURL == oldS {
+                    next.append(
+                        SoundtrackItem(url: newS, name: newName, duration: s.duration)
+                    )
+                    queueChanged = true
+                } else {
+                    next.append(s)
+                }
+            }
+            if queueChanged {
+                soundtrackItems = next
+            }
+        }
+        if !queueChanged, importedMusicURL?.standardizedFileURL == oldS {
+            importedMusicURL = newS
+            importedMusicName = "\(newName).\(newURL.pathExtension)"
+        }
+        return queueChanged && !soundtrackItems.isEmpty
+    }
+
+    private static func sanitizedMusicFileBaseName(_ raw: String, maxLength: Int = 180) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        s = s.replacingOccurrences(of: "\\", with: "-")
+        s = s.replacingOccurrences(of: "/", with: "-")
+        s = s.replacingOccurrences(of: ":", with: "-")
+        let invalid = CharacterSet(charactersIn: "/\\?%*|\"<>\n\r\0")
+        s = s.components(separatedBy: invalid).joined(separator: "-")
+        while s.contains("--") { s = s.replacingOccurrences(of: "--", with: "-") }
+        s = s.trimmingCharacters(in: CharacterSet(charactersIn: "-. "))
+        if s.isEmpty { s = "Track" }
+        if s.count > maxLength { s = String(s.prefix(maxLength)) }
+        return s
+    }
+
+    private static func sanitizeMusicLibraryUserFolderName(_ raw: String) -> String {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        let invalid = CharacterSet(charactersIn: "/\\:?*\"|<>")
+        s = s.components(separatedBy: invalid).joined(separator: " ")
+        while s.contains("  ") { s = s.replacingOccurrences(of: "  ", with: " ") }
+        s = s.trimmingCharacters(in: .whitespaces)
+        if s == "." || s == ".." { return "" }
+        if s.count > 64 { s = String(s.prefix(64)) }
+        return s
+    }
+
+    func musicLibraryProFolderNames() -> [String] {
+        let root = Self.musicLibraryFoldersRootURL()
+        guard FileManager.default.fileExists(atPath: root.path) else { return [] }
+        guard let subs = try? FileManager.default.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        return subs.compactMap { u -> String? in
+            var isDir: ObjCBool = false
+            guard FileManager.default.fileExists(atPath: u.path, isDirectory: &isDir), isDir.boolValue else { return nil }
+            return u.lastPathComponent
+        }
+        .sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+    }
+
+    func isMusicLibraryFolderEmpty(named: String) -> Bool {
+        let safe = Self.sanitizeMusicLibraryUserFolderName(named)
+        guard !safe.isEmpty else { return true }
+        let u = Self.musicLibraryFoldersRootURL().appendingPathComponent(safe, isDirectory: true)
+        guard FileManager.default.fileExists(atPath: u.path) else { return true }
+        guard let c = try? FileManager.default.contentsOfDirectory(
+            at: u,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ) else { return true }
+        return c.isEmpty
+    }
+
+    func createMusicLibraryFolder(named: String) {
+        guard isEditStoryProEnabled else {
+            proOnlyMusicFolderMessage()
+            return
+        }
+        let safe = Self.sanitizeMusicLibraryUserFolderName(named)
+        guard !safe.isEmpty else {
+            statusMessage = "Enter a valid folder name."
+            musicLibraryFeedback = statusMessage
+            return
+        }
+        if ["all", "unfiled"].contains(safe.lowercased()) {
+            statusMessage = "“\(safe)” is reserved. Choose a different folder name."
+            musicLibraryFeedback = statusMessage
+            return
+        }
+        let url = Self.musicLibraryFoldersRootURL().appendingPathComponent(safe, isDirectory: true)
+        if FileManager.default.fileExists(atPath: url.path) {
+            statusMessage = "A folder with that name already exists."
+            musicLibraryFeedback = statusMessage
+            return
+        }
+        do {
+            try FileManager.default.createDirectory(at: Self.musicLibraryFoldersRootURL(), withIntermediateDirectories: true)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+            statusMessage = "Folder “\(safe)” created."
+            musicLibraryFeedback = statusMessage
+            refreshMusicLibrary()
+        } catch {
+            statusMessage = "Could not create that folder."
+            musicLibraryFeedback = statusMessage
+        }
+    }
+
+    func deleteEmptyMusicLibraryFolder(named: String) {
+        guard isEditStoryProEnabled else {
+            proOnlyMusicFolderMessage()
+            return
+        }
+        let safe = Self.sanitizeMusicLibraryUserFolderName(named)
+        guard !safe.isEmpty else { return }
+        let url = Self.musicLibraryFoldersRootURL().appendingPathComponent(safe, isDirectory: true)
+        guard FileManager.default.fileExists(atPath: url.path) else { return }
+        guard isMusicLibraryFolderEmpty(named: safe) else {
+            statusMessage = "“\(safe)” is not empty. Move or delete the tracks first."
+            musicLibraryFeedback = statusMessage
+            return
+        }
+        do {
+            try FileManager.default.removeItem(at: url)
+            statusMessage = "Folder removed."
+            musicLibraryFeedback = "Folder removed."
+            refreshMusicLibrary()
+        } catch {
+            statusMessage = "Could not remove that folder."
+            musicLibraryFeedback = statusMessage
+        }
+    }
+
+    /// Renames a Pro single-level music folder under `FluxCutMusicFolders/`.
+    func renameMusicLibraryProFolder(from oldName: String, to newName: String) {
+        guard isEditStoryProEnabled else {
+            proOnlyMusicFolderMessage()
+            return
+        }
+        let o = Self.sanitizeMusicLibraryUserFolderName(oldName)
+        let n = Self.sanitizeMusicLibraryUserFolderName(newName)
+        guard !o.isEmpty, !n.isEmpty, o != n else { return }
+        let root = Self.musicLibraryFoldersRootURL()
+        let from = root.appendingPathComponent(o, isDirectory: true)
+        let to = root.appendingPathComponent(n, isDirectory: true)
+        guard FileManager.default.fileExists(atPath: from.path) else { return }
+        if FileManager.default.fileExists(atPath: to.path) {
+            statusMessage = "A folder with that name already exists."
+            musicLibraryFeedback = statusMessage
+            return
+        }
+        let fromPath = from.standardizedFileURL.path
+        let toPath = to.standardizedFileURL.path
+        do {
+            try FileManager.default.moveItem(at: from, to: to)
+            if !soundtrackItems.isEmpty {
+                var next: [SoundtrackItem] = []
+                for s in soundtrackItems {
+                    if s.url.path.hasPrefix(fromPath) {
+                        let suffix = s.url.path.dropFirst(fromPath.count)
+                        let newU = URL(fileURLWithPath: toPath + String(suffix))
+                        let newDisplay = Self.displayMusicName(for: newU)
+                        next.append(
+                            SoundtrackItem(url: newU, name: newDisplay, duration: s.duration)
+                        )
+                    } else {
+                        next.append(s)
+                    }
+                }
+                soundtrackItems = next
+            }
+            if let im = importedMusicURL, im.path.hasPrefix(fromPath) {
+                let tail = im.path.dropFirst(fromPath.count)
+                let newM = URL(fileURLWithPath: toPath + String(tail))
+                importedMusicURL = newM
+                importedMusicName = newM.lastPathComponent
+            }
+            if !soundtrackItems.isEmpty {
+                Task { @MainActor in
+                    await self.rebuildCombinedSoundtrack(
+                        from: self.soundtrackItems,
+                        startedMessage: "Updating soundtrack after folder rename…"
+                    )
+                }
+            }
+            statusMessage = "Folder renamed to “\(n)”."
+            musicLibraryFeedback = statusMessage
+            refreshMusicLibrary()
+        } catch {
+            statusMessage = "Could not rename that folder."
+            musicLibraryFeedback = statusMessage
+        }
+    }
+
+    /// Moves a library track between “Unfiled” (Documents root) and a single-level Pro folder, or between folders. **Pro only.**
+    func moveMusicLibraryItemToProFolder(_ item: MusicLibraryItem, folderName: String?) {
+        guard isEditStoryProEnabled else {
+            proOnlyMusicFolderMessage()
+            return
+        }
+        guard item.source == .imported else { return }
+        let fileManager = FileManager.default
+        let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let fileName = item.url.lastPathComponent
+        let destParent: URL
+        if let raw = folderName {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty {
+                destParent = documents
+            } else {
+                let safe = Self.sanitizeMusicLibraryUserFolderName(trimmed)
+                guard !safe.isEmpty else {
+                    statusMessage = "That folder name is not valid."
+                    musicLibraryFeedback = statusMessage
+                    return
+                }
+                destParent = Self.musicLibraryFoldersRootURL().appendingPathComponent(safe, isDirectory: true)
+                do {
+                    try fileManager.createDirectory(at: destParent, withIntermediateDirectories: true)
+                } catch {
+                    statusMessage = "Could not use that folder."
+                    musicLibraryFeedback = statusMessage
+                    return
+                }
+            }
+        } else {
+            destParent = documents
+        }
+        var dest = destParent.appendingPathComponent(fileName)
+        let oldStandard = item.url.standardizedFileURL
+        if dest.standardizedFileURL == oldStandard { return }
+        if fileManager.fileExists(atPath: dest.path) {
+            let ext = item.url.pathExtension
+            let base = (fileName as NSString).deletingPathExtension
+            let stem = base.isEmpty ? "track" : base
+            dest = destParent.appendingPathComponent("\(stem)-\(UUID().uuidString).\(ext)")
+        }
+        stopMusicSilently()
+        do {
+            try fileManager.moveItem(at: item.url, to: dest)
+            let newPath = dest.standardizedFileURL
+            let newDisplayName = Self.displayMusicName(for: newPath)
+            let needRebuild = applyMusicLibraryFileMoveFromRename(
+                from: oldStandard,
+                to: newPath,
+                newName: newDisplayName
+            )
+            if needRebuild {
+                Task { @MainActor in
+                    await self.rebuildCombinedSoundtrack(
+                        from: self.soundtrackItems,
+                        startedMessage: "Updating soundtrack after move…"
+                    )
+                    self.musicLibraryFeedback = "Track moved in Music Library."
+                    self.refreshMusicLibrary()
+                }
+            } else {
+                statusMessage = "Track moved in Music Library."
+                musicLibraryFeedback = "Track moved in Music Library."
+                refreshMusicLibrary()
+            }
+        } catch {
+            let e = error.localizedDescription
+            let msg = e.isEmpty ? "Could not move that track." : e
+            statusMessage = msg
+            musicLibraryFeedback = msg
+            refreshMusicLibrary()
+        }
+    }
+
+    private func proOnlyMusicFolderMessage() {
+        let msg = "Organizing the Music Library into folders requires FluxCut Pro. Unlock in Settings → FluxCut Pro."
+        statusMessage = msg
+        musicLibraryFeedback = msg
+    }
+
     func selectMusicLibraryItem(_ item: MusicLibraryItem) {
         previewMusicLibraryItem(item)
     }
@@ -2567,7 +2922,12 @@ final class AppViewModel: NSObject, ObservableObject {
         previewVideoURL: URL?
     ) -> StorageCleanupResult {
         var result = StorageCleanupResult()
-        let protectedLibraryURLs = Set(importedMusicLibraryURLs().map { $0.standardizedFileURL })
+        var protectedLibraryURLs = Set(importedMusicLibraryURLs().map { $0.standardizedFileURL })
+        let documentsForProtect = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let musicFoldersRoot = documentsForProtect.appendingPathComponent(Self.musicLibraryFoldersRootName, isDirectory: true)
+        if FileManager.default.fileExists(atPath: musicFoldersRoot.path) {
+            protectedLibraryURLs.insert(musicFoldersRoot.standardizedFileURL)
+        }
 
         for url in mediaItems.compactMap({ Self.mediaVideoIfManagedCopyURL(for: $0) as URL? }) {
             result = mergeCleanupResults(result, removeItem(at: url.standardizedFileURL))
@@ -2686,7 +3046,8 @@ final class AppViewModel: NSObject, ObservableObject {
                     duration: duration,
                     description: track.description,
                     url: bundledURL,
-                    source: .builtIn
+                    source: .builtIn,
+                    libraryFolderName: nil
                 )
             )
         }
@@ -2694,45 +3055,39 @@ final class AppViewModel: NSObject, ObservableObject {
         let fileManager = FileManager.default
         let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
 
-        if let documentContents = try? fileManager.contentsOfDirectory(
-            at: documents,
-            includingPropertiesForKeys: nil,
-            options: [.skipsHiddenFiles]
-        ) {
-            for url in documentContents {
-                guard let importedURL = importedAudioDocumentURL(url) else { continue }
-                let duration = await audioDuration(for: importedURL)
-                items.append(
-                    MusicLibraryItem(
-                        id: "imported-\(importedURL.lastPathComponent)",
-                        name: displayMusicName(for: importedURL),
-                        duration: duration,
-                        description: "Saved import in FluxCut",
-                        url: importedURL,
-                        source: .imported
-                    )
-                )
-            }
-        }
-
-        var dedupedItemsByKey: [String: MusicLibraryItem] = [:]
-        for item in items {
-            let key = "\(item.source.rawValue.lowercased())|\(item.name.lowercased())|\(Int(item.duration.rounded()))"
-            if let existing = dedupedItemsByKey[key] {
-                if item.name.localizedCaseInsensitiveCompare(existing.name) == .orderedAscending {
-                    dedupedItemsByKey[key] = item
-                }
+        for importedURL in Self.allMusicLibraryImportedFileURLs() {
+            let duration = await audioDuration(for: importedURL)
+            let folder = Self.musicLibraryFolderNameContaining(importedURL)
+            let desc: String
+            if let folder {
+                desc = "Saved import in FluxCut · \(folder)"
             } else {
-                dedupedItemsByKey[key] = item
+                desc = "Saved import in FluxCut"
             }
+            items.append(
+                MusicLibraryItem(
+                    id: Self.stableMusicLibraryImportedID(for: importedURL),
+                    name: displayMusicName(for: importedURL),
+                    duration: duration,
+                    description: desc,
+                    url: importedURL,
+                    source: .imported,
+                    libraryFolderName: folder
+                )
+            )
         }
 
-        return dedupedItemsByKey.values.sorted { lhs, rhs in
+        var byId: [String: MusicLibraryItem] = [:]
+        for item in items { byId[item.id] = item }
+        return byId.values.sorted { lhs, rhs in
             let lhsRank = sourceSortRank(lhs.source)
             let rhsRank = sourceSortRank(rhs.source)
             if lhsRank != rhsRank {
                 return lhsRank < rhsRank
             }
+            let lf = lhs.libraryFolderName ?? ""
+            let rf = rhs.libraryFolderName ?? ""
+            if lf != rf { return lf.localizedCaseInsensitiveCompare(rf) == .orderedAscending }
             return lhs.name.localizedCaseInsensitiveCompare(rhs.name) == .orderedAscending
         }
     }
@@ -2762,14 +3117,52 @@ final class AppViewModel: NSObject, ObservableObject {
         return p.hasPrefix(standardDir + "/")
     }
 
-    nonisolated private static func importedAudioDocumentURL(_ url: URL) -> URL? {
+    /// Root directory for Pro single-level music folders: `Documents/FluxCutMusicFolders/<UserFolderName>/file.ext`
+    static let musicLibraryFoldersRootName = "FluxCutMusicFolders"
+
+    nonisolated private static func musicLibraryFoldersRootURL() -> URL {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+            .appendingPathComponent(musicLibraryFoldersRootName, isDirectory: true)
+    }
+
+    nonisolated private static func stableMusicLibraryImportedID(for fileURL: URL) -> String {
+        let rel = musicLibraryFileRelativePath(from: fileURL)
+        let digest = SHA256.hash(data: Data(rel.utf8))
+        return "imported-" + String(digest.map { String(format: "%02x", $0) }.joined().prefix(24))
+    }
+
+    nonisolated private static func musicLibraryFileRelativePath(from fileURL: URL) -> String {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        var path = fileURL.standardizedFileURL.path
+        let d = documents.path
+        if path.hasPrefix(d) {
+            return String(path.dropFirst(d.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        }
+        return fileURL.lastPathComponent
+    }
+
+    /// Returns the folder *name* (not full path) for a file in `Documents/FluxCutMusicFolders/<name>/…`, or `nil` for unfiled root imports.
+    nonisolated private static func musicLibraryFolderNameContaining(_ fileURL: URL) -> String? {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let std = fileURL.deletingLastPathComponent().standardizedFileURL
+        let root = musicLibraryFoldersRootURL().standardizedFileURL
+        guard std != documents.standardizedFileURL else { return nil }
+        guard std.deletingLastPathComponent().standardizedFileURL == root else { return nil }
+        return std.lastPathComponent
+    }
+
+    nonisolated private static func isExcludedLibraryAudioFilename(_ name: String) -> Bool {
+        if name.hasPrefix("picked-video-") { return true }
+        if name.hasPrefix("fluxcut-mini-") || name.hasPrefix("capcut-mini-") { return true }
+        if name.hasPrefix(".") { return true }
+        return false
+    }
+
+    nonisolated private static func importedAudioDocumentURLAtDocumentsRoot(_ url: URL) -> URL? {
         let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         guard url.deletingLastPathComponent().standardizedFileURL == documents.standardizedFileURL else { return nil }
         guard !url.hasDirectoryPath else { return nil }
-        guard !url.lastPathComponent.hasPrefix("picked-video-") else { return nil }
-        let name = url.lastPathComponent
-        if name.hasPrefix("fluxcut-mini-") || name.hasPrefix("capcut-mini-") { return nil }
-        guard !url.lastPathComponent.hasPrefix(".") else { return nil }
+        guard !isExcludedLibraryAudioFilename(url.lastPathComponent) else { return nil }
 
         let ext = url.pathExtension.lowercased()
         let knownAudioExtensions = Set(["mp3", "m4a", "aac", "wav", "aif", "aiff", "caf", "m4b"])
@@ -2781,18 +3174,74 @@ final class AppViewModel: NSObject, ObservableObject {
         return url
     }
 
-    nonisolated private static func importedMusicLibraryURLs() -> [URL] {
+    /// Audio file at `…/FluxCutMusicFolders/<one folder>/file` (no further nesting).
+    nonisolated private static func importedAudioFileInProMusicFolder(_ url: URL) -> URL? {
+        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
+        let root = musicLibraryFoldersRootURL()
+        let parent = url.deletingLastPathComponent().standardizedFileURL
+        guard parent.deletingLastPathComponent().standardizedFileURL == root.standardizedFileURL else { return nil }
+        guard parent != root.standardizedFileURL else { return nil }
+        guard !url.hasDirectoryPath else { return nil }
+        guard !isExcludedLibraryAudioFilename(url.lastPathComponent) else { return nil }
+        let ext = url.pathExtension.lowercased()
+        let knownAudioExtensions = Set(["mp3", "m4a", "aac", "wav", "aif", "aiff", "caf", "m4b"])
+        if knownAudioExtensions.contains(ext) {
+            return url
+        }
+        guard importedMediaType(for: url) == .audio else { return nil }
+        return url
+    }
+
+    /// Direct children of the Documents directory that are audio library files, or `nil`.
+    nonisolated private static func importedAudioDocumentURL(_ url: URL) -> URL? {
+        if let u = importedAudioDocumentURLAtDocumentsRoot(url) { return u }
+        return nil
+    }
+
+    nonisolated private static func allMusicLibraryImportedFileURLs() -> [URL] {
+        var results: [URL] = []
         let fileManager = FileManager.default
         let documents = fileManager.urls(for: .documentDirectory, in: .userDomainMask).first!
-        guard let documentContents = try? fileManager.contentsOfDirectory(
+        if let documentContents = try? fileManager.contentsOfDirectory(
             at: documents,
-            includingPropertiesForKeys: nil,
+            includingPropertiesForKeys: [.isDirectoryKey],
             options: [.skipsHiddenFiles]
-        ) else {
-            return []
+        ) {
+            for url in documentContents {
+                if let v = importedAudioDocumentURLAtDocumentsRoot(url) {
+                    results.append(v)
+                }
+            }
         }
 
-        return documentContents.compactMap { importedAudioDocumentURL($0) }
+        let root = musicLibraryFoldersRootURL()
+        guard fileManager.fileExists(atPath: root.path) else { return results }
+        guard let subs = try? fileManager.contentsOfDirectory(
+            at: root,
+            includingPropertiesForKeys: [.isDirectoryKey],
+            options: [.skipsHiddenFiles]
+        ) else { return results }
+
+        for sub in subs {
+            var isDir: ObjCBool = false
+            guard fileManager.fileExists(atPath: sub.path, isDirectory: &isDir), isDir.boolValue else { continue }
+            if let subFiles = try? fileManager.contentsOfDirectory(
+                at: sub,
+                includingPropertiesForKeys: nil,
+                options: [.skipsHiddenFiles]
+            ) {
+                for f in subFiles {
+                    if let v = importedAudioFileInProMusicFolder(f) {
+                        results.append(v)
+                    }
+                }
+            }
+        }
+        return results
+    }
+
+    nonisolated private static func importedMusicLibraryURLs() -> [URL] {
+        allMusicLibraryImportedFileURLs()
     }
 
     nonisolated private static func mediaVideoIfManagedCopyURL(for item: MediaItem) -> URL? {
@@ -3202,19 +3651,11 @@ final class AppViewModel: NSObject, ObservableObject {
     }
 
     private func existingImportedAudioURL(matching sourceURL: URL) throws -> URL? {
-        let documents = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first!
         let sourceSize = try sourceURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
         let sourceExtension = sourceURL.pathExtension.lowercased()
         let sourceName = Self.displayMusicName(for: sourceURL).lowercased()
 
-        let documentContents = try FileManager.default.contentsOfDirectory(
-            at: documents,
-            includingPropertiesForKeys: [.fileSizeKey],
-            options: [.skipsHiddenFiles]
-        )
-
-        for url in documentContents {
-            guard let importedURL = Self.importedAudioDocumentURL(url) else { continue }
+        for importedURL in Self.allMusicLibraryImportedFileURLs() {
             guard importedURL.pathExtension.lowercased() == sourceExtension else { continue }
             guard Self.displayMusicName(for: importedURL).lowercased() == sourceName else { continue }
             let importedSize = try importedURL.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
