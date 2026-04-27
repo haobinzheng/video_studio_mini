@@ -81,6 +81,9 @@ struct ContentView: View {
     @State private var editStoryEditorTab: EditStoryEditorTab = .media
     /// Persists Edit → Script paragraphs “How assigning works” disclosure (Media / Music share one expansion state).
     @AppStorage("fluxcut.editStoryHelpExpanded") private var editStoryHelpExpanded = false
+    @AppStorage("fluxcut.scriptIntroHelpExpanded") private var scriptIntroHelpExpanded = false
+    @AppStorage("fluxcut.scriptReloadVoicesHelpExpanded") private var scriptReloadVoicesHelpExpanded = false
+    @AppStorage("fluxcut.scriptHideVoicesHelpExpanded") private var scriptHideVoicesHelpExpanded = false
     @FocusState private var isNarrationFocused: Bool
 
     private var assignSheetBlockScriptText: String {
@@ -2939,10 +2942,19 @@ struct ContentView: View {
             Text("Script")
                 .font(.title2.weight(.semibold))
                 .onTapGesture { isNarrationFocused = false }
-            Text("Edit Story with Pro features uses paragraphs as text between blank lines. Use an empty line between ideas, or tap Clean Up to insert breaks when pasted text only has single line breaks.")
-                .font(.caption)
-                .foregroundStyle(.secondary)
-                .onTapGesture { isNarrationFocused = false }
+            DisclosureGroup(isExpanded: $scriptIntroHelpExpanded) {
+                Text("Edit Story with Pro features uses paragraphs as text between blank lines. Use an empty line between ideas, or tap Clean Up to insert breaks when pasted text only has single line breaks.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 2)
+            } label: {
+                Text("Script paragraph tips")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .tint(.orange)
+            .onTapGesture { isNarrationFocused = false }
 
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
@@ -3002,10 +3014,18 @@ struct ContentView: View {
             .padding(.vertical, 7)
             .background(Color.white.opacity(0.72), in: Capsule())
 
-            Text("Reload after adding Enhanced or Premium under Settings → Accessibility → VoiceOver → Speech (e.g. Add Rotor Voice on iOS 26.3.1). Pick the matching language above. Siri voices are not available to FluxCut on iOS.")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-                .fixedSize(horizontal: false, vertical: true)
+            DisclosureGroup(isExpanded: $scriptReloadVoicesHelpExpanded) {
+                Text("Reload after adding Enhanced or Premium under Settings → Accessibility → VoiceOver → Speech (e.g. Add Rotor Voice on iOS 26.3.1). Pick the matching language above. Siri voices are not available to FluxCut on iOS.")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.top, 2)
+            } label: {
+                Text("Reload voice help")
+                    .font(.subheadline.weight(.semibold))
+            }
+            .tint(.orange)
 
             if let narrationLanguageWarning = viewModel.narrationLanguageWarning {
                 HStack(spacing: 8) {
@@ -3153,9 +3173,18 @@ struct ContentView: View {
                     .frame(maxHeight: 180)
                 }
 
-                Text("Tap the red remove control (same icon as the Music soundtrack queue) to hide a voice. Reload iPhone Voices brings hidden voices back.")
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
+                DisclosureGroup(isExpanded: $scriptHideVoicesHelpExpanded) {
+                    Text("Tap the red remove control (same icon as the Music soundtrack queue) to hide a voice. Reload iPhone Voices brings hidden voices back.")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, 2)
+                } label: {
+                    Text("Hide voice help")
+                        .font(.subheadline.weight(.semibold))
+                }
+                .tint(.orange)
             }
             .onAppear {
                 viewModel.loadAvailableVoicesIfNeeded()
