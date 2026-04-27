@@ -5332,8 +5332,135 @@ enum SpeechVoiceLibrary {
         digits.map(String.init).joined(separator: " ")
     }
 
+    /// BCP-47 `zh` and Chinese-script variants: percent rewrites use **百分之** + integer + **点** + **spaced** fraction digits
+    /// (e.g. `2.234%` → `百分之2点2 3 4`). Unspaced `234` after 点 is read as **二百三十四**; spacing forces digit-by-digit
+    /// (二、三、四) like English `spacedFractionDigits`. No ASCII dot remains, so the generic `plainDot` pass does not re-split.
+    private static func bcpIsChineseStylePercentRewrite(_ bcp: String) -> Bool {
+        if bcp.hasPrefix("lzh") { return true }
+        switch bcp {
+        case "zh", "yue", "wuu", "hak", "nan":
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// Rewrites `2.344%` / `2,34%` **before** dollar / plain-decimal rules so CJK/ja/ko TTS do not break % values into a decimal + a stray
+    /// `4%` chunk. **English** keeps existing behavior (user report: already OK with spaced fraction + `%`).
+    private static func applyPercentSignSpeechRewrites(
+        _ text: String,
+        bcp: String,
+        useComma: Bool
+    ) -> String {
+        var s = text
+        let isChinese = bcpIsChineseStylePercentRewrite(bcp)
+        if isChinese {
+            s = replaceRegexMatches(
+                in: s,
+                pattern: #"(?<![0-9.€$₹₽])(-?)([0-9]+)\.([0-9]+)\s*(?:%|％)"#
+            ) { g in
+                let sign = g[1] == "-" ? "负" : ""
+                let frac = spacedFractionDigits(g[3])
+                return sign + "百分之" + g[2] + "点" + frac
+            }
+            if useComma {
+                // Decimal comma, short fraction: `2,3%` → 百分之2点3 (avoid matching `1,000%` with many digits on the right).
+                s = replaceRegexMatches(
+                    in: s,
+                    pattern: #"(?<![0-9,€$₹₽])(-?)([0-9]+),([0-9]{1,2})\s*(?:%|％)"#
+                ) { g in
+                    let sign = g[1] == "-" ? "负" : ""
+                    let frac = spacedFractionDigits(g[3])
+                    return sign + "百分之" + g[2] + "点" + frac
+                }
+            }
+        } else if bcp == "ja" {
+            s = replaceRegexMatches(
+                in: s,
+                pattern: #"(?<![0-9.€$₹₽])(-?)([0-9]+)\.([0-9]+)\s*(?:%|％)"#
+            ) { g in
+                let sign = g[1] == "-" ? "マイナス" : ""
+                let frac = spacedFractionDigits(g[3])
+                return sign + g[2] + "ポイント" + frac + "パーセント"
+            }
+        } else if bcp == "ko" {
+            s = replaceRegexMatches(
+                in: s,
+                pattern: #"(?<![0-9.€$₹₽])(-?)([0-9]+)\.([0-9]+)\s*(?:%|％)"#
+            ) { g in
+                let sign = g[1] == "-" ? "마이너스" : ""
+                let frac = spacedFractionDigits(g[3])
+                return sign + g[2] + "점" + frac + "퍼센트"
+            }
+        }
+        return s
+    }
+
+    /// Voices where English-style `1,234,235` / `1,345` (comma every three digits) should be collapsed to digits-only so TTS reads
+    /// a single cardinal (e.g. **en**: “one thousand three hundred and forty-five”), not “one comma …”. CJK/SEA: same plus avoid
+    /// treating `,` as a decimal marker where **yue/wuu/…** overlap with European rules.
+    private static func bcpWantsEnglishThousandSeparatorsStrippedInSpeech(_ bcp: String) -> Bool {
+        if bcp.hasPrefix("lzh") { return true }
+        switch bcp {
+        case "en", "cy":
+            return true
+        case "zh", "yue", "wuu", "hak", "nan", "ja", "ko", "th", "vi", "id", "ms", "my", "km", "lo":
+            return true
+        default:
+            return false
+        }
+    }
+
+    /// True when `raw` is English-style grouped thousands: first segment 1–3 digits, every following segment **exactly** 3 digits.
+    /// Rejects `1,3434,343`, `12,34,567`, and other broken groupings so we do not “fix” garbage into one big integer for TTS.
+    private static func isWellFormedEnglishThousandsIntegerToken(_ raw: String) -> Bool {
+        let parts = raw.split(separator: ",", omittingEmptySubsequences: false)
+        guard parts.count >= 2 else { return false }
+        guard let first = parts.first.map(String.init), (1 ... 3).contains(first.count), first.allSatisfy(\.isNumber) else { return false }
+        for seg in parts.dropFirst() {
+            let s = String(seg)
+            guard s.count == 3, s.allSatisfy(\.isNumber) else { return false }
+        }
+        return true
+    }
+
+    /// Strips `,` from **well-formed** US/UK thousands (`1,234,235` → `1234235`). Does **not** rewrite odd punctuation like
+    /// `1,3434,343` (fails checksum). `(?<![0-9,])` on the plain case avoids matching a trailing `34,567` inside `12,34,567`.
+    /// Order: **currency**, then **decimal** int part, then plain integers.
+    private static func stripEnglishStyleThousandSeparatorsForTTS(_ text: String) -> String {
+        var s = text
+        s = replaceRegexMatches(
+            in: s,
+            pattern: #"\$([0-9]{1,3}(?:,[0-9]{3})+)(?![0-9,])"#
+        ) { g in
+            let raw = g[1]
+            guard isWellFormedEnglishThousandsIntegerToken(raw) else { return g[0] }
+            let digits = raw.replacingOccurrences(of: ",", with: "")
+            return "$" + digits
+        }
+        s = replaceRegexMatches(
+            in: s,
+            pattern: #"(?<![0-9])([0-9]{1,3}(?:,[0-9]{3})+)\.([0-9]+)(?![0-9])"#
+        ) { g in
+            let ip = g[1]
+            guard isWellFormedEnglishThousandsIntegerToken(ip) else { return g[0] }
+            let intPart = ip.replacingOccurrences(of: ",", with: "")
+            return intPart + "." + g[2]
+        }
+        s = replaceRegexMatches(
+            in: s,
+            pattern: #"(?<![0-9,])([0-9]{1,3}(?:,[0-9]{3})+)(?![0-9,])"#
+        ) { g in
+            let raw = g[1]
+            guard isWellFormedEnglishThousandsIntegerToken(raw) else { return g[0] }
+            return raw.replacingOccurrences(of: ",", with: "")
+        }
+        return s
+    }
+
     private static func textForSpeechSynthesis(_ text: String, voiceIdentifier: String) -> String {
         let loc = ttsNumberLocale(forVoiceIdentifier: voiceIdentifier)
+        let bcp = bcp47PrimaryLanguageCode(forVoiceIdentifier: voiceIdentifier)
         let dec = loc.dec
         let usd = loc.usd
         let rangeWord = loc.range
@@ -5343,15 +5470,23 @@ enum SpeechVoiceLibrary {
         let scaleGroup = #"([Tt]rillion|[Tt]illion|milliards?|Milliarde?n?|milliard|milliards?|[Bb]illions?|[Mm]illions?|[Tt]housand|tausend|mille)"#
 
         var s = text
-        // Normalize numeric ranges first so `2.3-3.5` / `$2.3-$3.5` keeps the connector in speech.
+        if bcpWantsEnglishThousandSeparatorsStrippedInSpeech(bcp) {
+            s = stripEnglishStyleThousandSeparatorsForTTS(s)
+        }
+        // Normalize numeric ranges so `-` / `–` / `—` is spoken as **to** (e.g. 到 / to / bis), not minus. Includes optional
+        // `%` / `％` on either side (`2.235% - 2.345%`, `2.235%-2.345%`) so the dash is still replaced—otherwise CJK voices
+        // (notably Cantonese) often read the hyphen as **negative** between percents.
         s = replaceRegexMatches(
             in: s,
-            pattern: #"(?<![0-9])(\$?[0-9]+[.,][0-9]+)\s*[-–—]\s*(\$?[0-9]+[.,][0-9]+)(?![0-9])"#
+            pattern: #"(?<![0-9])(\$?[0-9]+[.,][0-9]+)(\s*(?:%|％))?\s*[-–—]\s*(\$?[0-9]+[.,][0-9]+)(\s*(?:%|％))?(?![0-9])"#
         ) { groups in
             let lhs = groups.count > 1 ? groups[1] : ""
-            let rhs = groups.count > 2 ? groups[2] : ""
-            return "\(lhs) \(rangeWord) \(rhs)"
+            let pct1 = groups.count > 2 ? groups[2] : ""
+            let rhs = groups.count > 3 ? groups[3] : ""
+            let pct2 = groups.count > 4 ? groups[4] : ""
+            return "\(lhs)\(pct1) \(rangeWord) \(rhs)\(pct2)"
         }
+        s = applyPercentSignSpeechRewrites(s, bcp: bcp, useComma: useComma)
 
         if useComma {
             s = replaceRegexMatches(
