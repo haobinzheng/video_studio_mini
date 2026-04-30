@@ -397,9 +397,8 @@ struct NarrationPreviewBuilder {
         segments: [String],
         utteranceDurations: [TimeInterval],
         totalDuration: TimeInterval,
-        voiceIdentifier: String
+        voiceIdentifier _: String
     ) -> [SubtitleCue] {
-        let tag = SpeechVoiceLibrary.voiceLanguageTag(forVoiceIdentifier: voiceIdentifier)
         var cues: [SubtitleCue] = []
         var cursor: TimeInterval = 0
 
@@ -413,15 +412,7 @@ struct NarrationPreviewBuilder {
 
             let start = cursor
             let end = min(cursor + utteranceDuration, totalDuration)
-            let lines = CaptionTextChunker.splitForCaptions(normalizedText: text, voiceLanguageTag: tag)
-            let shown: String
-            if lines.count > 1 {
-                shown = CaptionTextChunker.strippedCaptionForDisplay(
-                    lines.map { CaptionTextChunker.displayCaptionLine(for: $0) }.joined(separator: "\n")
-                )
-            } else {
-                shown = CaptionTextChunker.strippedCaptionForDisplay(CaptionTextChunker.displayCaptionLine(for: text))
-            }
+            let shown = CaptionTextChunker.strippedCaptionForDisplay(CaptionTextChunker.displayCaptionLine(for: text))
             cues.append(SubtitleCue(text: shown, start: start, end: end))
             cursor = min(cursor + utteranceDuration, totalDuration)
         }

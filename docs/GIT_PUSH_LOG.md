@@ -19,6 +19,64 @@ It points to the current stable commit on `main`, so we now have a clean referen
 
 ## Log
 
+### 2026-04-26 — Pushed: `pro-version` @ `b423343` (Script tab: fold long instructions into disclosures)
+
+- **Git:** `git push origin pro-version` — `ae90b10..b423343` (this doc and **DESIGN_NOTES** updated **locally** after the push, per repo policy; not in this push).
+- **Summary:** **Script tab cleanup:** converted three long always-visible instruction blocks into collapsible **`DisclosureGroup`** sections with persisted **`@AppStorage`** state, matching the Pro tab’s “How assigning works” pattern. This keeps guidance available on demand while reducing visual clutter during normal script editing. **Keys:** `fluxcut.scriptIntroHelpExpanded`, `fluxcut.scriptReloadVoicesHelpExpanded`, `fluxcut.scriptHideVoicesHelpExpanded`. **File:** `CapcutApp/ContentView.swift`.
+
+### 2026-04-26 — Pushed: `pro-version` @ `ae90b10` (TTS number parsing tighten-up: percent/range/thousands)
+
+- **Git:** `git push origin pro-version` — `6a27a5e..ae90b10` (this doc and **DESIGN_NOTES** updated **locally** after the push, per repo policy; not in this push).
+- **Summary:** **`SpeechVoiceLibrary.textForSpeechSynthesis`** hardening for multilingual numeric speech: (1) `%` rewrite for Chinese/Japanese/Korean decimal percents so fractions are read digit-by-digit (`2.234%`), (2) numeric-range rewrite now supports optional `%`/`％` on both sides so Cantonese does not read `-` as minus in `2.235%-2.345%`, (3) English-style thousands stripping (`1,234,343` → `1234343`) for a selected locale set including **en**, with strict grouping validation so malformed forms like `1,3434,343` are not normalized.
+
+### 2026-04-26 — Pushed: `pro-version` @ `6a27a5e` (Music Library: Pro one-level folders; Add in bottom bar for search)
+
+- **Git:** `git push origin pro-version` — `2ed38b3..6a27a5e` (this doc and **DESIGN_NOTES** updated **locally** after the push, per repo policy; not in this push).
+- **Summary:** **Music Library (Pro):** one-level user folders under **`Documents/FluxCutMusicFolders/<name>/`**; imports also at **Documents** root = **Unfiled**; **stable** library **`id`** from relative path (SHA-256) so folder moves do not break references; **All / Unfiled / folder** scope, **context Move**, **New folder** / **Rename folder** / **Delete empty** (toolbar folder menu), rename/move tracks with soundtrack URL + optional combined-bed rebuild. **`performCurrentProjectCleanup`** protects the folder tree. **Gated** by **`isEditStoryProEnabled`**. **Music Library UI:** **Add** (`+`) moved from the navigation **trailing** bar to the **bottom safe-area** bar next to **Import** / **Extract** so it stays available when **`.searchable`** is active (iOS often hides trailing toolbar items during search). **Files:** `CapcutApp/AppViewModel.swift`, `CapcutApp/ContentView.swift`.
+
+### 2026-04-26 — Pushed: `pro-version` @ `2ed38b3` (Music Library import, extract overlay, narration chunking)
+
+- **Git:** `git push origin pro-version` — `62296ac..2ed38b3` (this doc and **DESIGN_NOTES** updated **locally** after the push, per repo policy; not in this push).
+- **Summary:** **Music Library — Import from Files:** synchronous security-scoped access + copy in the `fileImporter` result handler (`ingestPickedFilesIntoMusicLibraryFromFileImporter`), then main-actor **`reloadMusicLibraryFromDisk()`** (replaces **`refreshMusicLibrary`** early-return that could skip reload). **Removed** the post-share “Import to Music Library?” prompt for extracted soundtracks (unreliable). **Extract Soundtracks:** full-screen dimmed overlay with **`ProgressView`** + **`statusMessage`** on the Music Library sheet while video loads and audio extracts, before the system Save/share sheet. **`CaptionTextChunker` / `PreviewNarrationSegmentBudget` / `WatermarkSettingsDetailView`:** small fixes. **Files:** `CapcutApp/AppViewModel.swift`, `CapcutApp/ContentView.swift`, `CapcutApp/CaptionTextChunker.swift`, `CapcutApp/PreviewNarrationSegmentBudget.swift`, `CapcutApp/WatermarkSettingsDetailView.swift`, `CapcutApp.xcodeproj/project.pbxproj`.
+
+### 2026-04-25 — Pushed: `pro-version` @ `62296ac` (TTS: decimals, $ amounts, ranges, voice-locale)
+
+- **Git:** `git push origin pro-version` — `87ffcef..62296ac` (this doc and **DESIGN_NOTES** updated **locally** after the push, per repo policy; not in this push).
+- **Summary:** `AVSpeechSynthesizer` treated `.` in numbers as phrase breaks; `chunkedText` also split on `.` and broke `2.6` into two utterances. **Fixes:** (1) **Narration chunking** — `narrationPiecesByPunctuationPreservingDecimalPoints` does not treat ASCII `.` as a break when it sits between two digits (so `$2.6` stays one segment). (2) **`textForSpeechSynthesis`** — voice BCP-47–aware decimal/currency words; comma-decimal locales; **$** + scale (Billion/Trillion, capture group fix); **spaced fraction digits** so `3.45` is not read as “forty-five”; **numeric ranges** `2.3-3.5` / `$2.3-$3.5` → localized connector (e.g. `to` / `到`). **Files:** `CapcutApp/AppViewModel.swift` (`SpeechVoiceLibrary`), `CapcutApp.xcodeproj/project.pbxproj`.
+
+### 2026-04-24 — Pushed: `pro-version` @ `87ffcef` (1B: force light UI when iPhone is in Dark Mode)
+
+- **Git:** `git push origin pro-version` — `c5e060b..87ffcef` (this doc updated **locally** after the push, per repo policy; not in this push).
+- **Summary:** TestFlight found **illegible UI** (white/light semantic text on light cards) when the device used **Dark Mode**. **1B (defer full 1A):** `Info.plist` → **`UIUserInterfaceStyle` = `Light`**, and **`FluxCutApp`** root `ZStack` → **`.preferredColorScheme(.light)`** so the app always presents as **light** while the user can keep a dark system for other apps. **Files:** `CapcutApp/Info.plist`, `CapcutApp/FluxCutApp.swift`.
+
+### 2026-04-22 — Pushed: `pro-version` @ `5237390` (4K Video/Slideshow: resolution math + full-frame upscale; README; Privacy manifest)
+
+- **Git:** `git push origin pro-version` — `40d7f4a..5237390` (this doc updated **locally** after the push, per repo policy; not in this push).
+- **Summary — root cause of “4K but small” (see commit body for full detail):**
+  1. **Output pixel size:** Per-axis `min(merged, user)` and similar could shrink below the chosen resolution. In `outputSizeFittingUserResolution`, `t = min(1, capLong / longIn)` **blocked upscaling** the stitch to the user’s long edge, so dimensions could stay tiny. **Slideshow** `effectiveSlideshowExportSettings` now uses aspect-guarded `max` + uniform `outputSizeFittingUserResolution` (not per-axis `min`). **Photo-only Slideshow** no longer caps at ~2560 when **`videoModeSettings`** is set: user resolution floor + same fitting path + user frame rate. **`resolvedRenderProfile` (Video)** uses `exportVideoStitchOutputSize` for consistency with export. **Same-aspect branch** in `outputSizeFittingUserResolution` returns the scaled `s` from cover+contain (not a wrong `evenPixelSize(uw,uh)`).
+  2. **Small picture inside a big frame:** `fittedTransform` with `preserveSourceScale: true` used `scale = min(fitScale, 1)`, so source was **never upscaled**; 720p appeared as a small inset in a 4K output. **Fix:** `preserveSourceScale` is **true** only when `videoModeSettings == nil` (preview) for **Video stitch** and **`exportRealLifeComposition`** (smooth Slideshow/Story); final export with user resolution allows upscale to **fill** the output (aspect-fit).
+- **Also in commit:** root **`README.md`**, **`CapcutApp/PrivacyInfo.xcprivacy`** added to the app target, minor **`AppViewModel` / `ContentView`** copy or wiring.
+
+### 2026-04-22 — Pushed: `pro-version` @ `40d7f4a` (Edit Story assign sheets: copyable Block script + Segment script)
+
+- **Git:** `git push origin pro-version` — `d9fc169..40d7f4a` (this doc updated **locally** after the push, per repo policy; not in this push).
+- **Summary:** **`ContentView`:** `.textSelection(.enabled)` on **`Text(assignSheetBlockScriptText)`** (media **Block** assign full-screen) and **`Text(musicAssignSheetScriptText)`** (music **Assign segment** sheet) so users can select and **Copy** script text (e.g. for search or notes).
+
+### 2026-04-22 — Pushed: `pro-version` @ `d9fc169` (FCS candidate v1: FluxCut, Pro IAP, intros, video URL invalidation)
+
+- **Git:** `git push origin pro-version` — `45b432b..d9fc169` (this doc and **DESIGN_NOTES** updated **locally** after the push, per repo policy; not in this push).
+- **Summary:** **FCS candidate v1** — app entry **`FluxCutApp`**, **StoreKit 2** Pro (`ProEntitlementManager`, non-consumable), **shared scheme** + root **`FluxCut.storekit`**, export names **`fluxcut-mini-*`**, **Info** / copy **FluxCut**. **Introduction:** ~800w basic / ~extended Pro default scripts; free-tier **caption** under script removed from UI. **Pro** card: no **price** on screen (sheet shows it). **Bugfix:** `clearRenderedVideoFileReferencesIfPresent` when **media** or **soundtrack** changes so `exportedVideoURL ?? videoPreviewURL` does not show a stale final over a new preview. **`WatermarkSettingsDetailView`** touch.
+
+### 2026-04-22 — Pushed: `pro-version` @ `45b432b` (Pro watermark: settings, export, sizing, mark strength)
+
+- **Git:** `git push origin pro-version` — range `328e4f5..45b432b` (this doc updated **locally** after the push; not part of that push, per repo doc policy).
+- **Summary:** **Settings → Video → Watermark** with **`WatermarkSettingsDetailView`**: text vs image, **mark strength** (10–100% of layer opacity; default **0.85** for new prefs), **size** scale (~35–400% of resolution-based default), **position** corners, import PNG, style preview (overlay alignment). **Pro gate:** `isEditStoryProEnabled` + `reconcileProWatermarkGate`; export uses `videoWatermarkSettingsForExport()`. **`VideoExporter`:** `WatermarkSettings` with `sizeScale`, text/image layout, image **drop shadow** for contrast, **upscale** small sources to target span (removed `min(…,1)` cap), tighter **safe padding**, **~70px@1080**-relative base and frame-relative max span. **ContentView** row shows Pro vs On/Off.
+
+### 2026-04-21 — Pushed: `pro-version` @ `328e4f5` (Script intro, settings support, free-tier, export invalidation)
+
+- **Git:** `git push origin pro-version` — range `a3f349e..328e4f5` (this doc updated **locally** after the push; not part of that push, per repo doc policy).
+- **Summary:** Longer default **Script** / **Introduction** copy (~6 min read, under Latin free word cap). **Settings → About** line for sharing in **Video** / **Slideshow** with or without script. **Free tier:** non-Latin script cap **1800** characters (was 1200). **Voice:** auto-pick first voice for language; **`markAllVideoRendersDirty`** clears stale **`videoPreviewURL`** / **`exportedVideoURL`**. New **`SettingsSupportViews.swift`**; **`.gitignore`**: `web3forms_key`, **`.build/`**.
+
 ### 2026-04-20 — Slideshow: center portrait video in 16:9 frame (fix left-heavy letterbox)
 
 - **Change:** **`VideoFrameCache`** uses a **square** **`maximumSize`** (max of render edges) instead of the 16:9 **`renderSize`** so **`AVAssetImageGenerator`** does not embed 9:16 frames in a wide padded bitmap; **`centeredAspectFitRect`** replaces **`AVMakeRect`** for explicit centering using **`cgImage`** pixel dimensions.

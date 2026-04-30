@@ -21,6 +21,16 @@ Design note:
 - `Slideshow` will get the same export controls UI as `Video`, and the exporter will honor high settings when media is the clock
 - if narration is longer than media, keep the same UI selection but clamp the actual `4K 60 High` path down to a safer profile under the hood so FluxCut does not promise a combination that is too risky for the looping case
 
+### 4K / user resolution — export invariants (2026-04-22, `VideoExporter`)
+
+- **Two different “small” failures were fixed:** (1) **output width/height** not actually reaching the user’s chosen resolution because of bad merge/min math and a **no-upscale** `t` clamp; (2) **correct output dimensions** but the **video layer** stayed at native resolution (`min(fitScale, 1)`) so the picture looked like a small inset—addressed by **`preserveSourceScale` only for preview** on stitched paths.
+- **Uniform fit** to the user resolution box is preferred over independent per-axis `min` with merged/stitch sizes.
+- **Photo-only Slideshow** with explicit **Video mode** settings must not use a hard **max long edge** (e.g. 2560) that blocks **4K**; use the user’s resolution as the floor when `videoModeSettings` is present.
+
+### Appearance: light-only for now (1B) (2026-04-24)
+
+- The main UI is **visually a light** design (pastel cards, light gradients). With **system Dark Mode** on, **semantic** text (`.primary` / `label`) was **light** on **light** surfaces → illegible. **1B** = **`UIUserInterfaceStyle` = Light** in `Info.plist` plus **`.preferredColorScheme(.light)`** on the app root so the app **always** uses **light** appearance until a full **1A** dark theme (tokenized colors for both modes) is implemented.
+
 ## Big-stage video preview (Media tab & Edit Assign)
 
 **Full code design spec (copy-friendly):** [`docs/BIG_PREVIEW_VIDEO_AUTOPLAY_SPEC.md`](BIG_PREVIEW_VIDEO_AUTOPLAY_SPEC.md)
@@ -100,6 +110,7 @@ Implemented in the **Edit Story** tab (optional; Settings → **Show Edit Story 
 - **Media block**: one contiguous range of script **paragraphs** plus ordered pool clips (`AppViewModel.StoryEditBlock`: `firstParagraphIndex`…`lastParagraphIndex`, `mediaItemIDs`). Visual timeline only.
 - **Music segment**: an independent contiguous paragraph range with its own soundtrack choice (`AppViewModel.StoryMusicBedSegment`). It does **not** have to align with media blocks—e.g. media block 1 can be paragraphs 1–3 while music segment 1 spans 1–6.
 - **Edit tab structure**: segmented **Media** | **Music** (when **Edit Story** is on). **Media** is script paragraphs labeled **Block** (track order/imports stay on the main **Music** tab). **Music** shows the same script with music assignment captions. Music **Assign** opens the soundtrack sheet for any valid contiguous paragraph selection; it does **not** require media blocks—you can assign beds before assigning clips on the Media tab.
+- **Assign sheets (2026-04-22):** the full-screen **Block** assign (`assignSheetBlockScriptText`, “Block script”) and music **Assign segment** sheet (`musicAssignSheetScriptText`, “Segment script”) use SwiftUI **`Text` + `.textSelection(.enabled)`** so users can copy the shown script from the system selection menu.
 - While **Edit Story** is on, **Video** tab **Video Mode** is fixed to **Story** (not Video or Slideshow); turning Edit Story off restores the full mode picker.
 - **Script paragraphs help**: A one-line hint stays visible; full instructions sit under a **`DisclosureGroup`** titled **How assigning works**. Expansion is persisted in **`UserDefaults`** via **`@AppStorage("fluxcut.editStoryHelpExpanded")`** (default collapsed). **Media** and **Music** share the same expanded flag so switching tabs keeps the user’s preference.
 - **No “reset all” button** in the Edit card (removed; the old control merged blocks, filled pool media, and cleared music in one step without clear labeling).
@@ -319,6 +330,12 @@ That also means the current implementation idea stays partly true:
 - keep the `high-quality only` rule
 - but redesign the UI so users can actually navigate it by language
 
+### TTS: numbers, currency, and ranges (`SpeechVoiceLibrary`, 2026)
+
+- **Narration chunking** must not split on an ASCII **`.`** when it is a decimal separator (digit on both sides). Otherwise `2.6` and `$2.6` become two utterances and fixes applied only per segment cannot work.
+- **Before** `AVSpeechUtterance`, **`textForSpeechSynthesis`** rewrites the string for the active **voice language** (not UI language): decimal word (e.g. `point` / `点` / `virgule`), **USD** phrasing, optional comma-decimal paths, **spaced fraction digits** (e.g. `3.45` → `3 point 4 5` so the engine does not read `45` as a cardinal), **$** + scale words (Billion, Trillion, etc.), and **numeric ranges** with a localized connector (e.g. `to` / `到`) so `2.3-3.5` is not two disconnected decimals.
+- On-screen script/caption text stays literal; only the string passed to TTS is transformed.
+
 ## Music
 
 Goal:
@@ -535,18 +552,21 @@ Preview:
 - row tap is only for select/de-select
 - preview and selection stay separate
 
-Top actions:
+Top / chrome actions:
 
-- `+` = add selected tracks
-- `Exit` = close Music Library
+- `Exit` (nav leading) = close Music Library
+- Pro folder menu (nav trailing, when Pro): new / rename / delete **empty** folder
+- **Add** (label **Add**, `+`): lives in the **bottom** bar with **Import** and **Extract Soundtracks** so it remains tappable when the library list uses **search** (otherwise iOS + SwiftUI **`.searchable`** often **hides** the **trailing** toolbar, which previously held `+`).
+
+Selection still toggles on row tap; add applies to **all** selected rows (from search results or not).
 
 Add behavior:
 
 - if one or more tracks are selected:
-  - tapping `+` adds all selected tracks to the project soundtrack queue
+  - tapping **Add** adds all selected tracks to the project soundtrack queue
   - then Music Library closes
 - if no tracks are selected:
-  - `+` has no effect
+  - **Add** is disabled (dimmed)
 
 Exit behavior:
 
@@ -563,12 +583,35 @@ State:
 Resulting UX:
 
 - select one or more tracks
-- tap `+` to commit them into the project
+- tap **Add** to commit them into the project
 - tap `Exit` to leave without adding
 
 Design note:
 
 - `Exit` is clearer than `Enter` for this workflow
+
+### Import from Files & extract soundtrack (implementation, 2026-04)
+
+- **Files / `fileImporter`:** Document-picker URLs are only reliably read if **`startAccessingSecurityScopedResource`** and the copy happen **synchronously** in the importer result callback (no extra `Task` or `@MainActor` hop before access). **`ingestPickedFilesIntoMusicLibraryFromFileImporter`** copies into app Documents, then **`reloadMusicLibraryFromDisk()`** refreshes the list (avoids **`refreshMusicLibrary`** skipping when `isLoadingMusicLibrary` was already true).
+- **Post-extract “add to Music Library”** after the share sheet was **removed**; users can **Import** a saved file if they want a library copy.
+- **Extract Soundtracks** (Photos → `.m4a`): while **`isExtractingSoundtrackInBackground`**, the Music Library sheet shows a **dimmed overlay** with **`ProgressView`** and live **`statusMessage`** (“Preparing video…”, “Extracting audio…”) until the system share sheet appears.
+
+### Pro: one-level library folders (2026-04)
+
+- **Entitlement:** **`isEditStoryProEnabled`** (StoreKit Pro). Non‑Pro: full library list, no folder **scope** or **move**; short hint in UI.
+- **On disk:** **`Documents/FluxCutMusicFolders/<sanitizedName>/`**. A single subfolder level only (no nesting under user folder names). Files in **`Documents`** root = **Unfiled** in the app.
+- **Identity:** imported tracks use a **stable id** derived from the path under Documents so renames/moves can update project references; demo rows keep UUID ids.
+- **Project cleanup** must **not** delete the **`FluxCutMusicFolders`** tree wholesale when clearing unused data.
+
+## TTS Number Parsing
+
+### Multilingual numeric speech tighten-up (2026-04-26)
+
+- Scope: `SpeechVoiceLibrary.textForSpeechSynthesis` preprocessing only; on-screen script text remains unchanged.
+- Percent decimals: Chinese/Japanese/Korean percent patterns are rewritten before generic decimal rules so values like `2.234%` are spoken as decimal digits, not `2.23` plus stray `4%` or `234` as a whole number.
+- Ranges with percent: numeric range replacement now supports optional `%`/`％` around both endpoints (`2.235% - 2.345%`, `2.235%-2.345%`) so CJK voices (especially Cantonese) say the locale range connector (for example `到`) instead of minus.
+- Thousands separators: a locale-gated pass strips only well-formed US/UK grouping (for example `1,234,343`) before TTS for targeted languages including `en` and selected East/SE Asia languages.
+- Safety check: malformed grouping (for example `1,3434,343` or `12,34,567`) is intentionally left unchanged; no normalization to a bogus integer.
 
 ## Script Cleanup
 
@@ -593,6 +636,20 @@ Current cleanup targets:
 - after cleanup, `reconcileStoryEditBlocksWithScript()` runs so block ranges stay valid when paragraph count changes
 
 Pause behavior:
+
+## Script Tab Help Density
+
+### Folded instruction blocks (2026-04-26)
+
+- To reduce first-glance noise on the Script page, three guidance paragraphs are now collapsed by default using `DisclosureGroup`, following the same interaction pattern as Pro’s “How assigning works”.
+- Folded sections:
+  - **Script paragraph tips** (blank-line paragraph model / Clean Up guidance)
+  - **Reload voice help** (Enhanced/Premium voice install + reload guidance)
+  - **Hide voice help** (red remove control + restore behavior)
+- Expansion state is persisted in `@AppStorage` so user preference survives tab switches and relaunch:
+  - `fluxcut.scriptIntroHelpExpanded`
+  - `fluxcut.scriptReloadVoicesHelpExpanded`
+  - `fluxcut.scriptHideVoicesHelpExpanded`
 
 - if a title-like line is missing ending punctuation before the next non-empty line, cleanup inserts a pause-ending mark
 - Chinese lines use `。`
@@ -696,3 +753,16 @@ Product framing:
 - **Script → narration preview** builds seekable audio and cues inside **`NarrationPreviewBuilder`**. To keep long scripts responsive, preview may **merge** many small utterances into fewer **`AVSpeechSynthesizer.write`** passes (cap **36** segments after the existing preview duration cap; merged chunk length capped at **4000** characters) and applies a **90 second** timeout per segment so the UI never waits indefinitely on a stuck synthesizer.
 - **Final video export** uses **`VideoExporter`** and the full narration segmentation pipeline: it does **not** apply the preview-only merge batching or the preview synthesis timeout. Caption chunking still shares **`CaptionTextChunker`** / voice tags with preview where designed, but **timing and utterance boundaries** for export follow export rules, not the preview guardrails.
 - **Product intent:** preview is for quick iteration and sync checks; export remains the authoritative render for length, segmentation, and burned captions.
+
+## Free tier: script limits and cached video URLs (2026-04-21)
+
+- **Latin** scripts: free tier uses a **word** cap (`AppViewModel.freeTierLatinWordLimit`, 850 at time of this note). **Non-Latin** script language groups (including CJK and Arabic) use a **Character** count cap (`freeTierNonLatinCharacterLimit`, **1800** at time of this note). Pro removes these caps.
+- **Dirty renders:** `markAllVideoRendersDirty` must clear **`videoPreviewURL`** and **`exportedVideoURL`** (and reset **`exportProgress`**) when present, or the Video tab can keep playing a stale file after script/voice/mix changes even though the UI flags are “out of date.”
+- **FCS v1 (2026-04-22):** `ContentView`’s `activeRenderedVideoURL` uses **`exportedVideoURL ?? videoPreviewURL`**, so a **stale final** can mask a **new preview** if only `hasPending*` is set. **`clearRenderedVideoFileReferencesIfPresent()`** in `AppViewModel` runs when **media** or **soundtrack** inputs change (import, remove, reorder, clear, combined rebuild, sample music, etc.) so both cached file URLs are dropped; not Pro-gated.
+- **Default voice** when the user picks a language: `reconcileSelectedVoice()` should assign the first listed voice in that language if the current ID is not in the set, so export/play never sit on an empty “no voice” selection.
+
+## Pro watermark (video export) (2026-04-22)
+
+- **Gate:** `isEditStoryProEnabled` must be on; `videoWatermarkSettingsForExport()` sets `isEnabled` only when Pro and user toggle are on, and `reconcileProWatermarkGate()` keeps stored “on” from sticking when Pro is off.
+- **Product:** one layer, text or PNG path; **mark strength** multiplies the whole composite (0.1…1.0 in UI; lower = more see-through). **Size** is a `sizeScale` on a resolution-based span (~70px short-side @ 1080 at 1.0, with a frame-relative cap); **image** assets are fitted to the span and **may scale up** (no cap at 1.0) so small logos are not left tiny. **Image** path adds a **soft shadow** to help dark marks on dark footage. **Position** is corner-anchored with `safeOutputPadding` in output space.
+- **Invariants:** re-export to apply changes; preview in Settings is indicative; do not add blend modes as a substitute for mark strength without a product decision (scene-dependent).
