@@ -91,6 +91,7 @@ private enum AppViewModelCopyUtilities {
 @MainActor
 final class AppViewModel: NSObject, ObservableObject {
     private static let savedNarrationDraftKey = "fluxcut.savedNarrationDraft"
+    private static let savedSelectedVoiceIdentifierKey = "fluxcut.selectedVoiceIdentifier"
     private static let hiddenVoiceIdentifiersKey = "fluxcut.hiddenVoiceIdentifiers"
 
     private struct StorageCleanupResult: Sendable {
@@ -450,7 +451,8 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var narrationText = AppViewModel.defaultNarrationIntroductionBasic
     {
         didSet {
-            if !isEditStoryProEnabled {
+            // Pro is resolved asynchronously via StoreKit; do not clamp the saved draft at 1800 chars until then.
+            if !isEditStoryProEnabled && !suppressFreeTierClampUntilProResolved {
                 let clamped = Self.clampedNarrationForFreeTier(narrationText, languageGroup: selectedVoiceLanguage)
                 if clamped != narrationText {
                     narrationText = clamped
@@ -512,6 +514,9 @@ final class AppViewModel: NSObject, ObservableObject {
             }
             selectedVoiceName = selectedVoiceDisplayName
             if oldValue != selectedVoiceIdentifier {
+                if !selectedVoiceIdentifier.isEmpty {
+                    UserDefaults.standard.set(selectedVoiceIdentifier, forKey: Self.savedSelectedVoiceIdentifierKey)
+                }
                 stopLiveNarrationPlayback(reason: "Voice updated. Tap Play Script to hear the new selection.")
                 markAllVideoRendersDirty(reason: "Voice updated. Build a new preview or final render to hear the change.")
                 invalidateNarrationPreviewIfNeeded()
@@ -804,16 +809,32 @@ final class AppViewModel: NSObject, ObservableObject {
     @Published var isEditStoryProEnabled: Bool = false {
         didSet {
             if !isEditStoryProEnabled {
-                applyFreeTierNarrationLimitIfNeeded(announceTrim: true)
-                if isWatermarkEnabled { isWatermarkEnabled = false }
+                // Until `finalizeStoreKitEntitlementBootstrap`, Pro may still be false while entitlements load; do not free-clamp the saved script.
+                if !suppressFreeTierClampUntilProResolved {
+                    applyFreeTierNarrationLimitIfNeeded(announceTrim: true)
+                    if isWatermarkEnabled { isWatermarkEnabled = false }
+                }
             }
         }
     }
 
     /// Call only from `ProEntitlementManager` when StoreKit entitlements change.
     func setProUnlockedFromStoreKitPurchase(_ unlocked: Bool) {
-        if isEditStoryProEnabled == unlocked { return }
-        isEditStoryProEnabled = unlocked
+        if isEditStoryProEnabled != unlocked {
+            isEditStoryProEnabled = unlocked
+        }
+        if !suppressFreeTierClampUntilProResolved, !isEditStoryProEnabled {
+            applyFreeTierNarrationLimitIfNeeded(announceTrim: false)
+        }
+    }
+
+    /// Called once after the first entitlement read (and optional retry) so free-tier script limits apply only after StoreKit has had a chance to report Pro.
+    func finalizeStoreKitEntitlementBootstrap() {
+        suppressFreeTierClampUntilProResolved = false
+        if !isEditStoryProEnabled {
+            applyFreeTierNarrationLimitIfNeeded(announceTrim: false)
+            if isWatermarkEnabled { isWatermarkEnabled = false }
+        }
     }
 
     /// Free tier: Latin-script languages use a **word** cap (space-separated words, e.g. English).
@@ -884,7 +905,23 @@ final class AppViewModel: NSObject, ObservableObject {
         return truncateToLatinWordCount(text, maxWords: freeTierLatinWordLimit)
     }
 
+    /// Whether the script would be shortened under the free tier for the **currently selected** narration voice language.
+    func savedNarrationExceedsFreeTierForSelectedVoice() -> Bool {
+        Self.clampedNarrationForFreeTier(narrationText, languageGroup: selectedVoiceLanguage) != narrationText
+    }
+
+    /// True if we should wait for a second StoreKit read before treating the user as free (voice row may still be default English while the script is long CJK).
+    func narrationLikelyRequiresProLengthGracePeriod() -> Bool {
+        if savedNarrationExceedsFreeTierForSelectedVoice() { return true }
+        if narrationText.count > Self.freeTierNonLatinCharacterLimit,
+           SpeechVoiceLibrary.containsCJKContent(in: narrationText) {
+            return true
+        }
+        return false
+    }
+
     func applyFreeTierNarrationLimitIfNeeded(announceTrim: Bool) {
+        guard !suppressFreeTierClampUntilProResolved else { return }
         guard !isEditStoryProEnabled else { return }
         let clamped = Self.clampedNarrationForFreeTier(narrationText, languageGroup: selectedVoiceLanguage)
         guard clamped != narrationText else { return }
@@ -1026,6 +1063,8 @@ final class AppViewModel: NSObject, ObservableObject {
     private var activeVideoRenderTask: Task<Void, Never>?
     /// Invalidated on **Stop** so `VideoExporter` / narration progress handlers cannot overwrite `statusMessage` after cancel.
     private var activeVideoRenderSessionID: UUID?
+    /// True until the first `setProUnlockedFromStoreKitPurchase` so `narrationText` loaded from disk is not free-clamped while `isEditStoryProEnabled` is still its default `false`.
+    private var suppressFreeTierClampUntilProResolved = true
 
     override init() {
         if let hidden = UserDefaults.standard.array(forKey: Self.hiddenVoiceIdentifiersKey) as? [String] {
@@ -1048,12 +1087,15 @@ final class AppViewModel: NSObject, ObservableObject {
             : SpeechVoiceLibrary.isUsingLooseVoiceFallback
                 ? "\(availableVoices.count) Apple voices ready (Standard fallback)"
                 : "\(availableVoices.count) Apple voices ready"
-        if let firstVoice = availableVoices.first {
+        if let savedId = UserDefaults.standard.string(forKey: Self.savedSelectedVoiceIdentifierKey),
+           availableVoices.contains(where: { $0.id == savedId }) {
+            selectedVoiceIdentifier = savedId
+        } else if let firstVoice = availableVoices.first {
             selectedVoiceLanguage = firstVoice.languageGroup
             selectedVoiceIdentifier = firstVoice.id
             selectedVoiceName = firstVoice.displayName
         }
-        applyFreeTierNarrationLimitIfNeeded(announceTrim: false)
+        // Free-tier clamp runs in `setProUnlockedFromStoreKitPurchase` after StoreKit resolves Pro (see `suppressFreeTierClampUntilProResolved`).
     }
 
     func playNarration() {

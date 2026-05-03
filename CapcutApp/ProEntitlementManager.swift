@@ -48,7 +48,8 @@ final class ProEntitlementManager: ObservableObject {
         self.viewModel = viewModel
     }
 
-    /// Call once on launch after `bind`. Loads the product, syncs entitlements, and subscribes to `Transaction.updates`.
+    /// Call once on launch after `bind`. Loads the product, reads entitlements, and subscribes to `Transaction.updates`.
+    /// Avoids `AppStore.sync()` here: on Xcode runs it pops **Sign in with Apple Account** every launch; **Cancel** leaves entitlements empty so we would wrongly finalize as free and clamp long scripts.
     func start() async {
         guard !isStarting else { return }
         isStarting = true
@@ -56,6 +57,13 @@ final class ProEntitlementManager: ObservableObject {
         listenForTransactions()
         await loadProduct()
         await refreshEntitlements()
+        // Pro can lag `currentEntitlements` briefly after launch; if we’d trim a long script as free, wait one beat and re-read once before finalizing.
+        if viewModel?.isEditStoryProEnabled != true,
+           viewModel?.narrationLikelyRequiresProLengthGracePeriod() == true {
+            try? await Task.sleep(nanoseconds: 450_000_000)
+            await refreshEntitlements()
+        }
+        viewModel?.finalizeStoreKitEntitlementBootstrap()
     }
 
     private func listenForTransactions() {
@@ -95,11 +103,18 @@ final class ProEntitlementManager: ObservableObject {
     /// Re-reads App Store entitlements and updates the view model.
     func refreshEntitlements() async {
         var hasPro = false
-        for await ent in Transaction.currentEntitlements {
-            if case .verified(let t) = ent, t.productID == FluxCutProIAP.productId {
-                hasPro = true
-                break
-            }
+        for await result in Transaction.currentEntitlements {
+            guard case .verified(let t) = result,
+                  t.productID == FluxCutProIAP.productId,
+                  t.revocationDate == nil else { continue }
+            hasPro = true
+            break
+        }
+        // Fallback: `currentEntitlements` can lag after restore/sync in some environments; `latest` matches Apple’s sample flow.
+        if !hasPro, let latest = await Transaction.latest(for: FluxCutProIAP.productId),
+           case .verified(let t) = latest,
+           t.revocationDate == nil {
+            hasPro = true
         }
         viewModel?.setProUnlockedFromStoreKitPurchase(hasPro)
     }
@@ -140,6 +155,10 @@ final class ProEntitlementManager: ObservableObject {
     func restorePurchases() async {
         lastErrorMessage = nil
         lastStatusMessage = nil
+        guard viewModel != nil else {
+            lastErrorMessage = "App is still starting. Close Settings, wait a moment, and try Restore again."
+            return
+        }
         restoreInProgress = true
         defer { restoreInProgress = false }
         do {
@@ -148,7 +167,7 @@ final class ProEntitlementManager: ObservableObject {
             if viewModel?.isEditStoryProEnabled == true {
                 lastStatusMessage = "Your purchases were restored."
             } else {
-                lastStatusMessage = "No Pro purchase found for this Apple ID."
+                lastStatusMessage = "No FluxCut Pro for this Apple ID. Use the account that bought it, a Sandbox tester on device, or in Xcode set the Run scheme’s StoreKit file to FluxCut.storekit, buy once in the simulator, then Restore."
             }
         } catch {
             lastErrorMessage = error.localizedDescription
