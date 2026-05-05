@@ -2341,13 +2341,14 @@ final class AppViewModel: NSObject, ObservableObject {
             activeVideoRenderSessionID = sessionID
             defer {
                 activeVideoRenderTask = nil
+                // A newer `runVideoRender` bumps `activeVideoRenderSessionID`; do not clear export flags for that session.
                 if activeVideoRenderSessionID == sessionID {
                     activeVideoRenderSessionID = nil
-                }
-                if renderQuality == .preview {
-                    isPreparingVideoPreview = false
-                } else {
-                    isExportingVideo = false
+                    if renderQuality == .preview {
+                        isPreparingVideoPreview = false
+                    } else {
+                        isExportingVideo = false
+                    }
                 }
             }
             do {

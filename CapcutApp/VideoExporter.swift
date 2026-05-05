@@ -1871,7 +1871,8 @@ struct VideoExporter {
                 progressMessage: canAttemptStrictPassthrough
                     ? "Exporting a passthrough video stitch."
                     : "Exporting the stitched video.",
-                progressHandler: progressHandler
+                progressHandler: progressHandler,
+                sessionProgressSpan: 0.73...0.88
             )
         } catch {
             guard canAttemptStrictPassthrough else {
@@ -1895,7 +1896,8 @@ struct VideoExporter {
                 ),
                 exportTimeRange: stitchExportRange,
                 progressMessage: "Exporting the stitched video.",
-                progressHandler: progressHandler
+                progressHandler: progressHandler,
+                sessionProgressSpan: 0.73...0.88
             )
         }
     }
@@ -2124,7 +2126,8 @@ struct VideoExporter {
             ),
             exportTimeRange: CMTimeRange(start: .zero, duration: totalDuration),
             progressMessage: "Exporting the \(timingMode.rawValue) video.",
-            progressHandler: progressHandler
+            progressHandler: progressHandler,
+            sessionProgressSpan: 0.73...0.89
         )
     }
 
@@ -2225,7 +2228,8 @@ struct VideoExporter {
             videoComposition: videoComposition,
             exportTimeRange: CMTimeRange(start: .zero, duration: duration),
             progressMessage: "Exporting the \(timingMode.rawValue) video with captions.",
-            progressHandler: progressHandler
+            progressHandler: progressHandler,
+            sessionProgressSpan: 0.90...0.995
         )
     }
 
@@ -2426,66 +2430,79 @@ struct VideoExporter {
         return rootLayer
     }
 
+    /// Rasters the same caption card as **`drawCaption`** (Story per-frame slideshow path). `CATextLayer` + `isWrapped`
+    /// does not match TextKit line breaking / font scaling from **`layoutCaptionForVideo`**, so Slideshow / smooth-Story
+    /// burn-in used to show visibly **more lines** than Story photo+captions for the same string.
+    private func renderCaptionCardUIImage(layout: CaptionLayoutResult) -> UIImage {
+        let boxW = layout.textWidth + (layout.boxPadding * 2)
+        let boxH = layout.textHeight + (layout.boxPadding * 2)
+        let format = UIGraphicsImageRendererFormat.default()
+        format.opaque = false
+        format.scale = UIScreen.main.scale
+        let renderer = UIGraphicsImageRenderer(size: CGSize(width: boxW, height: boxH), format: format)
+        return renderer.image { rc in
+            let cg = rc.cgContext
+            cg.clear(CGRect(x: 0, y: 0, width: boxW, height: boxH))
+
+            if layout.backgroundAlpha > 0 {
+                let boxPath = UIBezierPath(roundedRect: CGRect(x: 0, y: 0, width: boxW, height: boxH), cornerRadius: layout.cornerRadius)
+                cg.setFillColor(UIColor.black.withAlphaComponent(layout.backgroundAlpha).cgColor)
+                cg.addPath(boxPath.cgPath)
+                cg.fillPath()
+                if layout.borderWidth > 0, let borderCG = layout.borderColor {
+                    cg.setStrokeColor(borderCG)
+                    cg.setLineWidth(layout.borderWidth)
+                    cg.addPath(boxPath.cgPath)
+                    cg.strokePath()
+                }
+            }
+
+            let textRect = CGRect(
+                x: layout.boxPadding,
+                y: layout.boxPadding,
+                width: layout.textWidth,
+                height: layout.textHeight + layout.textLayerExtraHeight
+            )
+            UIGraphicsPushContext(cg)
+            if let outline = layout.stylishOutline, let fill = layout.stylishFill {
+                outline.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+                fill.draw(with: textRect, options: [.usesLineFragmentOrigin, .usesFontLeading], context: nil)
+            } else {
+                layout.singleAttributed.draw(
+                    with: textRect,
+                    options: [.usesLineFragmentOrigin, .usesFontLeading],
+                    context: nil
+                )
+            }
+            UIGraphicsPopContext()
+        }
+    }
+
     private func makeAnimatedCaptionLayer(text: String, renderSize: CGSize, captionStyle: CaptionStyle) -> CALayer {
         let layout = layoutCaptionForVideo(text: text, renderSize: renderSize, style: captionStyle)
         let bottomInset = max(renderSize.height * 0.025, 24)
-        let boxRect = CGRect(
+        let boxH = layout.textHeight + (layout.boxPadding * 2)
+        let boxW = layout.textWidth + (layout.boxPadding * 2)
+        // Match `drawCaption` UIKit rect, then map into Core Animation video-composition space (same as watermark burn pass).
+        let uiBox = CGRect(
             x: (renderSize.width - layout.textWidth) / 2 - layout.boxPadding,
-            y: bottomInset,
-            width: layout.textWidth + (layout.boxPadding * 2),
-            height: layout.textHeight + (layout.boxPadding * 2)
+            y: renderSize.height - boxH - bottomInset,
+            width: boxW,
+            height: boxH
         )
+        let boxRect = Self.videoCompositionLayerRect(fromUIKitFrame: uiBox, renderHeight: renderSize.height)
 
         let containerLayer = CALayer()
         containerLayer.frame = boxRect
         containerLayer.opacity = 0
 
-        if layout.backgroundAlpha > 0 {
-            let backgroundLayer = CALayer()
-            backgroundLayer.frame = containerLayer.bounds
-            backgroundLayer.backgroundColor = UIColor.black.withAlphaComponent(layout.backgroundAlpha).cgColor
-            backgroundLayer.cornerRadius = layout.cornerRadius
-            backgroundLayer.masksToBounds = true
-            if layout.borderWidth > 0, let borderColor = layout.borderColor {
-                backgroundLayer.borderWidth = layout.borderWidth
-                backgroundLayer.borderColor = borderColor
-            }
-            containerLayer.addSublayer(backgroundLayer)
-        }
-
-        let textFrame = CGRect(
-            x: layout.boxPadding,
-            y: layout.boxPadding,
-            width: layout.textWidth,
-            height: layout.textHeight + layout.textLayerExtraHeight
-        )
-
-        if let outline = layout.stylishOutline, let fill = layout.stylishFill {
-            let outlineLayer = CATextLayer()
-            outlineLayer.frame = textFrame
-            outlineLayer.string = outline
-            outlineLayer.contentsScale = UIScreen.main.scale
-            outlineLayer.alignmentMode = .center
-            outlineLayer.isWrapped = true
-
-            let fillLayer = CATextLayer()
-            fillLayer.frame = textFrame
-            fillLayer.string = fill
-            fillLayer.contentsScale = UIScreen.main.scale
-            fillLayer.alignmentMode = .center
-            fillLayer.isWrapped = true
-
-            containerLayer.addSublayer(outlineLayer)
-            containerLayer.addSublayer(fillLayer)
-        } else {
-            let textLayer = CATextLayer()
-            textLayer.frame = textFrame
-            textLayer.string = layout.singleAttributed
-            textLayer.contentsScale = UIScreen.main.scale
-            textLayer.alignmentMode = .center
-            textLayer.isWrapped = true
-            containerLayer.addSublayer(textLayer)
-        }
+        let card = renderCaptionCardUIImage(layout: layout)
+        let imageLayer = CALayer()
+        imageLayer.frame = CGRect(origin: .zero, size: CGSize(width: boxRect.width, height: boxRect.height))
+        imageLayer.contents = card.cgImage
+        imageLayer.contentsScale = card.scale
+        imageLayer.contentsGravity = .resize
+        containerLayer.addSublayer(imageLayer)
 
         return containerLayer
     }
@@ -2525,7 +2542,9 @@ struct VideoExporter {
         videoComposition: AVMutableVideoComposition? = nil,
         exportTimeRange: CMTimeRange? = nil,
         progressMessage: String,
-        progressHandler: ((Double, String) -> Void)? = nil
+        progressHandler: ((Double, String) -> Void)? = nil,
+        /// Maps `exportSession.progress` (0…1) into this span while `AVAssetExportSession` runs; avoids a frozen UI % (e.g. 88) for long encodes.
+        sessionProgressSpan: ClosedRange<Double> = 0.88...0.98
     ) async throws {
         if FileManager.default.fileExists(atPath: outputURL.path) {
             try FileManager.default.removeItem(at: outputURL)
@@ -2552,8 +2571,27 @@ struct VideoExporter {
             exportSession.videoComposition = videoComposition
         }
 
-        progressHandler?(0.88, progressMessage)
+        let span = sessionProgressSpan
+        let lo = span.lowerBound
+        let hi = span.upperBound
+        progressHandler?(lo, progressMessage)
+
+        let pollTask = Task { [exportSession] in
+            while !Task.isCancelled {
+                let status = exportSession.status
+                if status == .completed || status == .failed || status == .cancelled {
+                    break
+                }
+                let t = Double(max(0, min(1, exportSession.progress)))
+                let mapped = lo + t * (hi - lo)
+                progressHandler?(mapped, progressMessage)
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
+        }
+        defer { pollTask.cancel() }
+
         try await awaitExportSession(exportSession)
+        progressHandler?(hi, progressMessage)
     }
 
     /// When the render task is cancelled (e.g. **Stop**), `cancelExport()` tears down the in-flight session; relying only on `Task.checkCancellation()` inside long `AVAssetExportSession` work would not stop encoding promptly.
@@ -2865,20 +2903,25 @@ struct VideoExporter {
         return CGRect(x: x, y: y, width: w, height: h)
     }
 
-    /// `AVVideoCompositionCoreAnimationTool` parent space is **bottom-left** origin with **y increasing upward** (same as
-    /// caption overlay layers). `watermarkFrame` is **top-left** / y-down; convert so burned-in video matches `drawWatermarkInPixelBuffer`.
+    /// `AVVideoCompositionCoreAnimationTool` layer frames use the same **video-style** vertical axis as burned-in watermarks:
+    /// convert from **UIKit** (origin top-left, y down) so layout matches `drawCaption` / `drawWatermarkInPixelBuffer`.
+    private static func videoCompositionLayerRect(fromUIKitFrame ui: CGRect, renderHeight: CGFloat) -> CGRect {
+        CGRect(
+            x: ui.origin.x,
+            y: renderHeight - ui.origin.y - ui.height,
+            width: ui.width,
+            height: ui.height
+        )
+    }
+
+    /// `watermarkFrame` is UIKit-style; map into `AVVideoCompositionCoreAnimationTool` space.
     private static func watermarkFrameForCoreAnimationVideoComposition(
         contentSize: CGSize,
         renderSize: CGSize,
         anchor: WatermarkSettings.Anchor
     ) -> CGRect {
         let ui = watermarkFrame(contentSize: contentSize, renderSize: renderSize, anchor: anchor)
-        return CGRect(
-            x: ui.origin.x,
-            y: renderSize.height - ui.origin.y - ui.height,
-            width: ui.width,
-            height: ui.height
-        )
+        return videoCompositionLayerRect(fromUIKitFrame: ui, renderHeight: renderSize.height)
     }
 
     private static func textAlignmentForWatermark(_ anchor: WatermarkSettings.Anchor) -> CATextLayerAlignmentMode {
