@@ -179,8 +179,10 @@ struct VideoExporter {
             case image
         }
 
-        /// Where the watermark sits within the output frame (matches Settings → Watermark “Position”). Uses UIKit-style
-        /// coordinates: origin top-left, y increases down (for **both** `CALayer` and string drawing in the flipped pixel buffer).
+        /// Where the watermark sits within the output frame (matches Settings → Watermark “Position”). Layout math uses
+        /// UIKit-style coordinates: origin top-left, y increases down (pixel-buffer export applies this after a vertical flip).
+        /// `AVVideoCompositionCoreAnimationTool` layers use bottom-left / y-up; `makeStaticWatermarkLayer` converts with
+        /// `watermarkFrameForCoreAnimationVideoComposition`.
         enum Anchor: String, Sendable, CaseIterable, Identifiable, Equatable {
             case topLeft
             case topRight
@@ -2863,6 +2865,22 @@ struct VideoExporter {
         return CGRect(x: x, y: y, width: w, height: h)
     }
 
+    /// `AVVideoCompositionCoreAnimationTool` parent space is **bottom-left** origin with **y increasing upward** (same as
+    /// caption overlay layers). `watermarkFrame` is **top-left** / y-down; convert so burned-in video matches `drawWatermarkInPixelBuffer`.
+    private static func watermarkFrameForCoreAnimationVideoComposition(
+        contentSize: CGSize,
+        renderSize: CGSize,
+        anchor: WatermarkSettings.Anchor
+    ) -> CGRect {
+        let ui = watermarkFrame(contentSize: contentSize, renderSize: renderSize, anchor: anchor)
+        return CGRect(
+            x: ui.origin.x,
+            y: renderSize.height - ui.origin.y - ui.height,
+            width: ui.width,
+            height: ui.height
+        )
+    }
+
     private static func textAlignmentForWatermark(_ anchor: WatermarkSettings.Anchor) -> CATextLayerAlignmentMode {
         switch anchor {
         case .topLeft, .bottomLeft: return .left
@@ -2888,7 +2906,7 @@ struct VideoExporter {
             textLayer.isWrapped = true
             textLayer.isOpaque = false
             textLayer.backgroundColor = nil
-            textLayer.frame = Self.watermarkFrame(
+            textLayer.frame = Self.watermarkFrameForCoreAnimationVideoComposition(
                 contentSize: s,
                 renderSize: renderSize,
                 anchor: settings.anchor
@@ -2905,7 +2923,7 @@ struct VideoExporter {
             imageLayer.contents = cg
             imageLayer.contentsGravity = .resizeAspect
             imageLayer.isOpaque = false
-            imageLayer.frame = Self.watermarkFrame(
+            imageLayer.frame = Self.watermarkFrameForCoreAnimationVideoComposition(
                 contentSize: out,
                 renderSize: renderSize,
                 anchor: settings.anchor
