@@ -737,9 +737,14 @@ final class AppViewModel: NSObject, ObservableObject {
         )
     }
 
-    /// Ensures watermark is off in UserDefaults/UX when Pro is off (e.g. first launch, StoreKit reverts to free tier).
+    /// When **Pro is off** (after StoreKit bootstrap), watermark must be **off** in prefs and UI. While
+    /// **`suppressFreeTierClampUntilProResolved`** is **true**, Pro may read **false** briefly—do **not** clear the
+    /// watermark toggle then, so a Pro user’s **Add Watermark** choice survives relaunch once entitlements resolve.
     func reconcileProWatermarkGate() {
-        if !isEditStoryProEnabled, isWatermarkEnabled { isWatermarkEnabled = false }
+        guard !suppressFreeTierClampUntilProResolved else { return }
+        if !isEditStoryProEnabled, isWatermarkEnabled {
+            isWatermarkEnabled = false
+        }
     }
 
     @discardableResult
