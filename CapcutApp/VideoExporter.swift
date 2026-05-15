@@ -730,10 +730,21 @@ struct VideoExporter {
                 progressHandler?(0.9, timingMode == .realLife
                     ? "Burning captions into the slideshow video."
                     : "Burning captions into the smooth story video.")
+                let storyCaptionTypographySize = resolvedRenderProfile(
+                    for: renderQuality,
+                    aspectRatio: aspectRatio,
+                    duration: resolvedDuration,
+                    videoPressure: videoPressure,
+                    timingMode: .story,
+                    mediaItems: mediaItems,
+                    includeCaptions: includeCaptions,
+                    videoModeSettings: nil
+                ).renderSize
                 try await burnCaptionsIntoVideo(
                     videoURL: smoothOutputURL,
                     captionSegments: trimmedCaptionSegments,
                     renderSize: renderProfile.renderSize,
+                    captionTypographyReferenceSize: storyCaptionTypographySize,
                     frameRate: renderProfile.frameRate,
                     captionStyle: captionStyle,
                     outputURL: finalURL,
@@ -2135,6 +2146,10 @@ struct VideoExporter {
         videoURL: URL,
         captionSegments: [CaptionSegment],
         renderSize: CGSize,
+        /// Same canvas **Story** would use for caption layout (`resolvedRenderProfile` with `.story`). When the
+        /// caption-base file is encoded smaller (e.g. Slideshow **Video** resolution), typography is laid out at this
+        /// size then scaled into the real frame so caption weight matches Story.
+        captionTypographyReferenceSize: CGSize,
         frameRate: Int32,
         captionStyle: CaptionStyle,
         outputURL: URL,
@@ -2151,6 +2166,26 @@ struct VideoExporter {
         guard let sourceVideoTrack = try await asset.loadTracks(withMediaType: .video).first else {
             throw ExportError.missingVideoTrack
         }
+
+        let naturalSize = try await sourceVideoTrack.load(.naturalSize)
+        let preferredTransform = try await sourceVideoTrack.load(.preferredTransform)
+        let transformedBounds = CGRect(origin: .zero, size: naturalSize)
+            .applying(preferredTransform)
+            .standardized
+        let trackAlignedSize = CGSize(
+            width: max(round(abs(transformedBounds.width) / 2) * 2, 2),
+            height: max(round(abs(transformedBounds.height) / 2) * 2, 2)
+        )
+        let profileAlignedSize = CGSize(
+            width: max(round(renderSize.width / 2) * 2, 2),
+            height: max(round(renderSize.height / 2) * 2, 2)
+        )
+        /// Burn must match the **encoded** base clip’s pixel size. If the burn composition used a **different**
+        /// `renderSize` than the first-pass export (same **Format** setting or not), `fittedTransform` would
+        /// letterbox/pillarbox—small picture and wrongly scaled captions. Prefer the track’s aligned dimensions.
+        let compositionOutputSize: CGSize = (trackAlignedSize.width >= 2 && trackAlignedSize.height >= 2)
+            ? trackAlignedSize
+            : profileAlignedSize
 
         let composition = AVMutableComposition()
         guard let compositionVideoTrack = composition.addMutableTrack(
@@ -2190,10 +2225,7 @@ struct VideoExporter {
 
         let videoComposition = AVMutableVideoComposition()
         videoComposition.instructions = [instruction]
-        videoComposition.renderSize = CGSize(
-            width: max(round(renderSize.width / 2) * 2, 2),
-            height: max(round(renderSize.height / 2) * 2, 2)
-        )
+        videoComposition.renderSize = compositionOutputSize
         videoComposition.frameDuration = CMTime(value: 1, timescale: frameRate)
 
         let parentLayer = CALayer()
@@ -2204,14 +2236,15 @@ struct VideoExporter {
         videoLayer.frame = parentLayer.frame
         parentLayer.addSublayer(videoLayer)
 
-        let captionsLayer = makeCaptionOverlayLayer(
-            for: captionSegments,
-            renderSize: videoComposition.renderSize,
+        let captionsLayer = makeCaptionOverlayLayerForBurn(
+            segments: captionSegments,
+            compositionSize: compositionOutputSize,
+            typographyReferenceSize: captionTypographyReferenceSize,
             captionStyle: captionStyle
         )
         parentLayer.addSublayer(captionsLayer)
 
-        if let wms = watermarkSettings, wms.isRenderable, let wmLayer = makeStaticWatermarkLayer(renderSize: videoComposition.renderSize, settings: wms) {
+        if let wms = watermarkSettings, wms.isRenderable, let wmLayer = makeStaticWatermarkLayer(renderSize: compositionOutputSize, settings: wms) {
             parentLayer.addSublayer(wmLayer)
         }
 
@@ -2281,6 +2314,31 @@ struct VideoExporter {
         ])
     }
 
+    /// Semibold Normal shrink-to-fit result for the same `text` / `renderSize` (no Stylish line spacing).
+    /// Used so Stylish never lands near the same pt size after its own fit loop.
+    private func normalCaptionFittedFontSize(text: String, renderSize: CGSize) -> CGFloat {
+        let widthScale = max(min(renderSize.width / 720, 1.0), 0.5)
+        let paragraph = captionParagraphStyle()
+        let maxTextWidth = renderSize.width - max(72, 120 * widthScale)
+        let maxTextHeight = max(140, 240 * widthScale)
+        let minimumFontSize = max(14, 20 * widthScale)
+        let portrait = renderSize.width < renderSize.height
+        let baseStart: CGFloat = portrait ? max(18, 34 * widthScale) : max(16, 30 * widthScale)
+        var fontSize = baseStart
+
+        while fontSize >= minimumFontSize {
+            let single = normalCaptionAttributed(text: text, fontSize: fontSize, paragraph: paragraph)
+            let r = single.boundingRect(
+                with: CGSize(width: maxTextWidth, height: .greatestFiniteMagnitude),
+                options: [.usesLineFragmentOrigin, .usesFontLeading],
+                context: nil
+            ).integral
+            if r.height <= maxTextHeight { return fontSize }
+            fontSize -= 2
+        }
+        return minimumFontSize
+    }
+
     private struct CaptionLayoutResult {
         let textWidth: CGFloat
         let textHeight: CGFloat
@@ -2303,15 +2361,27 @@ struct VideoExporter {
             paragraph.lineSpacing = max(4, 5 * widthScale)
         }
         let maxTextWidth = renderSize.width - max(72, 120 * widthScale)
-        let maxTextHeight: CGFloat = style == .stylish
-            ? max(200, 340 * widthScale)
-            : max(140, 240 * widthScale)
-        let minimumFontSize: CGFloat = style == .stylish
-            ? max(15, 21 * widthScale)
-            : max(14, 20 * widthScale)
+        /// Stylish starts ~1.5× larger than Normal; a **fixed** pt cap (e.g. 340) forces the shrink loop to floor the
+        /// font on long / multi-line CJK captions so the burn-in path looks like Normal. Tie the cap to **frame
+        /// height** so portrait slideshows keep a visibly larger plate (product intent: “big” Stylish).
+        let maxTextHeight: CGFloat = {
+            if style == .stylish {
+                let heightBudget = min(renderSize.height * 0.38, 840)
+                return max(280, heightBudget)
+            }
+            return max(140, 240 * widthScale)
+        }()
         let portrait = renderSize.width < renderSize.height
         let baseStart: CGFloat = portrait ? max(18, 34 * widthScale) : max(16, 30 * widthScale)
-        var fontSize: CGFloat = style == .stylish ? baseStart * 1.5 : baseStart
+        let stylishOverNormalFloor: CGFloat = {
+            guard style == .stylish else { return 0 }
+            let normalFit = normalCaptionFittedFontSize(text: text, renderSize: renderSize)
+            return (normalFit * 1.5).rounded(.up)
+        }()
+        let minimumFontSize: CGFloat = style == .stylish
+            ? max(max(17, 22 * widthScale), stylishOverNormalFloor)
+            : max(14, 20 * widthScale)
+        var fontSize: CGFloat = style == .stylish ? max(baseStart * 1.5, stylishOverNormalFloor) : baseStart
 
         var single = normalCaptionAttributed(text: text, fontSize: fontSize, paragraph: paragraph)
         var outline: NSAttributedString?
@@ -2430,15 +2500,52 @@ struct VideoExporter {
         return rootLayer
     }
 
+    /// When **`compositionSize`** is smaller than **`typographyReferenceSize`** (same aspect), lays out captions at the
+    /// reference canvas—matching **Story** font and margins—then scales them into the encoded frame. Avoids “slightly
+    /// smaller” Slideshow captions when **Video** export resolution is below Story’s media-driven canvas.
+    private func makeCaptionOverlayLayerForBurn(
+        segments: [CaptionSegment],
+        compositionSize: CGSize,
+        typographyReferenceSize: CGSize,
+        captionStyle: CaptionStyle
+    ) -> CALayer {
+        let comp = compositionSize
+        let ref = typographyReferenceSize
+        let useStoryTypographyCanvas = Self.aspectRatiosAreClose(ref, comp)
+            && ref.width > comp.width + 0.5
+            && ref.height > comp.height + 0.5
+        guard useStoryTypographyCanvas else {
+            return makeCaptionOverlayLayer(for: segments, renderSize: comp, captionStyle: captionStyle)
+        }
+        let sx = comp.width / ref.width
+        let sy = comp.height / ref.height
+        let uniformScale = min(sx, sy)
+        let host = CALayer()
+        host.frame = CGRect(origin: .zero, size: comp)
+        let scaled = CALayer()
+        scaled.bounds = CGRect(origin: .zero, size: ref)
+        scaled.anchorPoint = CGPoint(x: 0.5, y: 1)
+        scaled.position = CGPoint(x: comp.width / 2, y: comp.height)
+        scaled.setAffineTransform(CGAffineTransform(scaleX: uniformScale, y: uniformScale))
+        let captions = makeCaptionOverlayLayer(for: segments, renderSize: ref, captionStyle: captionStyle)
+        captions.frame = CGRect(origin: .zero, size: ref)
+        scaled.addSublayer(captions)
+        host.addSublayer(scaled)
+        return host
+    }
+
     /// Rasters the same caption card as **`drawCaption`** (Story per-frame slideshow path). `CATextLayer` + `isWrapped`
     /// does not match TextKit line breaking / font scaling from **`layoutCaptionForVideo`**, so Slideshow / smooth-Story
     /// burn-in used to show visibly **more lines** than Story photo+captions for the same string.
     private func renderCaptionCardUIImage(layout: CaptionLayoutResult) -> UIImage {
         let boxW = layout.textWidth + (layout.boxPadding * 2)
         let boxH = layout.textHeight + (layout.boxPadding * 2)
-        let format = UIGraphicsImageRendererFormat.default()
+        let format = UIGraphicsImageRendererFormat()
         format.opaque = false
-        format.scale = UIScreen.main.scale
+        /// One bitmap pixel per **video** pixel (`CALayer` frame is in composition space). Avoids `UIScreen.main`
+        /// when caption cards are built off the main actor during export — wrong scale can squash cards so Stylish
+        /// reads like the Normal pill treatment.
+        format.scale = 1.0
         let renderer = UIGraphicsImageRenderer(size: CGSize(width: boxW, height: boxH), format: format)
         return renderer.image { rc in
             let cg = rc.cgContext
