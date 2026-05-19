@@ -600,6 +600,7 @@ final class AppViewModel: NSObject, ObservableObject {
             }
         }
     }
+
     @Published var includesFinalCaptions = true {
         didSet {
             if oldValue != includesFinalCaptions {
@@ -2943,7 +2944,7 @@ final class AppViewModel: NSObject, ObservableObject {
         ) {
             for url in documentContents {
                 let standardizedURL = url.standardizedFileURL
-                guard !standardizedProtected.contains(standardizedURL) else { continue }
+                guard !urlIsDeletionProtected(standardizedURL, protectedURLs: standardizedProtected) else { continue }
                 result = mergeCleanupResults(result, removeItem(at: standardizedURL))
             }
         }
@@ -3007,6 +3008,22 @@ final class AppViewModel: NSObject, ObservableObject {
         return result
     }
 
+    /// **`protectedURLs`** lists concrete files (e.g. `…/RenderedVideos/<id>/fluxcut-mini-preview.mov`). Cleanup lists
+    /// **parent directories** (`…/RenderedVideos/<id>`). Exact `Set.contains` would always miss → we deleted active
+    /// export folders and broke **Video** / **Story** tab playback after “Clear unused data” (and left stale player URLs).
+    nonisolated private static func urlIsDeletionProtected(_ candidate: URL, protectedURLs: Set<URL>) -> Bool {
+        let c = candidate.standardizedFileURL
+        if protectedURLs.contains(c) { return true }
+        let isDirectory = (try? c.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory == true
+        guard isDirectory else { return false }
+        let cPath = c.path
+        let prefix = cPath.hasSuffix("/") ? cPath : cPath + "/"
+        for protected in protectedURLs {
+            if protected.standardizedFileURL.path.hasPrefix(prefix) { return true }
+        }
+        return false
+    }
+
     nonisolated private static func cleanupDirectoryContents(at directoryURL: URL, keeping protectedURLs: Set<URL>) -> StorageCleanupResult {
         let fileManager = FileManager.default
         guard let contents = try? fileManager.contentsOfDirectory(
@@ -3020,7 +3037,7 @@ final class AppViewModel: NSObject, ObservableObject {
         var result = StorageCleanupResult()
         for url in contents {
             let standardizedURL = url.standardizedFileURL
-            guard !protectedURLs.contains(standardizedURL) else { continue }
+            guard !urlIsDeletionProtected(standardizedURL, protectedURLs: protectedURLs) else { continue }
             result = mergeCleanupResults(result, removeItem(at: standardizedURL))
         }
         return result
